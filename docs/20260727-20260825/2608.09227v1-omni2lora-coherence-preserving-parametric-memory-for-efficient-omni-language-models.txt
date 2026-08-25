@@ -1,0 +1,1834 @@
+Omni2LoRA: Coherence-Preserving Parametric Memory for Efficient Omni
+Language Models
+Puneet Mathur∗, Manan Suri, Dinesh Manocha
+University of Maryland, College Park
+{puneetm, manans, dmanocha}@umd.edu
+Abstract
+Omnimodal language models (OLMs) enable unified audio-
+visual understanding, but processing long joint token sequences
+makes inference computationally prohibitive. While recent
+token compression methods attempt to alleviate this burden,
+compressing modalities in isolation often destroys the temporal
+cross-modal anchors necessary for coherent reasoning. We
+introduce Omni2LoRA, a two-stage framework for efficient para-
+metric memory compression via coherence-preserving context
+distillation that bypasses the token bottleneck entirely. First, a
+Perceiver hypernetwork processes intermediate representations
+from a frozen OLM to encode the multimodal context into a
+full-rank Low-Rank Adaptation (LoRA) adapter in a single
+forward pass. To prevent the resulting parameter footprint from
+scaling linearly with recording length, we optimize a discrete
+rank allocation policy via Group Relative Policy Optimization
+(GRPO) that uses a modality-ablated counterfactual reward to
+explicitly penalize the loss of audio-visual coherence, forcing
+the model to allocate its fixed sub-linear rank budget to syner-
+gistic cross-modal anchors rather than isolated visual features.
+Across three omnimodal backbones (Qwen2.5-Omni-3B/7B,
+InteractiveOmni-4B), Omni2LoRA operating at a 30% rank
+budget outperforms direct full-context inference and strong
+token-compression baselines (OmniZip, OMAC, O-MARC)
+on four audio-visual question answering benchmarks, improv-
+ing average accuracy by 8-12% over the strongest baseline and
+remaining stable under compression ratios as tight as 75%,
+where token-pruning methods degrade sharply. By converting
+multimodal memory into a fixed-budget, reusable parameter
+state, our method drives answer-time multimodal-token load
+to zero, cutting per-query Time to First Token (TTFT) by up to
+12× relative to full-context inference and amortizing to under
+0.5s after a handful of queries, establishing a robust paradigm
+for long-context omnimodal memory compression.
+Introduction
+Omnimodal large language models have recently emerged as
+a promising direction for unified audio, visual, and language
+understanding (Cheng et al. 2024; Xu et al. 2025; Liu et al.
+2026). Unlike vision-language models that primarily rely on
+visual inputs (Wang et al. 2024; Liu et al. 2023a), omnimodal
+models jointly process video frames, audio streams, and
+textual instructions, enabling reasoning over both what is seen
+and what is heard. This capability is particularly important
+for real-world videos, where speech, ambient sounds, scene
+∗Work done at University of Maryland, College Park
+Copyright © 2027, Association for the Advancement of Artificial
+Intelligence (www.aaai.org). All rights reserved.
+Figure 1: Omni2LoRA internalizes audio–visual recordings into
+reusable LoRA memory, enabling zero-context multimodal inference
+with improved efficiency and cross-modal coherence.
+transitions, and visual actions often provide complementary
+evidence for understanding complex events.
+Despite these advances, efficient omnimodal inference re-
+mains a significant challenge. Omni models encode video
+frames and their high-frequency audio waveforms into con-
+tinuous streams of joint visual and acoustic tokens, which
+are fed directly into the language model’s context window.
+Since audio and video are both token-intensive modalities,
+their joint representation can easily produce long multimodal
+sequences, leading to substantial memory overhead and slow
+inference, especially for long recordings. Pushing models past
+their capacity threshold often leads to catastrophic degrada-
+tion, such as losing cross-modal alignment or defaulting to
+incoherent repetitions (Liu et al. 2023b).
+Extensive research has focused on optimizing this con-
+text window footprint through token compression or spatial-
+temporal pruning. Representative approaches include visual
+token merging (Bolya et al. 2022), attention-guided token
+pruning (Chen et al. 2024), and audio-guided dynamic com-
+pression for omnimodal inputs (Tao et al. 2025). However,
+extending compression to synchronized audio-visual inputs
+is non-trivial. Compressing audio and video in isolation can
+remove cross-modal evidence that is necessary for accurate
+reasoning (Tian et al. 2018). A sound becomes meaning-
+ful only when grounded in the visible scene, and a visual
+arXiv:2608.09227v1  [cs.AI]  10 Aug 2026
+
+
+event may remain ambiguous without its corresponding audio
+(Li et al. 2022). Consequently, traditional token compression
+frameworks often inadvertently sacrifice the very audio-visual
+coherence they are designed to process, leaving models unable
+to solve tasks that strictly require joint multimodal evidence.
+We introduce a fundamentally distinct approach that by-
+passes the token context window bottleneck entirely through
+parametric memory compression. Rather than pruning input
+tokens to fit within active sequence bounds, we parametrically
+internalize synchronized multimodal data directly into the
+model’s weight space prior to query generation. Under this
+paradigm, an input audio-visual recording is mapped into
+a discrete, instance-specific Low-Rank Adaptation (LoRA)
+adapter (Hu et al. 2022) generated by a hypernetwork (Ha,
+Dai, and Le 2017) in a single forward pass. Downstream
+queries are subsequently answered by the frozen model op-
+erating solely with these hypernetwork-predicted weights,
+maintaining zero audio or visual tokens in the active context
+window at inference time.
+While parametric internalization successfully bypasses the
+token-space bottleneck, applying it naively to continuous
+multimodal streams merely shifts the scalability bottleneck
+into parameter space. Generating full-rank adapter weights for
+every temporal chunk across all transformer layers produces
+an adapter whose size grows linearly with recording length,
+making parameter storage impractical for long recordings.
+Furthermore, enforcing a uniform rank allocation across time
+ignores the highly bursty nature of audio-visual information.
+As dense visual representations typically exhibit substantially
+larger activation norms than sparse acoustic cues (Wang,
+Tran, and Feiszli 2020), a naive weight generation process is
+highly susceptible to modality collapse. Under a constrained
+parameter budget, the hypernetwork disproportionately al-
+locates capacity to visually dominant background features,
+irreversibly pruning the brief, temporally grounded acoustic
+anchors required for complex cross-modal reasoning. Conse-
+quently, achieving scalable omnimodal memory is not merely
+a matter of capping the adapter size; it necessitates a dynamic
+allocation mechanism that is mathematically incentivized to
+defend audio-visual coherence against visual dominance.
+Main Result (Fig. 1): We present Omni2LoRA, a two-stage
+framework that couples full-rank hypernetwork pretraining
+with coherence-aware rank allocation to achieve optimal
+parametric memory compression. First, a hierarchical Per-
+ceiver hypernetwork (Jaegle et al. 2021) maps synchronized
+audio-visual streams into layer-wise candidate LoRA weights.
+Second, we introduce a reinforcement-learned, discrete allo-
+cation policy that dynamically determines which subset of the
+generated rank directions to retain under a fixed, sub-linear
+adapter budget. To solve the audio-visual coherence problem,
+this policy is optimized via Group Relative Policy Optimiza-
+tion (GRPO) (Shao et al. 2024) using a novel advantage
+shaping mechanism based on unimodal counterfactuals. By
+penalizing degradation specifically on queries that require the
+intersection of audio and video, the allocation policy is math-
+ematically coerced into preserving synergistic cross-modal
+memory. During inference, the multimodal recording is pro-
+cessed exactly once to produce a compact, recording-specific
+adapter, amortizing the initial encoding cost across all future
+interactions. Our main contributions are:
+• Parametric AV Memory Compression: Omni2LoRA is
+a parametric memory compression framework that in-
+ternalizes audio-visual context into model weights via a
+hypernetwork-generated LoRA adapter, enabling omni-
+modal reasoning with zero multimodal tokens in context.
+• Coherence-Aware Rank Allocation: We formulate an
+RL-driven allocation policy that compresses hypernetwork
+adapters into a fixed rank budget, using unimodal coun-
+terfactuals in the GRPO advantage to preserve mutually
+dependent audio-visual anchors.
+• Strong Performance on Audio-Visual Memory Com-
+pression: Omni2LoRA outperforms SOTA compression
+baselines (OmniZip (Tao et al. 2025), OMAC and O-
+MARC (Wu et al. 2026)) by 8-12% across omnimodal
+backbones on UGC-AVQA (Wu et al. 2026), a bench-
+mark strictly requiring joint acoustic-visual evidence, with
+consistent gains on WorldSense (Hong et al. 2025), Om-
+niVideoBench (Li et al. 2025), and DailyOmni (Zhou et al.
+2025). It maintains high cross-modal coherence across
+increasing compression ratios and shows stability across
+frame sampling rates, where token-in-context baselines
+catastrophically degrade.
+• Extreme Inference Efficiency: Converting multimodal
+context into a fixed-budget adapter drives answer-time
+token load to zero, cutting query TTFT by up to 12×
+on VidCapBench (Chen et al. 2025) and amortizing to
+sub-second latency across repeated queries.
+Related Work
+Omnimodal Token Compression.
+Recent omnimodal
+large language models (OLMs) jointly process audio and
+visual streams to enable unified multimodal reasoning, but
+the resulting token sequences incur substantial computational
+and memory costs. Existing methods improve inference ef-
+ficiency through token pruning or merging. Generic token
+reduction methods, including Token Merging (ToMe) (Bolya
+et al. 2022) and layer-wise token pruning for vision-language
+models (Chen et al. 2024), reduce redundant visual rep-
+resentations but are not designed to preserve cross-modal
+dependencies. More recent omnimodal approaches explic-
+itly model audio–visual interactions. OmniZip (Tao et al.
+2025) performs audio-guided dynamic token compression,
+while OMAC and its distilled extension O-MARC (Wu et al.
+2026) preserve query-relevant visual memory and temporally
+aligned acoustic cues during compression. Despite improving
+efficiency, these methods continue to rely on compressed
+multimodal tokens in the context window, limiting scalability
+for long recordings.
+Parametric Memory via LoRA.
+An alternative direction
+replaces token-level storage with parameter-space memory.
+Recent studies show that Low-Rank Adaptation (LoRA) (Hu
+et al. 2022) serves as an effective parametric memory for
+storing contextual information (Back et al. 2026; Xu et al.
+2026), with finite, rank-dependent storage capacity governed
+by a parametric memory scaling law (Xu et al. 2026). To
+mitigate catastrophic forgetting, recent memory management
+
+
+Figure 2: Overview of Omni2LoRA. A synchronized audio–visual recording is first encoded by a frozen omni LM, whose intermediate
+representations are consumed by a Perceiver hypernetwork to generate a full-rank bank of candidate LoRA slots (Stage 1). A trainable scoring
+policy then sequentially selects a fixed-budget subset of slots to construct a compact adapter (Stage 2), which is optimized with GRPO using a
+coherence-aware advantage computed from joint, visual-only, and audio-only frozen reference rollouts, encouraging preservation of cross-modal
+dependencies under severe compression. The resulting adapter allows the frozen backbone to answer inference queries without retaining
+multimodal tokens in its context window.
+frameworks organize multiple adapters into modular memory
+banks with latent routing and retrieval mechanisms (Zheng
+et al. 2026). While these approaches demonstrate the fea-
+sibility of parameter-space memory, they primarily focus
+on textual knowledge rather than synchronized audio–visual
+memory under constrained parameter budgets.
+Context-to-LoRA Hypernetworks.
+Hypernetworks (Ha,
+Dai, and Le 2017) generate task-specific parameters in a
+single forward pass, providing an efficient alternative to it-
+erative gradient-based adaptation. Recent context-to-LoRA
+methods directly map contextual inputs into LoRA adapters.
+Doc2LoRA (Charakorn et al. 2026) internalizes long doc-
+uments into parameter space, while Frames2LoRA (Suri,
+Baskar, and Manocha 2026) encodes long videos into LoRA
+adapters, eliminating visual tokens during inference. We ex-
+tend this paradigm to synchronized audio–visual reasoning
+by introducing a GRPO-based rank allocation policy that
+preserves cross-modal dependencies under a fixed parameter
+budget.
+Methodology
+Omni2LoRA (Fig. 2) compresses synchronized audio–visual
+recordings into the parameter space of a frozen OLM through:
+Stage 1: Full-Rank Hypernetwork Training trains a Per-
+ceiver hypernetwork to generate full-rank LoRA adapters from
+multimodal representations, enabling zero-token inference.
+While this establishes representational capacity, the generated
+adapter rank scales linearly with the number of temporal
+chunks, inadvertently translating the scaling bottleneck into
+parameter space. To prevent the destruction of cross-modal
+reasoning, Stage 2: Memory-Augmented Compression Dis-
+tillation learns a budget-constrained rank allocation policy
+via reinforcement learning to preserve cross-modal anchors
+essential for coherent audio–visual reasoning.
+Problem Formulation
+Let v denote a synchronized audio-visual recording, i an
+internalization instruction, q a downstream text query, and y
+the target response. Let E denote the frozen OLM encoder
+and F the frozen OLM answer model. We partition v into T
+non-overlapping temporal chunks {v1, . . . , vT }. For chunk
+vt, the encoder jointly processes the multimodal streams to
+produce layer-wise hidden states:
+Ct = E(vt, i) ∈RL×S×D
+(1)
+where L is the number of transformer layers, S is the fused
+audio-visual sequence length, and D is the hidden dimension.
+A trainable hypernetwork Hϕ maps Ct to a set of candidate
+LoRA factors for each target linear module in F:
+{Aℓ,m,t,r, Bℓ,m,t,r}Rmax
+r=1
+= Hϕ(Ct),
+ℓ∈[1, L], m ∈[1, M]
+(2)
+where ℓindexes transformer layers, m indexes target linear
+modules, and r indexes the Rmax rank directions. Hϕ acts as
+
+
+a hierarchical Perceiver-style resampler (Jaegle et al. 2021),
+utilizing cross-attention to distill the representations into rank
+factors. For a frozen linear layer W ∈Rdout×din, the fully
+composed adapter across all chunks yields the forward pass:
+y = xW ⊤+
+T
+X
+t=1
+Rmax
+X
+r=1
+s (xA⊤
+ℓ,m,t,r) Bℓ,m,t,r
+(3)
+where s is a fixed scaling factor. During training, E and F
+remain entirely frozen.
+Stage 1: Full-Rank Hypernetwork Training
+Hϕ is pre-trained via teacher-forced cross-entropy against
+cached teacher-generated audio-visual captions. For a training
+instance (v, i, p, y), we instantiate the complete candidate
+bank of T · L · M · Rmax rank-one components and optimize:
+L(ϕ) = −
+X
+τ
+log pϕ
+ yτ | y<τ, p, θ(v)
+
+(4)
+where θ(v) denotes the full generated adapter. At convergence,
+Hϕ is frozen, functioning as a deterministic mapping from
+an input recording to a comprehensive bank of |K| = T · L ·
+M · Rmax candidate rank-one LoRA updates, called slots.
+Stage 2: Memory-Augmented Compression
+Distillation
+Deploying the full slot bank at inference requires a total rank
+budget that scales linearly with T, necessitating compres-
+sion. However, compressing modalities independently risks
+removing the cross-modal evidence necessary for accurate
+reasoning (Tian et al. 2018; Li et al. 2022). To solve this audio-
+visual coherence problem while respecting a fixed budget, we
+formulate rank allocation as a compression-distillation task,
+following the memory-augmented compression framing of
+prior work (Wu et al. 2026). We define an allocation Ksel ⊂K
+such that |Ksel| = Rtotal. This hierarchical task requires deter-
+mining which chunks contain query-relevant information, and
+which specific rank directions within those chunks efficiently
+encode cross-modal memory.
+Scoring Network.
+A lightweight scoring network gψ is
+conditioned on the pooled audio-visual summary of each
+chunk, ¯Ct = mean(Ct), and a positional embedding of
+(ℓ, m, r) to produce a scalar logit zℓ,m,t,r = gψ( ¯Ct, ℓ, m, r) ∈
+R. gψ operates independently of the continuous A, B weights;
+only ψ is updated in Stage 2.
+Sequential Without-Replacement Sampling.
+To optimize
+gψ via policy-gradient, allocations are sampled sequentially.
+At step k, conditioned on the selected slots o<k, the next slot
+is drawn via softmax:
+πψ(ok | o<k, v) =
+exp(zok)
+P
+j∈K\o<k exp(zj)
+(5)
+The probability of the full allocation is πψ(Ksel | v) =
+QRtotal
+k=1 πψ(ok | o<k, v). This autoregressive factorization
+ensures clipped importance-ratio training remains mathemat-
+ically well-defined for parameter sub-selection.
+Reward Function. Each rollout is scored using a combination
+of accuracy and format adherence: R = 1
+2 Racc + 1
+2 Rfmt, both
+computed via lightweight rule-based checks rather than an
+auxiliary judge model, keeping per-rollout reward computa-
+tion cheap during RL sampling.
+Coherence-Aware Advantage Shaping
+Optimizing gψ
+solely to maximize the base reward R risks an allocation
+collapse toward visually dominant features, as visual tokens
+typically dominate intermediate representation norms. This
+can inadvertently prune subtle acoustic rank directions, de-
+stroying the cross-modal evidence necessary for accurate
+reasoning. To explicitly penalize the loss of audio-visual
+coherence, we introduce a unimodal counterfactual advantage
+shaping mechanism. For every training query q over record-
+ing v, we evaluate the frozen answer model F (without the
+adapter) under three distinct full-token context baselines to
+precompute fixed reference rewards, cached once and reused
+throughout Stage 2 training since F remains frozen: (i) Joint
+AV Reference (RAV): F answers q utilizing the full synchro-
+nized audio-visual context. (ii) Visual-Only Reference (RV):
+F answers q with the audio stream masked. (iii) Audio-Only
+Reference (RA): F answers q with the video frames masked.
+We quantify the intrinsic cross-modal necessity of query q
+via the Audio-Visual Dependence Score Ω(q), defined as the
+performance degradation under optimal unimodal context:
+Ω(q) = ReLU
+
+RAV −max(RV, RA)
+
+(6)
+A high Ω(q) isolates queries that strictly require the synthesis
+of both modalities. Next, we evaluate the allocated student
+branch. G allocations are sampled from πψ(· | v). For each,
+F answers q using strictly the budget-constrained adapter,
+yielding a rollout reward Ralloc
+i
+. We calculate the base para-
+metric degradation score ∆i, where τ is small constant for
+numerical stability:
+∆i = ReLU
+ RAV −Ralloc
+i
+
+|RAV| + τ
+(7)
+To enforce coherence, we construct a penalty multiplier that
+amplifies the degradation gap for highly cross-modal queries:
+˜∆i = ∆i ·
+ 1 + η Ω(q)
+
+(8)
+where η governs the coherence penalty strength. Let ˆAi
+denote the standard group-relative GRPO advantage (Shao
+et al. 2024) of rollout i. We reshape this advantage:
+wi = ReLU( ˆAi) · ˜∆i,
+˜Ai = ˆAi −λwi
+(9)
+Allocations that score well by chance but drop critical cross-
+modal rank directions on highly dependent queries receive
+a severely penalized update, forcing the policy to preserve
+audio-visual memory.
+Policy Optimization. We optimize πψ employing a clipped,
+KL-regularized policy-gradient objective in the style of PPO
+(Schulman et al. 2017):
+LO2L-GRPO = −E
+"
+1
+G
+G
+X
+i=1
+ρi(ψ) ˜Ai −β KL
+ πψ ∥πψref
+
+#
+(10)
+where ρi(ψ) is the clipped policy ratio and πψref is the reference
+allocation policy. Hϕ, E, and F remain frozen.
+
+
+Inference
+During inference, Omni2LoRA processes the mul-
+timodal recording exactly once. The frozen Hϕ constructs the
+full slot bank K; the frozen gψ scores every slot and greedily
+selects the top-Rtotal to fix the allocation Ksel. This budget-
+constrained adapter is reused for all subsequent queries. F
+answers with zero multimodal tokens in its active context
+window, converting encoding overhead into an amortized
+one-time setup cost.
+Experimental Setup
+Models and Training.
+We
+evaluate
+Omni2LoRA
+on
+three
+omnimodal
+backbones:
+Qwen2.5-Omni-3B,
+InteractiveOmni-4B,
+and
+Qwen2.5-Omni-7B.
+The
+audio-visual encoder E and answer model F are initialized
+from frozen checkpoints. Stage 1 (Full-Rank Hypernet-
+work Training) utilizes VALOR-1M (Liu et al. 2024) for
+teacher-forced training, supervised by offline captions. Stage
+2 (O2L-GRPO) executes memory-augmented compression
+distillation on the FineVideo (Farré et al. 2024) corpus by
+drawing queries and video references from downstream
+training splits to align the policy. All hyperparameters,
+including Rtotal, are tuned on a held-out validation split.
+Evaluation Benchmarks.
+To assess audio-visual memory
+retention, cross-modal coherence, and inference efficiency,
+we evaluate our method on five diverse benchmarks:
+• UGC-AVQA (Wu et al. 2026): Audio-visual Question
+Answering benchmark requiring both acoustic and visual
+evidence. It targets audio-visual association and evaluates
+categories like Event Progression, Scene or Temporal
+Transition, Cross-Scene Audio-Visual Alignment, and
+Fine-Grained Audio-Visual Contrast.
+• WorldSense (Hong et al. 2025): Evaluates broad, real-
+world omnimodal understanding.
+• OmniVideoBench (Li et al. 2025): Emphasizes and eval-
+uates long video reasoning.
+• DailyOmni (Zhou et al. 2025): Evaluates video under-
+standing on life scenarios with cross-modal information.
+• VidCapBench (Chen et al. 2025): Provides a rigorous
+setting to evaluate inference efficiency by associating
+multiple sequential queries with a single video context.
+Baselines.
+We compare our proposed memory-augmented
+compression distillation (O2L-GRPO) against direct infer-
+ence and three prominent token compression baselines: (i)
+Direct audio-visual-in-context (Full Tokens): The frozen
+backbone utilizing full multimodal context without an adapter.
+(ii) OmniZip (Tao et al. 2025): An audio-guided dynamic
+token compression baseline. (iii) OMAC (Wu et al. 2026):
+A training-free plug-in compression method that utilizes
+query-relevant visual frames and intra-frame contrast tokens
+to temporally ground acoustic tokens with visual memory.
+(iv) O-MARC (Wu et al. 2026): A compression distillation
+framework that explicitly penalizes compression-induced
+information loss.
+Ablation settings.
+We compare our proposed coherence-
+aware rank allocation policy against: (i) Full-rank Adapter:
+The uncompressed candidate bank retaining all adapter ranks.
+(ii) Uniform Allocation: Blind allocation policy that retains a
+fixed budget of slots uniformly without coherence awareness.
+(iii) Norm-scored Allocation: Heuristic baseline retaining
+the top-Rtotal slots based on Frobenius norm of ∥A∥F ·∥B∥F .
+Metrics.
+We evaluate output quality using answer accuracy
+(%) and average score, depending on the specific benchmark’s
+standard metric. All baselines as well as Omni2LoRA utilize
+identical videos, prompts, and decoding configurations. To
+quantify efficiency and robustness, we evaluate performance
+by varying compression ratios (scaling from 25% to 75%),
+video frames (8 to 1024), and inference-time query Time to
+First Token (TTFT). More details in Appendix.
+Results
+Main Results.
+We evaluate Omni2LoRA against leading
+multimodal token compression frameworks to determine if
+parametric memory compression offers a superior efficiency-
+performance trade-off. Table 1 shows that internalizing mul-
+timodal context directly into parameter space consistently
+outperforms in-context token reduction under strict retention
+budgets. Across all three backbone architectures, Omni2LoRA
+surpasses both contemporary compression methods (OMAC,
+O-MARC) and the uncompressed Full Tokens baseline. For
+instance, on Qwen2.5-Omni-7B, our approach achieves a
+53.2 average accuracy, exceeding O-MARC (51.1) and the
+full-context ceiling (47.2). These improvements are most pro-
+nounced on the UGC-AVQA benchmark, where preserving
+fine-grained cross-modal coherence is strictly required. By
+achieving 68.0% overall accuracy on this dataset, Omni2LoRA
+proves that parametric memory compression effectively by-
+passes the cross-modal information loss inherent to spatial-
+temporal token pruning.
+Ablation Analysis.
+Table 2 isolates the contribution of
+our coherence-aware rank allocation against uncompressed
+ceilings and heuristic baselines. Operating at a 100% pa-
+rameter budget, the Full-rank adapter achieves near parity
+with Direct AV-in-context inference, validating the hyper-
+network’s capacity to encode multimodal memory.However,
+enforcing a naive 30% budget constraint exposes the fragility
+of undirected compression: blind Uniform Allocation trig-
+gers severe degradation across all downstream tasks, while
+magnitude-based Norm-scored Allocation fails to protect
+subtle cross-modal anchors, struggling heavily on the strict
+UGC-AVQA benchmark. In stark contrast, the O2L-GRPO
+policy entirely bridges this gap. By learning to allocate ranks
+specifically where audio and video intersect, it filters out
+query-irrelevant noise, allowing a sparse 30% subset to con-
+sistently outperform dense uncompressed representations.
+This confirms that RL-driven advantage shaping is essential
+to defend audio-visual coherence against visual dominance
+under tight memory constraints.
+Compression Ratio.
+We evaluate representational robust-
+ness under increasingly constrained memory budgets by
+scaling compression ratios (25%, 50%, 75%) on UGC-AVQA
+(Figure 3a). As the available capacity decreases, traditional
+spatial-temporal token pruning techniques struggle to main-
+tain the necessary cross-modal evidence. At extreme 75%
+
+
+Method
+Settings
+DailyOmni
+UGC-AVQA
+OmniVideo
+WorldSense
+Average
+Retained Ratio
+Frames
+Overall Accuracy
+AVEP
+AVST
+CSAVA
+FGAVC
+Overall Accuracy (%)
+Avg. Score
+Overall Accuracy
+Acc (%)
+Qwen2.5-Omni-3B
+Full Tokens
+100%
+32
+53.8
+44.7
+52.4
+48.3
+50.5
+48.9
+31.6
+42.2
+44.1
+OmniZip
+30%
+32
+47.7
+44.7
+49.0
+44.9
+49.8
+47.1
+29.3
+39.7
+41.0
+OMAC
+30%
+32
+49.9
+47.6
+52.4
+47.1
+49.5
+49.1
+30.8
+41.2
+42.8
+O-MARC
+30%
+32
+52.3
+52.4
+61.4
+55.8
+61.9
+57.9
+31.0
+42.1
+45.8
+Omni2LoRA
+30%
+32
+53.6†
+54.2
+64.3
+60.5
+65.7
+61.7†
+32.5†
+44.0†
+47.3†
+InteractiveOmni-4B
+Full Tokens
+100%
+32
+55.1
+51.3
+52.1
+49.8
+56.8
+52.5
+34.2
+42.2
+46.0
+OmniZip
+30%
+32
+49.9
+50.3
+50.6
+49.5
+53.9
+51.0
+30.0
+39.6
+42.6
+OMAC
+30%
+32
+52.1
+51.2
+54.9
+49.1
+55.7
+52.7
+30.9
+41.0
+44.1
+O-MARC
+30%
+32
+54.5
+54.9
+58.2
+51.3
+57.3
+55.4
+32.2
+41.2
+45.8
+Omni2LoRA
+30%
+32
+56.0†
+57.8
+62.5
+54.3
+61.8
+59.1†
+33.6†
+43.3†
+47.6†
+Qwen2.5-Omni-7B
+Full Tokens
+100%
+32
+56.3
+52.7
+54.4
+51.2
+58.3
+54.1
+34.6
+43.6
+47.2
+OmniZip
+30%
+32
+51.8
+51.5
+53.6
+50.0
+55.8
+52.7
+30.0
+39.6
+43.5
+OMAC
+30%
+32
+53.6
+52.4
+54.9
+49.3
+56.3
+53.2
+30.9
+42.4
+45.0
+O-MARC
+30%
+32
+60.4
+65.7
+68.2
+58.3
+66.3
+64.6
+35.2
+44.0
+51.1
+Omni2LoRA
+30%
+32
+63.6†
+68.2
+70.4
+63.5
+70.2
+68.0†
+36.6†
+45.8†
+53.2†
+Table 1: Comparison with state-of-the-art token compression baselines. Under the same frame budget, Omni2LoRA consistently outperforms
+full-token inference, OmniZip, OMAC, and O-MARC across three omnimodal backbones. DailyOmni and WorldSense report accuracy,
+OmniVideo reports average score, and UGC-AVQA reports category-wise and overall accuracy. Statistical significance compared to the
+best-performing baseline (O-MARC) is denoted by † for p < 0.05 under Wilcoxon Signed Rank test.
+Direct AV-in-context
+OmniZip
+OMAC
+OMARC
+Ours
+25
+50
+75
+45
+50
+55
+60
+65
+Compression Ratio (%)
+Overall Accuracy
+(a) Effect of compression ratio on UGC-AVQA overall accuracy.
+Omni2LoRA maintains high cross-modal coherence across increas-
+ing compression ratios, outperforming token pruning baselines like
+OMAC, OMARC and OmniZip under strict memory constraints.
+8
+32
+64
+128
+512
+1,020
+20
+30
+40
+50
+Number of Frames
+Average Score
+(b) Effect of video scaling (8 to 1024 frames). Direct AV in-context
+baseline suffers catastrophic degradation due to context window
+exhaustion. Omni2LoRA outperforms traditional token compression
+methods via parametric internalization of audio-visual sequences.
+compression, OmniZip degrades to 47.1, direct full-context
+baseline (48.9). While OMAC and OMARC exhibit better
+resilience, they still suffer noticeable drops to 49.1 and 56.3,
+respectively. In stark contrast, Omni2LoRA demonstrates ex-
+ceptional stability, maintaining accuracy of 60.7 even at 75%
+compression. This confirms that our explicitly learned al-
+location policy successfully prevents independent modality
+collapse, proving parametric internalization is vastly supe-
+rior for preserving task-relevant, cross-modal anchors under
+severe budget constraints.
+Video Frames Scaling.
+We investigate the representational
+robustness under temporal scaling by varying the number
+of sampled video frames from 8 to 1024. Figure 3b shows
+that increasing the visual context initially improves the di-
+rect AV-in-context baseline, performance sharply degrades
+past 32 frames, plummeting to an average score of 22.0 at
+1024 frames due to memory exhaustion. This catastrophic
+failure highlights the limitations of standard omnimodal mod-
+els when processing excessively long joint token sequences,
+which typically lead to substantial memory overhead and in-
+ference bottlenecks. Token compression baselines (OmniZip,
+OMAC, OMARC) extend this context ceiling by compressing
+the input sequence and establishing a robust memory distilla-
+tion. However, they ultimately collapse because maintaining
+a viable context window across hundreds of frames demands
+aggressive pruning, which discards sparse but critical cross-
+modal anchors, decouples subtle acoustic cues from their
+corresponding visual events, and leads to modality collapse.
+Omni2LoRA completely avoids the active token-space bot-
+tleneck by internalizing the temporal context directly into
+parametric memory. Rather than collapsing under high frame
+counts, our approach uniquely capitalizes on the expanded
+cross-modal evidence, scaling gracefully and monotonically
+to reach a peak accuracy of 46.2 at 1024 frames.
+Inference Efficiency and Amortization.
+VidCapBench
+provides a rigorous setting to evaluate inference efficiency by
+associating multiple sequential queries with a single video
+context. Figure 4(a) shows that Omni2LoRA massively reduces
+
+
+Method
+Settings
+DailyOmni
+UGC-AVQA
+OmniVideo
+WorldSense
+Average
+Retained Ratio
+Frames
+Overall Accuracy
+AVEP
+AVST
+CSAVA
+FGAVC
+Overall Accuracy
+Avg. Score
+Overall Accuracy
+ACC
+Qwen2.5-Omni-3B
+Direct AV-in-context
+100%
+32
+53.8
+44.7
+52.4
+48.3
+50.5
+48.9
+31.6
+42.2
+44.1
+Full-rank Adapter
+100%
+32
+52.5
+46.1
+54.0
+48.9
+52.1
+50.3
+31.0
+41.5
+43.8
+Uniform Allocation
+30%
+32
+45.2 ± 1.4
+41.5
+46.8
+43.2
+48.1
+44.9 ± 1.6
+28.1 ± 1.2
+38.6 ± 1.1
+39.2 ± 1.3
+Norm-scored Allocation
+30%
+32
+48.2 ± 1.1
+45.0
+50.1
+46.5
+50.0
+47.9 ± 1.2
+29.8 ± 0.9
+40.1 ± 0.8
+41.5 ± 1.0
+O2L-GRPO (Ours)
+30%
+32
+53.6 ± 0.4
+54.2
+64.3
+60.5
+65.7
+61.7 ± 0.5
+31.5 ± 0.3
+42.2 ± 0.4
+47.3 ± 0.4
+InteractiveOmni-4B
+Direct AV-in-context
+100%
+32
+55.1
+51.3
+52.1
+49.8
+56.8
+52.5
+34.2
+42.2
+46.0
+Full-rank Adapter
+100%
+32
+54.3
+50.5
+52.5
+49.2
+56.0
+52.1
+33.5
+41.8
+45.4
+Uniform Allocation
+30%
+32
+46.8 ± 1.5
+47.1
+47.5
+45.5
+50.2
+47.6 ± 1.4
+29.6 ± 1.1
+39.0 ± 1.2
+40.7 ± 1.3
+Norm-scored Allocation
+30%
+32
+50.4 ± 1.0
+49.8
+50.2
+48.0
+53.1
+50.3 ± 1.1
+31.2 ± 0.9
+40.5 ± 0.9
+43.1 ± 1.0
+O2L-GRPO (Ours)
+30%
+32
+55.0 ± 0.4
+57.8
+62.5
+54.3
+61.8
+59.1 ± 0.5
+33.6 ± 0.4
+42.8 ± 0.4
+47.6 ± 0.4
+Qwen2.5-Omni-7B
+Direct AV-in-context
+100%
+32
+56.3
+52.7
+54.4
+51.2
+58.3
+54.1
+34.6
+43.6
+47.2
+Full-rank Adapter
+100%
+32
+55.8
+53.5
+55.1
+52.0
+58.0
+54.7
+34.2
+43.1
+47.0
+Uniform Allocation
+30%
+32
+48.5 ± 1.6
+49.1
+50.4
+47.8
+52.5
+49.9 ± 1.5
+30.2 ± 1.2
+40.0 ± 1.3
+42.1 ± 1.4
+Norm-scored Allocation
+30%
+32
+52.5 ± 1.2
+51.0
+52.8
+49.5
+55.1
+52.1 ± 1.1
+31.8 ± 0.9
+41.2 ± 1.0
+44.4 ± 1.1
+O2L-GRPO (Ours)
+30%
+32
+63.6 ± 0.3
+68.2
+70.4
+63.5
+70.2
+68.0 ± 0.4
+36.6 ± 0.3
+44.8 ± 0.4
+53.2 ± 0.3
+Table 2: Ablation analysis of Omni2LoRA establishes non-inferiority to the Direct AV-in-context baseline, and demonstrates the representational
+capacity of the uncompressed Full-rank Adapter. We compare our O2L-GRPO allocation policy against Uniform Allocation and magnitude-based
+Norm-scored Allocation under a strict matched compression budget. We report 95% empirical bootstrap CI for statistical stability.
+Base
+OmniZip
+OMAC
+OMARC
+Omni2LoRA
+3B
+7B
+0
+2
+4
+6
+5.42
+6.03
+3.83
+4.3
+3.85
+4.32
+3.19
+3.45
+0.43
+0.49
+TTFT (s/question)
+(a) Single-question average TTFT with time taken to
+internalize the video accounted.
+5
+10
+15
+20
+25
+0
+2
+4
+6
+3B
+Questions per video
+Mean TTFT (s/q)
+5
+10
+15
+20
+25
+7B
+Questions per video
+(b) Amortized TTFT per question vs. # of questions per video.
+Figure 4: Inference efficiency of Omni2LoRA compared with base models (Qwen-2.5 3B and 7B variants) across compression baselines
+(OmniZip, OMAC, OMARC) on VidCapBench.
+the average Time to First Token (TTFT). On the 7B back-
+bone, it averages 0.49s per question, outperforming both
+the full-context baseline (6.03s) and the strongest token-
+compression baseline, OMARC (3.45s).This performance
+gap stems from how different frameworks handle iterative
+querying. Traditional pruning methods (e.g., OMAC and
+OmniZip) retain visual tokens in the context, forcing re-
+peated encoding of multimodal inputs for every subsequent
+query. Conversely, Omni2LoRA incurs a one-time setup cost
+to internalize the video into a reusable parametric adapter,
+driving downstream multimodal token loads to zero. Figure
+4(b) tracks this dynamic over sequential questions: while
+OMARC suffers continuously high latency (3.6s–4.2s for 7B),
+Omni2LoRA’s amortized TTFT drops precipitously. After just
+five queries, effective latency falls to 0.82s (7B) and 0.72s
+(3B), ultimately plateauing near 0.43s. Translating video
+memory into a fixed-budget parametric adapter eliminates
+the repeated per-query bottleneck.
+Conclusion
+We introduce Omni2LoRA, a two-stage framework that by-
+passes the token bottleneck by compressing audio–visual
+recordings into parametric memory. A Perceiver hypernet-
+work first internalizes each recording into LoRA weights,
+while a GRPO-trained allocation policy compresses them into
+a fixed, sub-linear rank budget using a coherence-aware ad-
+vantage that preserves cross-modal dependencies. Omni2LoRA
+at a 30% rank budget outperforms direct full-context inference
+and state-of-the-art token compression baselines, remains ro-
+bust under compression ratios up to 75%, and scales gracefully
+to long recordings where token-pruning methods degrade
+sharply. By eliminating multimodal tokens from the active
+context at inference time, our method reduces per-query TTFT
+by an order of magnitude and amortizes to sub-second latency
+across repeated queries. Future work will explore more scal-
+able adapter generation and allocation strategies for streaming
+long-form multimodal content.
+
+
+References
+Back, S.; Lee, D.; Kang, N.; Lee, T.; Hong, S.; Gwon, Y.; and
+Ahn, S. 2026. Understanding lora as knowledge memory: An
+empirical analysis. arXiv preprint arXiv:2603.01097.
+Bolya, D.; Fu, C.-Y.; Dai, X.; Zhang, P.; Feichtenhofer, C.;
+and Hoffman, J. 2022. Token merging: Your vit but faster.
+arXiv preprint arXiv:2210.09461.
+Charakorn, R.; Cetin, E.; Uesaka, S.; and Lange, R. T. 2026.
+Doc-to-lora: Learning to instantly internalize contexts. arXiv
+preprint arXiv:2602.15902.
+Chen, L.; Zhao, H.; Liu, T.; Bai, S.; Lin, J.; Zhou, C.; and
+Chang, B. 2024. An image is worth 1/2 tokens after layer 2:
+Plug-and-play inference acceleration for large vision-language
+models. In European Conference on Computer Vision, 19–35.
+Springer.
+Chen, X.; Zhang, Y.; Rao, C.; Guan, Y.; Liu, J.; Zhang, F.;
+Song, C.; Liu, Q.; Zhang, D.; and Tan, T. 2025. Vidcapbench:
+A comprehensive benchmark of video captioning for control-
+lable text-to-video generation. In Findings of the Association
+for Computational Linguistics: ACL 2025, 8543–8563.
+Cheng, Z.; Leng, S.; Zhang, H.; Xin, Y.; Li, X.; Chen, G.; Zhu,
+Y.; Zhang, W.; Luo, Z.; Zhao, D.; et al. 2024. Videollama 2:
+Advancing spatial-temporal modeling and audio understand-
+ing in video-llms. arXiv preprint arXiv:2406.07476.
+Farré, M.; Marafioti, A.; Tunstall, L.; Von Werra, L.; and
+Wolf, T. 2024. Finevideo.
+Ha, D.; Dai, A. M.; and Le, Q. V. 2017. Hypernetworks. In
+International conference on learning representations.
+Hong, J.; Yan, S.; Cai, J.; Jiang, X.; Hu, Y.; and Xie, W. 2025.
+Worldsense: Evaluating real-world omnimodal understanding
+for multimodal llms. arXiv preprint arXiv:2502.04326.
+Hu, E. J.; Shen, Y.; Wallis, P.; Allen-Zhu, Z.; Li, Y.; Wang, S.;
+Wang, L.; Chen, W.; et al. 2022. Lora: Low-rank adaptation
+of large language models. Iclr, 1(2): 3.
+Jaegle, A.; Gimeno, F.; Brock, A.; Vinyals, O.; Zisserman,
+A.; and Carreira, J. 2021. Perceiver: General perception with
+iterative attention. In International conference on machine
+learning, 4651–4664. PMLR.
+Li, C.; Chen, Y.; Ji, Y.; Xu, J.; Cui, Z.; Li, S.; Zhang, Y.; Wang,
+W.; Song, Z.; Zhang, D.; et al. 2025. Omnivideobench: To-
+wards audio-visual understanding evaluation for omni mllms.
+arXiv preprint arXiv:2510.10689.
+Li, G.; Wei, Y.; Tian, Y.; Xu, C.; Wen, J.-R.; and Hu, D.
+2022. Learning to answer questions in dynamic audio-visual
+scenarios. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, 19108–19118.
+Liu, H.; Li, C.; Wu, Q.; and Lee, Y. J. 2023a. Visual instruction
+tuning. Advances in neural information processing systems,
+36: 34892–34916.
+Liu, J.; Chen, S.; He, X.; Guo, L.; Zhu, X.; Wang, W.; and
+Tang, J. 2024. Valor: Vision-audio-language omni-perception
+pretraining model and dataset. IEEE Transactions on Pattern
+Analysis and Machine Intelligence, 47(2): 708–724.
+Liu, K.; Li, J.; Sun, Y.; Wu, S.; Zhang, D.; Zhang, W.; Jin, S.;
+Yu, S.; Zhan, G.; Ji, J.; et al. 2026. Javisgpt: A unified multi-
+modal llm for sounding-video comprehension and generation.
+Advances in Neural Information Processing Systems, 38:
+142289–142324.
+Liu, N. F.; Lin, K.; Hewitt, J.; Paranjape, A.; Bevilacqua,
+M.; Petroni, F.; and Liang, P. 2023b. Lost in the middle:
+How language models use long contexts. arXiv preprint
+arXiv:2307.03172.
+Schulman, J.; Wolski, F.; Dhariwal, P.; Radford, A.; and
+Klimov, O. 2017. Proximal policy optimization algorithms.
+arXiv preprint arXiv:1707.06347.
+Shao, Z.; Wang, P.; Zhu, Q.; Xu, R.; Song, J.; Bi, X.; Zhang,
+H.; Zhang, M.; Li, Y.; Wu, Y.; et al. 2024. Deepseekmath:
+Pushing the limits of mathematical reasoning in open language
+models. arXiv preprint arXiv:2402.03300.
+Suri, M.; Baskar, S.; and Manocha, D. 2026. Frames2LoRA:
+Parametric Video Internalization for Vision-Language Mod-
+els. arXiv preprint arXiv:2606.04351.
+Tao, K.; Shao, K.; Yu, B.; Wang, W.; Wang, H.; et al. 2025.
+OmniZip: Audio-Guided Dynamic Token Compression for
+Fast Omnimodal Large Language Models. arXiv preprint
+arXiv:2511.14582.
+Tian, Y.; Shi, J.; Li, B.; Duan, Z.; and Xu, C. 2018. Audio-
+visual event localization in unconstrained videos. In Proceed-
+ings of the European conference on computer vision (ECCV),
+247–263.
+Wang, P.; Bai, S.; Tan, S.; Wang, S.; Fan, Z.; Bai, J.; Chen,
+K.; Liu, X.; Wang, J.; Ge, W.; et al. 2024. Qwen2-vl: Enhanc-
+ing vision-language model’s perception of the world at any
+resolution. arXiv preprint arXiv:2409.12191.
+Wang, W.; Tran, D.; and Feiszli, M. 2020. What makes training
+multi-modal classification networks hard? In Proceedings
+of the IEEE/CVF conference on computer vision and pattern
+recognition, 12695–12705.
+Wu, P.; Liu, Y.; Wu, C.-H.; Chen, C.; and Shen, J. 2026.
+O-MARC: Omni Memory-Augmented Compression Distil-
+lation for Efficient Video Understanding. arXiv preprint
+arXiv:2605.26584.
+Xu, J.; Guo, Z.; Hu, H.; Chu, Y.; Wang, X.; He, J.; Wang, Y.;
+Shi, X.; He, T.; Zhu, X.; et al. 2025. Qwen3-omni technical
+report. arXiv preprint arXiv:2509.17765.
+Xu, Z.; Hong, H.; Yu, L.; Cui, B.; Huang, L.; Xue, H.;
+and Zhang, N. 2026.
+How LoRA Remembers? A Para-
+metric Memory Law for LLM Finetuning. arXiv preprint
+arXiv:2605.30260.
+Zheng, Z.; Li, Z.; Wen, X.; Zhong, J.; Huang, J.; Chen, L.;
+Yuan, M.; and Xu, Q. 2026. Context Distillation as Latent
+Memory Management. arXiv preprint arXiv:2605.28889.
+Zhou, Z.; Wang, R.; Wu, Z.; and Jiang, Y.-G. 2025. Daily-
+omni: Towards audio-visual reasoning with temporal align-
+ment across modalities. arXiv preprint arXiv:2505.17862.
+
+
+Supplementary Materials
+A
+Limitations and Ethics Statement
+Limitations
+• One adapter per recording. Memory is recording-
+specific; answering across multiple recordings requires
+either re-internalization or an adapter-composition mecha-
+nism, which we do not study.
+• Non-streaming. Internalization assumes the full recording
+is available before querying, so the method as presented
+does not support live streams.
+• Setup cost dominates at n = 1. The efficiency argument
+depends on repeated querying; for a single query, Tsetup is
+not amortized.
+• Two-stage dependence. Stage 2 can only select among
+directions Stage 1 produced; information absent from the
+candidate bank is unrecoverable.
+• Rule-based reward. Racc and Rfmt are cheap but coarse,
+and may under-credit correct free-form answers.
+• Scope of evidence. Results cover three backbones, five
+benchmarks and English-language content.
+Ethics and Broader Impact
+Reducing per-query latency and eliminating repeated multi-
+modal encoding lowers the energy cost of serving audio–visual
+assistants and makes long-recording understanding feasible
+on smaller deployments. A recording-specific adapter is a
+compressed encoding of that recording’s content, and should
+be treated as carrying the same privacy sensitivity and the
+same retention and deletion policy as the source media as
+caching adapters is not equivalent to discarding the video.
+We use only publicly released research datasets, under their
+stated licenses and intended research use, and introduce no
+new human-subjects data or annotation.
+B
+Method Details and Pseudocode
+This section addresses Checklist item 1.1. We restate the
+notation, give complete pseudocode for both training stages
+and for inference, specify the architecture of every trainable
+component, derive the allocation likelihood and its gradient,
+and define the reward terms exactly as implemented.
+B.1
+Notation
+B.2
+Stage 1: Full-Rank Hypernetwork Training
+Gradients flow only into ϕ; E and F are frozen and run in in-
+ference mode (no dropout, no parameter updates) throughout.
+Teacher captions are generated offline once and cached, so no
+teacher model is loaded during Stage 1 optimization.
+B.3
+Stage 2: O2L-GRPO
+Because F, E and Hϕ are all frozen, both the unimodal
+reference rewards and the slot bank K for a given recording
+are deterministic and are computed once and cached; the only
+stochasticity in the loop comes from allocation sampling (and,
+if enabled, decoding).
+Symbol
+Meaning
+v, vt
+Synchronized audio–visual recording; its
+t-th temporal chunk
+T
+Number of non-overlapping temporal
+chunks
+i
+Internalization instruction (fixed template,
+App. H.1)
+q, y
+Downstream text query; target response
+E, F
+Frozen OLM encoder; frozen OLM answer
+model
+Ct
+Layer-wise hidden states of chunk t,
+RL×S×D
+L, M
+# transformer layers; # target linear mod-
+ules per layer
+S, D
+Fused audio–visual sequence length; hid-
+den dimension
+Hϕ
+Perceiver hypernetwork (trained in Stage 1,
+frozen in Stage 2)
+Rmax
+Candidate rank directions generated per
+(ℓ, m, t) triple
+K
+Full slot bank, |K| = T · L · M · Rmax
+Ksel
+Selected allocation, |Ksel| = Rtotal
+gψ
+Scoring network (trained in Stage 2)
+zℓ,m,t,r
+Scalar logit assigned to slot (ℓ, m, t, r)
+ρ
+Retained ratio Rtotal/|K|; compression ra-
+tio = 1 −ρ
+s
+Fixed LoRA scaling factor
+G
+Group size (rollouts per query) for GRPO
+Ω(q)
+Audio–Visual Dependence Score of query
+q
+η, λ, β
+Coherence penalty strength; shaping
+weight; KL coefficient
+τ
+Numerical-stability constant
+Table 3: Notation used throughout the paper and appendix.
+B.4
+Inference
+This section details the inference procedure outlined in
+Algorithm 3. The inference sequence is systematically parti-
+tioned into a one-time internalization phase and a sequential
+querying phase. During the initial internalization, the frozen
+multi-modal encoder and the Perceiver hypernetwork evaluate
+the input media to generate a deterministic pool of candidate
+low-rank adapter slots. Subsequently, the scoring network
+evaluates these parameters to deterministically isolate the top-
+Rtotal slots, assembling a highly compressed, video-specific
+memory adapter which is persistently cached. During the
+secondary querying phase, any downstream text prompt is
+processed by the frozen answer model augmented solely by
+this cached memory adapter. This execution necessitates zero
+multi-modal tokens within the context window, effectively
+decoupling the inference latency from the temporal length of
+the original recording.
+B.5
+Hypernetwork Architecture (Hϕ)
+Hϕ is a hierarchical Perceiver-style resampler that cross-
+attends a set of learned latent queries into the frozen layer-
+wise states Ct and projects the resulting latents into rank-one
+LoRA factors.
+
+
+Algorithm 1: Stage 1 — Full-Rank Hypernetwork Training
+Require: Caption corpus D1 = {(v, i, p, y)}; frozen en-
+coder E and answer model F; hypernetwork Hϕ; chunk
+length ∆; rank cap Rmax; scaling s
+Ensure: Converged, frozen hypernetwork Hϕ
+1: Initialize ϕ {App. B.5}
+2: for each optimizer step do
+3:
+Sample minibatch {(v, i, p, y)} ⊂D1
+4:
+for all v in minibatch do
+5:
+Partition v
+into T
+=
+⌈dur(v)/∆⌉chunks
+{v1, . . . , vT }
+6:
+for t = 1 to T do
+7:
+Ct ←E(vt, i) {no gradient through E}
+8:
+{Aℓ,m,t,r, Bℓ,m,t,r}Rmax
+r=1
+←Hϕ(Ct)
+9:
+end for
+10:
+Compose the full adapter θ(v) over all T·L·M·Rmax
+rank-one components and inject via Eq. (3)
+11:
+Compute teacher-forced loss L(ϕ) (Eq. (4)) with F
+frozen
+12:
+end for
+13:
+ϕ ←AdamW
+ ϕ, ∇ϕL
+
+14: end for
+15: Freeze ϕ; Hϕ is now a deterministic map v 7→K
+16: return Hϕ
+B.6
+Scoring Network Architecture (gψ)
+gψ consumes (i) the pooled chunk summary ¯Ct = mean(Ct)
+and (ii) a positional embedding of the slot index (ℓ, m, r), and
+emits a single logit. It never reads the continuous factors A, B,
+which keeps the Stage 2 action space purely combinatorial.
+B.7
+Slot Bank and Budget Accounting
+Every slot is a rank-one update, so the stored adapter cost is
+Params(Ksel) =
+X
+(ℓ,m,t,r)∈Ksel
+ d(ℓ,m)
+in
++ d(ℓ,m)
+out
+
+,
+(11)
+and the full candidate bank contains |K| = T · L · M · Rmax
+slots. The retained ratio reported in all tables is
+ρ = Rtotal
+|K| ,
+compression ratio = 1 −ρ.
+(12)
+In Tables 1 and 2 and Fig. 3a, ρ is held fixed at the stated
+value with a 32-frame budget.
+B.8
+Allocation Likelihood and Gradient
+For completeness we give the self-contained derivation of the
+quantity differentiated in Eq. (10). This is an implementation
+detail, not a theoretical claim (see App. E). Sampling Rtotal
+distinct slots sequentially without replacement, with the step-
+wise conditional of Eq. (5), induces the joint
+πψ(Ksel | v) =
+Rtotal
+Y
+k=1
+exp(zok)
+P
+j∈K\o<k exp(zj).
+(13)
+Taking logarithms turns the product into a sum of per-step
+terms,
+log πψ(Ksel | v) =
+Rtotal
+X
+k=1
+h
+zok −log
+X
+j∈K\o<k
+exp(zj)
+i
+,
+(14)
+Algorithm 2: Stage 2 — Coherence-Aware Rank Allocation
+(O2L-GRPO)
+Require: Query corpus D2 = {(v, q, y)}; frozen E, F, Hϕ;
+scoring net gψ; budget Rtotal; group size G; coefficients
+η, λ, β; clip range ϵ
+Ensure: Converged, frozen scoring network gψ
+1: // Phase 0: cache frozen unimodal references (once)
+2: for all (v, q, y) ∈D2 do
+3:
+RAV ←Reward
+ F(q | full AV context), y
+
+4:
+RV ←Reward
+ F(q | audio masked), y
+
+5:
+RA ←Reward
+ F(q | frames masked), y
+
+6:
+Ω(q) ←ReLU
+ RAV −max(RV, RA)
+
+7:
+Cache (RAV, RV, RA, Ω(q))
+8: end for
+9: ψref ←ψ {reference policy for KL}
+10: // Phase 1: policy optimization
+11: for each optimizer step do
+12:
+Sample (v, q, y) ∼D2
+13:
+{Ct}T
+t=1 ←E(v, i); K ←Hϕ({Ct}) {cacheable per
+v}
+14:
+zj ←gψ( ¯Ct(j), ℓ(j), m(j), r(j)) for all j ∈K
+15:
+for i = 1 to G do
+16:
+K(i)
+sel ←SampleWoR(z, Rtotal) {Eq. (5)}
+17:
+Build
+adapter
+from
+K(i)
+sel ;
+ˆyi
+←
+F(q
+|
+zero AV tokens)
+18:
+Ralloc
+i
+←1
+2Racc(ˆyi, y) + 1
+2Rfmt(ˆyi)
+19:
+end for
+20:
+ˆAi ←
+ Ralloc
+i
+−µR
+
+/(σR +τ), with µR, σR the group
+mean/std
+21:
+∆i ←ReLU(RAV −Ralloc
+i
+)/(|RAV| + τ)
+22:
+˜∆i ←∆i · (1 + η · Ω(q))
+23:
+wi ←ReLU( ˆAi) · ˜∆i;
+˜Ai ←ˆAi −λwi
+24:
+ψ ←AdamW
+ ψ, ∇ψLO2L-GRPO
+
+(Eq. (10))
+25: end for
+26: return frozen gψ
+which is exactly the log-likelihood of an autoregressive se-
+quence model over Rtotal “tokens” drawn from a shrinking
+vocabulary. Differentiating the k-th term with respect to a
+logit zu gives
+∂
+∂zu log πψ =
+Rtotal
+X
+k=1
+h
+1[u = ok] −1[u /∈o<k]π(k)
+u
+i
+,
+(15)
+where π(k)
+u
+is the step-k softmax probability of slot u over the
+surviving candidate set. The chain rule then propagates into
+ψ through z = gψ(·). Two consequences matter in practice:
+1. The factorization is a valid probability over ordered se-
+lections, so the importance ratio ρi(ψ) = πψ(K(i)
+sel |
+v)/πψold(K(i)
+sel | v) is well defined and PPO-style clipping
+applies unchanged to this combinatorial action space.
+2. The normalizer is computed with a running mask over
+already-selected slots; we accumulate log-probabilities in
+log-space and mask with −∞rather than renormalizing
+explicitly, for numerical stability.
+
+
+Algorithm 3: Inference with Omni2LoRA
+Require: Recording v; query stream q1, . . . , qN; frozen
+E, Hϕ, gψ, F; budget Rtotal
+1: // One-time internalization
+2: {Ct} ←E(v, i); K ←Hϕ({Ct})
+3: zj ←gψ(·) for all j ∈K
+4: Ksel ←TopK(z, Rtotal) {greedy, no sampling}
+5: θmem(v) ←adapter assembled from Ksel; cache to disk
+6: // Per-query answering (zero multimodal tokens in
+context)
+7: for n = 1 to N do
+8:
+ˆyn ←F
+ qn | θmem(v)
+
+9: end for
+10: return {ˆyn}
+The KL term is estimated as against the fixed reference policy
+πψref.
+B.9
+Reward Specification
+All rewards are rule-based; no auxiliary judge model is
+invoked during RL sampling. With R = 1
+2Racc + 1
+2Rfmt:
+• Racc ∈{0, 1}: for multiple-choice items, 1 iff the parsed
+option letter matches the gold letter after normalization
+(case folding, stripping of punctuation and leading arti-
+cles).
+• Rfmt ∈{0, 1}: 1 iff the completion matches the required
+output template (App. H.2), i.e. contains exactly one well-
+formed answer delimiter pair and no trailing content.
+• Ties, empty generations, and parse failures receive Racc =
+0 and Rfmt = 0.
+The same reward function is used for the three cached uni-
+modal references (RAV, RV, RA) and for the student rollouts
+Ralloc
+i
+, so that ∆i compares like with like.
+C
+Background for Less-Familiar Readers
+This section addresses Checklist item 1.3. Readers new to
+any component of the pipeline may find the following entry
+points useful.
+• Low-Rank Adaptation. Adapting a frozen weight matrix
+by an additive low-rank product, rather than by updating
+the matrix itself, is introduced in (Hu et al. 2022); this
+is the parameterization we generate rather than learn by
+gradient descent.
+• Hypernetworks. Networks that emit the weights of an-
+other network in a single forward pass are introduced in
+(Ha, Dai, and Le 2017); the context-to-adapter instantia-
+tions most relevant here are (Charakorn et al. 2026; Suri,
+Baskar, and Manocha 2026).
+• Perceiver resampling. Cross-attending a small set of
+learned latents into a long input sequence, giving cost
+linear rather than quadratic in input length, is described in
+(Jaegle et al. 2021). This is what allows Hϕ to consume
+long fused audio–visual states.
+• Policy-gradient RL with clipped ratios. The clipped
+surrogate objective is due to (Schulman et al. 2017); the
+group-relative, critic-free variant we adapt is (Shao et al.
+2024).
+• Omnimodal language models and token compression.
+For the backbone paradigm see (Cheng et al. 2024; Xu et al.
+2025; Liu et al. 2026); for the token-reduction literature
+we compare against, see (Bolya et al. 2022; Chen et al.
+2024; Tao et al. 2025; Wu et al. 2026).
+• Audio–visual
+correspondence.
+Why
+isolated
+per-
+modality compression is lossy for joint reasoning is dis-
+cussed in (Tian et al. 2018; Li et al. 2022).
+D
+Scope of Claims
+This section addresses Checklist item 1.2 by separating what
+we measure from what we interpret.
+Empirically established (measured, reported with vari-
+ability).
+(i) At a 30% retained ratio, Omni2LoRA attains
+higher average accuracy than OmniZip, OMAC, O-MARC
+and the full-token baseline on all three backbones (Table 1).
+(ii) Accuracy degrades more slowly than all token-pruning
+baselines as the compression ratio increases to 75% (Fig. 3a).
+(iii) Accuracy is non-decreasing in frame count up to 1024
+frames, where in-context baselines degrade (Fig. 3b). (iv)
+Per-query TTFT and its amortization profile (Fig. 4). (v) The
+ablation ordering O2L-GRPO > Norm-scored > Uniform at
+matched budget (Table 2).
+E
+Theoretical Contributions
+This section addresses Checklist items 2.1–2.8. The paper
+makes no theoretical contributions: we state no theorems,
+prove no novel claims, and derive no bounds. Consequently
+items 2.2–2.8 are NA. The algebra in App. B.8 is included for
+reproducibility — it specifies exactly which log-likelihood
+is differentiated — and not as a novel result; it is a direct
+consequence of the sampling scheme defined in Eq. (5). All
+claims in the paper are empirical and are supported by the
+experiments in App. G.
+F
+Datasets
+This section addresses Checklist items 3.1–3.7.
+F.1
+Training Corpora and Motivation
+Stage 1 — VALOR-1M (Liu et al. 2024).
+Chosen because
+it provides recordings with jointly annotated audio and visual
+content at scale, which is the supervision signal required to
+teach Hϕ to compress both streams into a single adapter;
+visual-only caption corpora would bias the hypernetwork
+toward exactly the visual dominance that Stage 2 must later
+correct.
+Stage 2 — FineVideo (Farré et al. 2024).
+Chosen for its
+long, naturalistic recordings with rich co-occurring speech,
+ambient sound and scene structure, which yields a non-
+degenerate distribution of the dependence score Ω(q); cor-
+pora where audio is redundant with vision would leave the
+coherence penalty inactive. Queries and video references are
+additionally drawn from downstream training splits to align
+the allocation policy with the evaluation query distribution.
+
+
+F.2
+Evaluation Benchmarks
+All evaluation datasets are drawn from existing literature, are
+cited in-line, and are publicly available (Checklist 3.5, 3.6).
+UGC-AVQA is the discriminative test: its four categories
+(Audio–Visual Event Progression, Scene/Temporal Transi-
+tion, Cross-Scene Audio–Visual Alignment, Fine-Grained
+Audio–Visual Contrast) strictly require joint evidence, so it
+isolates coherence preservation rather than general video com-
+petence. Its construction reinforces this: a candidate is retained
+only if a strong reference model fails on the same question
+once the audio track is removed, which filters out items solv-
+able from visual priors alone. WorldSense and DailyOmni
+test that gains generalize to broad and to everyday-scenario
+omnimodal understanding. OmniVideoBench stresses long-
+horizon reasoning, where a parametric memory should help
+most. VidCapBench is used solely for efficiency, because it
+pairs many sequential queries with a single recording, which
+is precisely the setting in which one-time internalization
+amortizes.
+Availability.
+All datasets are obtainable from the following
+locations:
+UGC-AVQA:
+https://github.com/WPR001/UGC_VideoCaptioner
+WorldSense:
+https://huggingface.co/datasets/honglyhly/WorldSense
+OmniVideoBench: https://huggingface.co/datasets/NJU-
+LINK/OmniVideoBench
+DailyOmni:
+https://huggingface.co/datasets/liarliar/Daily-Omni
+VidCapBench: https:
+//huggingface.co/datasets/VidCapBench/VidCapBench
+VALOR-1M:
+https://github.com/CASIA-IVA-Lab/VALOR
+FineVideo: https:
+//huggingface.co/datasets/HuggingFaceFV/finevideo
+G
+Computational Experiments
+G.1
+Evaluation Metrics
+Overall accuracy (%).
+Fraction of instances scored cor-
+rect by the benchmark’s own protocol, used for DailyOmni,
+UGC-AVQA and WorldSense. Chosen because these are
+multiple-choice benchmarks whose official leaderboards re-
+port accuracy, keeping our numbers directly comparable to
+published baselines.
+Average score.
+OmniVideoBench’s official aggregate, re-
+tained rather than converted to accuracy so that our numbers
+remain comparable to that benchmark’s reported results.
+Per-category accuracy (UGC-AVQA).
+AVEP, AVST,
+CSAVA and FGAVC are reported separately because our
+central claim is about cross-modal preservation; an aggregate
+could hide a gain on visually-solvable items paired with a
+loss on strictly joint ones.
+Retained ratio and compression ratio.
+Defined in
+App. B.7. We match the retained ratio, not the wall-clock cost,
+across methods so that comparisons isolate the effect of what
+is kept rather than how much compute is spent.
+Time to First Token (TTFT).
+Wall-clock seconds from
+query submission to emission of the first output token, mea-
+sured in ms. Single-question TTFT in Fig. 4(a) includes
+the one-time internalization cost, so the comparison is not
+favorable to us by construction.
+Amortized TTFT.
+For n sequential queries against one
+recording,
+TTFTamort(n) =
+Tsetup + Pn
+j=1 tj
+n
+,
+(16)
+where Tsetup is the one-time encode-plus-allocate cost (zero
+for in-context baselines) and tj is the per-query TTFT. This
+metric is chosen because it is the quantity a deployment
+actually pays under repeated querying, and it penalizes our
+method at n = 1.
+
+
+Benchmark
+#Videos
+#Queries
+Metric
+License
+UGC-AVQA (Wu et al. 2026)
+206
+1,648
+Acc. (%)
+Research-only (links + annotations)
+WorldSense (Hong et al. 2025)
+1,662
+3,172
+Acc. (%)
+Not specified
+OmniVideoBench (Li et al. 2025)
+628
+1,000
+Avg. score
+CC BY-NC-ND 4.0 (gated)
+DailyOmni (Zhou et al. 2025)
+684
+1,197
+Acc. (%)
+CC BY-NC-SA 4.0
+VidCapBench (Chen et al. 2025)
+643
+9,494
+TTFT (s)
+Custom, academic-only
+VALOR-1M (Liu et al. 2024) (train)
+∼1M
+—
+—
+MIT (code/annot.); videos via AudioSet
+FineVideo (Farré et al. 2024) (train)
+43,751
+∼219K
+—
+CC-BY (per-video)
+Table 4: Datasets used, with the split evaluated and the license under which each is distributed. UGC-AVQA figures are for the difficulty-filtered
+benchmark split. WorldSense, OmniVideoBench, DailyOmni, and VidCapBench are each distributed as a single undivided release; we evaluate
+the full release in every case. VidCapBench counts refer to the automatically-assessable (AE) subset; the 1,150-pair human-assessable (HE)
+subset is not used. Snapshots: WorldSense HuggingFace commit 49df5aa, DailyOmni commit bf5a6ee; OmniVideoBench and FineVideo are
+gated repositories accessed under their respective terms of use.

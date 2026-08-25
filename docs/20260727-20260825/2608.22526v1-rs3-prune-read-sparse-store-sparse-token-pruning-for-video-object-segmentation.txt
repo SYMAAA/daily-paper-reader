@@ -1,0 +1,1401 @@
+arXiv:2608.22526v1  [cs.CV]  23 Aug 2026
+MANDAL, SHASHIKUMAR: RS3-PRUNE
+1
+RS3-Prune: Read-Sparse, Store-Sparse Token
+Pruning for Video Object Segmentation
+Avilasha Mandal1,2
+avilasha1112@gmail.com
+Sarvesh Shashikumar2
+sarveshshashikumar0908@gmail.com
+1 Attentive AI
+2 Indian Institute
+of Technology
+Delhi
+Abstract
+We introduce RS3-Prune, a training-free token-pruning recipe that instantiates as a
+small set of inference time hooks atop existing video object segmentation (VOS) networks.
+Modern VOS models have converged on a common, expensive design: an image encoder
+produces a dense token grid for every frame, and a memory bank accumulates these
+tokens across all previously processed frames to condition future predictions. As a video
+grows longer, the resulting token budget governs both per-frame latency and peak GPU
+memory. Hence these models break on use cases such as — long-form video or real-
+time deployment on memory-bounded accelerators. In this work we argue that the right
+axis along which to compress memory-bank VOS is the token budget itself. RS3-Prune
+operates in two precise locations within an arbitrary memory-bank VOS pipeline: at the
+boundary between the image encoder and the memory-attention readout, where we restrict
+the queries that participate in the cross-frame attention to only a small, geometrically
+informed subset; and at the boundary between the memory encoder and the memory bank,
+where we restrict which tokens are ever permitted to enter the bank to those that lie within
+the object’s spatial extent. Over various established benchmarks, RS3-Prune delivers
+a mean of 38.8% FPS speedup and 13.1% peak memory reduction, while preserving a
+competitive J &F compared to the unmodified VOS networks.
+1
+Introduction
+Video object segmentation (VOS) is the task of tracking and delineating one or more objects
+across the frames of a video, producing a per-pixel binary mask for each object at every time
+step. But VOS now lives in a saturated regime. On datasets like DAVIS-17 [18], SA-V [20],
+MOSE [8], YouTube-VOS [24]and LVOSv2 [9], the SOTA VOS networks [3, 6, 7, 16, 20]
+hover within a few points of the J &F ceiling. The interesting question is no longer whether
+these networks can segment well on a benchmark video; it is whether they can be run
+at scale, on long videos, on many simultaneous streams, and on memory-bounded GPUs
+without exhausting accelerator memory or stalling under per-frame [28]. In those regimes the
+bottleneck is not the network’s algorithmic capability; it is the number of tokens that flow
+through its memory pipeline.
+The cause is structural, and it is the same across architectures. Every modern memory-
+bank network comprises two heavy stages stacked back to back [20]. An image encoder
+© 2026. The copyright of this document resides with its authors.
+It may be distributed unchanged freely in print or electronic forms.
+
+
+2
+MANDAL, SHASHIKUMAR: RS3-PRUNE
+produces a dense token grid for each frame, as the input resolution used by prompt-driven
+VOS networks. A memory encoder then converts each frame’s predicted mask, together
+with the encoder features, into a key/value pair, and appends this pair to a memory bank that
+conditions every subsequent prediction. The cross-frame attention that fuses the memory bank
+with the current frame is inherently dependent on interactions between both components: the
+spatial resolution of the frame, the accumulation of more memory frames over the course of a
+video. These two factors increase both the computational cost and peak memory consumption.
+The peak memory grows with video length, throughput falls with it, and parallel inference
+workloads run out of memory long before they run out of capability.
+We take the view that the token budget is the quantity that must be reduced, and that it
+must be reduced at two distinct locations within the pipeline. The first location lies between
+the image encoder and the memory-attention readout: it is the gate at which the current
+frame’s tokens are presented as queries to the memory bank, and it is where we apply our
+read-side prune. The second location lies between the memory encoder and the memory
+bank: it is the gate at which a frame’s encoded tokens are committed to long-term storage,
+and it is where we apply our write-side prune. The first asks “which of the current frame’s
+tokens deserve to read”; the second asks “which of the current frame’s tokens deserve to be
+remembered”. We argue that both are legitimate places to compress, and that compressing
+both is what unlocks the deployment regimes above. We package the combined recipe under
+the name RS3-Prune— Read-Sparse, Store-Sparse Token Pruning— and instantiate it as a
+training-free patch on five published VOS networks.
+The contribution of this paper is therefore as follows. We argue that the token budget
+of memory-bank VOS, and not the algorithmic gap between published networks, is the
+real deployment ceiling for the current generation of systems. We present RS3-Prune as
+a single, symmetric recipe that compresses the token budget at the two locations where it
+actually accumulates, and we mathematically justify the geometric prior that drives it from
+first principles about the L2 energy of encoder tokens. We then measure RS3-Prune on five
+published architectures across five benchmarks of deliberately different character — DAVIS-
+17 [18], MOSE [8], SA-V [20], YouTube-VOS [24], LVOSv2 [9] validation sets — and report
+both its strengths and its limits openly.
+2
+Related Work
+Image and video object segmentation.
+The Segment Anything Model (SAM) [11] estab-
+lished a new paradigm for image segmentation, training a large vision transformer on a curated
+dataset of over one billion masks to produce a general-purpose segmentation engine operable
+via sparse prompts such as points, boxes, or masks. SAM2 [20] extended this foundation to
+video by introducing a streaming memory mechanism: a lightweight memory encoder folds
+each frame’s prediction into a compact representation that is stored in a fixed-size rolling
+buffer, which a memory attention module then reads to condition segmentation of the next
+frame. This design preserves SAM’s interface while handling temporal coherence, achieving
+state-of-the-art results across several datasets at the cost of a substantially larger token budget
+than purpose-built VOS architectures.
+Memory bank video object segmentation.
+Early approaches relied on online fine-tuning [2,
+10], adapting a segmentation network to the reference frame at test time — achieving strong
+accuracy at the cost of prohibitive per-video computation. Propagation-based methods [15, 17]
+
+
+MANDAL, SHASHIKUMAR: RS3-PRUNE
+3
+sidestepped this by warping masks forward using optical flow or learned correspondences,
+trading some robustness for dramatically faster inference. The field shifted decisively with
+Space-Time Memory Networks [16], which replaced explicit propagation with a soft nearest-
+neighbour readout over a growing memory bank of past frame embeddings, elegantly handling
+re-identification and long-term appearance change without any test-time optimisation. This
+blueprint — an image encoder producing a dense per-frame token grid, a memory attention
+module conditioning the current frame on a bank of past key-value pairs written by a memory
+encoder, and a mask decoder producing the final segmentation — has since become the
+dominant structural commitment in the field. Subsequent work refined every component:
+XMem [6] introduced a multi-granularity memory hierarchy to manage bank growth over long
+videos; Cutie [7] replaced per-pixel readout with object-level tokens to suppress background
+noise; and SAM2 [20] scaled the paradigm to a large vision foundation model with streaming
+memory. Despite their differences in architecture and scale, all of these methods share the
+same growing-bank cross-attention bottleneck, and it is precisely this shared bottleneck — the
+dense token grid attending into an ever-growing memory — that RS3-Prune targets, without
+committing to any one design.
+Token pruning.
+Token pruning has a long history in dense vision. DynamicViT [19] and
+SparseViT [5] selectively drop tokens from a vision transformer’s forward pass on the basis
+of attention scores or token energies; EViT [13] and Evo-ViT [25] similarly reorganise or
+evolve tokens using class-token attention, while SPViT [12] learns a soft, latency-aware
+token selector. A parallel line merges rather than discards redundant tokens: ToMe [1]
+performs bipartite soft matching between similar tokens, and PPT [23] and M2M-TAG [26]
+generalise pruning and merging into a single pooling-based or many-to-many transformation,
+an idea further unified by Token Transforming [27]. VLTP [4], [14] recently brought token
+reduction into prompted segmentation by ranking tokens against a text-derived prior. To our
+knowledge all of this work — whether it prunes, merges, or transforms tokens — operates
+exclusively at the attention-time query boundary. The contribution of RS3-Prune is to identify
+a second, structurally distinct location at which token reduction is both possible and useful
+for video object segmentation — the memory-write boundary — and to show that acting at
+both locations is what unlocks the deployment regimes we care about.
+3
+Method
+We treat a memory-bank video object segmentation pipeline as a chain of four well-defined
+stages. An image encoder Φenc maps the current frame It (the RGB image at time step t) into
+a dense token grid Zt ∈Rmn×C, where m×n is the spatial grid resolution and C is the feature
+channel dimension. A memory attention module A conditions Zt on a memory bank (K,V)
+accumulated from previous frames, where K ∈RNmem×C and V ∈RNmem×C are the stored key
+and value matrices, Nmem is the total number of memory tokens. The memory encoder Φmem,
+run every T frames, folds the current frame’s prediction and tokens into a fresh key/value pair
+and appends it to the bank. A mask decoder D finally turns the conditioned representation
+into the per-frame segmentation.
+As shown in figure 1, RS3-Prune makes two interventions in this chain, at the two places
+where the token budget enters or leaves the long-lived memory bank. The first intervention sits
+at the boundary between the image encoder and the memory attention, and decides which of
+the current frame’s mn tokens are allowed to participate as queries in the cross-frame readout.
+
+
+4
+MANDAL, SHASHIKUMAR: RS3-PRUNE
+Memory Bank
+(K, V)
+It
+Φenc
+image
+encoder
+Kr
+A
+memory
+attention
+D
+mask
+decoder
+ˆ
+Mt
+Zt ∈Rmn×C
+Zt[Kr]
+Kw
+Φmem
+memory
+encoder
+Zt[Kw]
+append
+ˆ
+Mt
+(K, V)
+✂
+full Zt
+kept Zt[Kr]
+Read-side prune (spatial prior ∩visual energy)
+✂
+full Zt
+kept Zt[Kw]
+Write-side prune (union of first-occurrence object seeds)
+frame
+segmentation
+Figure 1: Overview of RS3-Prune. The standard memory- bank VOS pipeline (blue) passes
+all mn encoder tokens through memory attention A and into the memory encoder Φmem.
+RS3-Prune inserts two training-free pruning operators (orange) at the two token boundaries.
+The read-side prune Kr retains only tokens that lie within the spatial prior and carry high
+visual energy, reducing the query load on A. The write-side prune Kw retains only tokens
+anchored to first-occurrence object seeds before they are written to the memory bank (K,V),
+controlling bank growth. Both pruning steps are applied to the frozen pretrained checkpoint
+with no retraining.
+We call this the read-side prune (Sec. 3.1). The second intervention sits at the boundary
+between the memory encoder and the memory bank, and decides which of the current frame’s
+tokens are permitted to enter the bank in the first place. We call this the write-side prune
+(Sec. 3.2). Both interventions keep the backbone, the memory module, and the mask decoder
+unchanged, and they run on the original pretrained checkpoint: there is no retraining, no
+fine-tuning, and no new parameter.
+
+
+MANDAL, SHASHIKUMAR: RS3-PRUNE
+5
+memory bank
+(K, V)
+Read-side prune
+full token grid
+over the input frame
+spatial prior:
+union of dilated bounding boxes
+dotted = dilated, solid = actual
+visual energy:
+darker green indicates
+higher token norm
+dilate
+bboxes
+∪union
+token
+norm
+prior ∩
+top-
+energy
+Sparse memory attention
+kept
+tokens
+become
+queries
+Figure 2: Read-side prune. Starting from the full mn token grid, bounding boxes from
+the first-frame annotation are dilated and unioned to form a spatial prior. Token norms are
+computed as a proxy for visual energy, with higher-norm tokens (darker green) indicating
+visually salient regions. The final kept set Kr is the intersection of the spatial prior with the
+top-energy tokens; only these tokens participate as queries in the subsequent sparse memory
+attention over (K,V).
+3.1
+Read-side pruning: a per-frame, per-object spatial gate
+We install a spatial gate around Φenc of the VOS network so that, for each frame, only the
+tokens around the tracked object(s) pay the full memory-attention cost; everywhere else either
+contributes zero at read time, or is never written into the memory bank at write time (Sec. 3.2).
+The gate is driven by a per-frame, per-object bounding box derived from ground-truth first-
+frame mask under the semi-supervised protocol. From the second frame onward the gate is
+propagated temporally using model’s own previous-frame predictions, with no additional
+supervision. This is shown in figure 2.
+Seeding the spatial prior into frame 0.
+For each object identifier o ∈O we obtain an
+initial binary mask M(0)
+o
+∈{0,1}m×n. In the semi-supervised protocol M(0)
+o
+is read directly
+from the first-frame palette mask. From each M(0)
+o
+we compute its tight bounding box
+B(0)
+o
+= bbox(M(0)
+o ). In VOS architectures like SAM 2 [20] which expects a seed prior, re-uses
+this same bounding box as seed prompt for it’s prompt encoder.
+From a pixel-space box to a token-grid prior.
+Φenc of the VOS network emits a feature
+map of shape (1,C,m,n) with mn tokens and C feature vector dimension at stride s. We
+project each seed box B(0)
+o
+onto this m×n grid by nearest-neighbour downsampling (pixel
+coordinates divided by s), and dilate it by rs grid cells with an (rs −1)×(rs −1) structuring
+element to absorb the quantisation error introduced by the down-projection. The seed spatial
+prior is the union of the per-object dilated grids:
+P(0) =
+[
+o∈O
+dilaters
+ downs(B(0)
+o )
+
+⊂{1,...,m}×{1,...,n}.
+(1)
+Temporal propagation of the prior.
+For frames t ≥1 we already have a multi-object
+prediction ˆMt−1 from the previous step. We rebuild the prior at t by applying the same
+
+
+6
+MANDAL, SHASHIKUMAR: RS3-PRUNE
+project-and-dilate operation to the predicted per-object masks of the previous frame:
+P(t)
+o
+= dilaters
+ downs
+  ˆMt−1|o
+
+,
+P(t) =
+[
+o∈O
+P(t)
+o .
+(2)
+The seed mask is therefore only consulted at t = 0; from t = 1 onward the gate follows
+model’s own predictions. There is no second supervisory signal: the prior is the geometric
+trace the tracker has produced for itself.
+We retain a fraction of the prior.
+After dilation, P(t) typically covers only 30–50% of the
+total token count, which is a useful reduction but still loose: not every cell inside an object’s
+dilated box is equally informative. We further restrict the keep-set to the cells whose encoder
+tokens carry the most visual energy. Let zi ∈RC be the encoder token at grid cell i ∈P(t),
+and let αi ∝exp(q⊤WKzi/
+√
+C) be its attention weight under a query q. The Cauchy–Schwarz
+inequality bounds token i’s contribution to the attention readout:
+∥αiWVzi∥2 ≤αi ·∥WV∥2 ·∥zi∥2.
+(3)
+So under a fixed query a token can influence the readout only in proportion to its norm. The
+norm ∥zi∥2 in turn tracks the encoder’s response to local image content: textured object
+regions (edges, contrast, high-frequency structure) drive ∥zi∥2 up, while smooth uniform
+regions (sky, walls, out-of-focus background) drive it down. This is the “visual-energy”
+empirical regularity that token pruning already exploits in classification [5, 19], and it is the
+reason the geometric prior and the energy ranking agree: object pixels generate, on average,
+larger token energies than background pixels. We accordingly rank the tokens in the prior by
+∥zi∥2
+2 and keep only the top K(t)
+r
+tokens (≤ρ ·mn):
+K(t)
+r
+= arg-topρmn
+i∈P(t)
+∥zi∥2
+2
+(4)
+The geometric prior supplies the spatial support (object vs. background); the energy ranking
+inside it supplies the semantic support (textured vs. smooth). Tokens that pass both filters
+are the ones a memory readout can actually use; the rest are bounded by Eq. 3 and can be
+dropped at near-zero cost in J &F.
+Disappearance recovery via a streak-counted bounding box.
+Real videos contain objects
+that occlude, leave the frame, and re-enter. Whenever the previous prediction ˆMt−1|o is empty,
+Eq. 2 would produce an empty prior for o, and the read keep-set could then never include the
+cells the object has to re-emerge into. We mitigate this with a streak-counted bounding-box
+fallback. For each object we maintain two pieces of state across the video: the last non-empty
+bounding box ˆBo = bbox
+  ˆMτ|o
+
+observed at its most recent successful frame τ < t, and a
+streak counter ∆o that increments by one for every consecutive frame on which ˆM|o has been
+empty. When ˆMt−1|o is empty, the fallback prior is
+P(t)
+o
+= dilaters +min(∆o,c)
+ downs( ˆBo)
+
+,
+(5)
+i.e. the cached box is dilated more aggressively the longer the object has been missing, up
+to a cap of rs +c grid cells. This cap c exists because an indefinitely growing prior would
+defeat the purpose of pruning. As soon as a frame produces a non-empty mask for o, the
+streak resets to ∆o = 0 and Eq. 2 resumes. Stably absent objects are therefore searched across
+up to c frames of growing radius before the recovery saturates; we never declare an object
+permanently absent, so ˆBo persists for the whole video.
+
+
+MANDAL, SHASHIKUMAR: RS3-PRUNE
+7
+Sparse memory attention.
+The VOS model’s memory attention is a stack of L self-/cross-
+attention layers that take, at each call, the full mm encoder tokens as queries and the running
+memory bank (K,V) as keys and values. We patch this stack at every layer’s entry: the
+queries are index-gathered onto the |K(t)
+r | kept positions, ˜qt = qt[K(t)
+r ], the attention runs on
+these queries only, and the result is scattered back into a length-mn tensor with zeros at the
+dropped positions:
+Asparse(qt | K,V) = SK(t)
+r
+
+softmax
+ ˜qtK⊤/
+p
+Ck
+
+V
+
+.
+(6)
+After scatter, the attention output is still a m ×n token grid — the model-native shape the
+mask decoder expects — with |K(t)
+r | non-zero entries placed at their original (x,y) coordinates
+and zeros elsewhere. The mask decoder and every downstream tensor shape are therefore
+identical to the dense pipeline; only the work performed by memory attention shrinks heavily.
+RoPE on the sparse subset.
+The model’s memory attention uses rotary positional embed-
+dings [22] with a precomputed frequency table f ∈Cmn×C/2, indexed by the position of each
+query in the full m×n grid. If we left the standard implementation untouched, the gathered
+queries ˜qt would silently be paired with the prefix f[: |K(t)
+r |] of the table, which is incorrect:
+the kept indices are not contiguous, and the prefix slice encodes the wrong (x,y) positions.
+We replace the slice by an index-gather that mirrors the query gather of Eq. 6:
+˜f = f[K(t)
+r ],
+(7)
+so that every gathered query is rotated by the frequency that corresponds to its original grid
+cell. This single correction is what makes sparse memory attention numerically equivalent to
+dense memory attention in the limit ρ →1: at ρ = 1 the gather and scatter become identity
+maps and Eq. 6 reduces exactly to the unmodified memory readout.
+3.2
+Write-side pruning: which tokens enter the bank
+Why a write-side prune is needed.
+Read-side pruning compresses the query axis of
+cross-frame attention but leaves Nmem untouched: every memory commit still deposits a full
+mn-token slab into the memory bank, and on a long video this is what eventually exhausts
+GPU memory. Write-side pruning attacks the same problem at its source by deciding which
+tokens are admitted into the bank in the first place. Our write-side pruning is displayed in
+figure 3.
+Object-boundary keep-set on the encoder grid.
+The object boundary that defines the
+write keep-set is read directly from the seed mask: for each object o ∈O we take M(τo)
+o
+, the
+binary mask of o at its first-appearance frame τo, downsample it by nearest-neighbour to the
+encoder stride s, and dilate the result by Dw grid cells. The write keep-set is the union over
+objects of these per-object dilated regions:
+Kw =
+[
+o∈O
+dilateDw
+ downs
+ M(τo)
+o
+
+,
+|Kw| ≪mn.
+(8)
+Geometrically, Kw is a strict superset of the spatial cells the seed object occupies, plus a
+margin proportional to Dw that anticipates the object’s motion envelope across the rest of the
+
+
+8
+MANDAL, SHASHIKUMAR: RS3-PRUNE
+memory bank
+(K, V)
+Write-side prune
+seed frame
+(ﬁrst frame each object appears)
+per-object
+seed masks
+union of seed masks
+decode
+per
+object
+take
+union
+pool to
+tokens
+memory encoder
+kept
+seeds
+become
+writes
+append
+Figure 3: Write-side prune. For each seed frame — the first frame in which an object appears
+— per-object masks are decoded and unioned into a single seed mask. This union is pooled to
+the token grid to yield the kept index set Kw, which selects the tokens passed to the memory
+encoder Φmem. Only these seed-anchored tokens are appended to the memory bank (K,V),
+preventing background clutter from accumulating in the bank across frames.
+video. Letting ˜Zt = Zt[Kw] denote the encoder-output tokens gathered at the write keep-set,
+only ˜Zt is passed to the memory encoder Φmem, and only its output is appended to the bank
+(K,V). Every stored frame is therefore |Kw| tokens wide rather than mn, and the bank grows
+at a strictly smaller per-frame stride.
+Why this is safe.
+Two properties of Kw make the write-side prune safe. First, Kw is
+computed once at τo and held fixed for every subsequent write of the same sequence: this
+uniform per-frame stride is what lets the memory bank’s long-term consolidation, sieving, and
+prototype-potentiation operations continue working without modification, since they slice the
+bank by a constant per-frame length and we provide one. Second, Kw is geometrically aligned
+with the read-side keep-set K(t)
+r
+of Eq. 4: the read side has no reason to query positions
+whose bank entries are empty, and the relation P(t) ⊆Kw (which holds whenever Dw ≥rs +c)
+guarantees that every active query position has a stored counterpart. On the few sequences in
+which the seed footprint covers > 95% or < 5% of mn, write-side pruning falls through to
+the original write path so that almost-full-frame or almost-empty objects are not lost.
+3.3
+Per-frame morphological closure
+The scattered sparse readout (Eq. 6) places zeros at non-kept cells, which the mask decoder
+occasionally reads as salt-and-pepper holes inside otherwise contiguous object interiors. We
+close these holes with a single per-object morphological closure applied to each predicted
+binary mask ˆMt|o using a 9 × 9 square structuring element. Closure is a dilation followed
+by an erosion: it fills holes smaller than the structuring element and re-knits thin interior
+gaps, but does not grow the outer boundary of the object. The closure runs at the decoder’s
+output resolution, and only after the closure do we take the per-pixel argmax across objects to
+produce the final multi-object palette mask ˆMt. The cost of one 9×9 closure per object per
+frame is negligible compared to memory attention.
+
+
+MANDAL, SHASHIKUMAR: RS3-PRUNE
+9
+3.4
+Why the geometric prior works: token energy on the encoder grid
+The read-side and write-side keep-sets are derived from the object mask, not from the encoder
+features. One could plausibly object that a feature-driven prior — for instance, retaining
+tokens by ℓ2 norm or by their contribution to the attention readout — would carry the same
+information without the need for an explicit mask. The Cauchy–Schwarz argument in Eq. 3 is
+the reason a geometric prior is, in fact, a strict refinement of these feature-driven priors: in the
+limit of a perfect mask, the spatial prior selects exactly the cells whose tokens carry the high
+ℓ2 energy, without having to threshold a noisy scalar. In our setting we do not have a perfect
+mask — we have the previous frame’s prediction, which is a reasonable but noisy proxy —
+and the dilation rs absorbs the residual uncertainty. The result is that retaining K(t)
+r ∪Kw
+keeps the tokens whose energy is, in expectation, the largest, and discards the ones whose
+energy is, in expectation, near zero.
+3.5
+Cross-Architecture Portability
+RS3-Prune applies cleanly to any memory-bank video object segmentation network whose
+pipeline exposes the two boundaries identified in Sec. 3: a memory-attention readout into
+which the current frame presents queries, and a memory-bank insertion path at which the
+current frame’s tokens are committed to long-term storage.
+4
+Experiments
+4.1
+Datasets and Implementation Details
+We evaluate RS3-Prune on five standard video-object-segmentation benchmarks: DAVIS-17
+[18](evaluated using davis 2017 per object evaluation protocol), SA-V [20](evaluated using
+Meta’s official evaluation script), YouTube-VOS [24](evaluated using davis 2017 per object
+evaluation protocol), MOSE [8](evaluated using Codabench evaluation script) and LVOS-
+v2 [9], whose 140 validation clips average ∼1.14 minutes, roughly 5× longer than DAVIS-17
+and specifically stress-test the long-video deployment regime motivating this work, rather
+than serving as a fifth short-clip peer to the other four. All scores are measured on a single
+NVIDIA RTX-4090-class GPU using a batch size of 1.
+4.2
+Main result across five benchmarks
+Table 1 reports J , F, J &F, FPS and VRAM for the five memory-bank architectures (STM
+[16], XMem [6], Cutie [7], SAM2 [20], SAM3.1 [3]) under both the Vanilla and the full RS3-
+Prune configuration on all five datasets. The Vanilla column corresponds to each network’s
+published checkpoint with no modification, meanwhile the RS3-Prune column uses the
+same checkpoint with the read-side keep-set at ρ=0.3 and the write-side keep-set at the
+network-specific dilation. No retraining is performed.
+We evaluate each model along three axes. Region similarity J measures the intersection-
+over-union between the predicted and ground-truth masks, contour accuracy F measures
+the alignment of their boundaries, and we report their mean J &F as the primary accuracy
+metric. Inference speed is reported in frames per second (FPS), measured on a single GPU.
+Peak GPU memory consumption is reported in megabytes (MB) and captures the maximum
+VRAM allocated during inference.
+
+
+10
+MANDAL, SHASHIKUMAR: RS3-PRUNE
+Vanilla
+RS3-Prune
+Dataset
+Model
+J
+F
+J &F
+FPS
+VRAM
+J
+F
+J &F
+FPS
+VRAM
+DAVIS-17 [18]
+STM [16]
+0.775 0.828
+0.802
+37.6
+1043
+0.757 0.782
+0.770
+49.4
+728
+XMem [6]
+0.829 0.896
+0.862
+37.2
+845
+0.821 0.876
+0.849
+69.7
+655
+Cutie [7]
+0.847 0.911
+0.879
+23.8
+436
+0.841 0.895
+0.868
+75.6
+424
+SAM2 [20]
+0.858 0.906
+0.882
+9.6
+1809
+0.774 0.819
+0.797
+11.4
+1791
+SAM3.1 [3] 0.529 0.590
+0.560
+8.70
+7375
+0.517 0.579
+0.548
+8.70
+6154
+SA-V [20]
+STM [16]
+0.474 0.538
+0.506
+32.2
+1327
+0.489 0.516
+0.502
+50.5
+739
+XMem [6]
+0.575 0.651
+0.613
+65.8
+859
+0.513 0.569
+0.541
+71.9
+645
+Cutie [7]
+0.607 0.671
+0.639
+74.1
+501
+0.572 0.620
+0.596
+78.0
+428
+SAM2 [20]
+0.424 0.505
+0.465
+9.1
+2317
+0.481 0.532
+0.506
+10.8
+2243
+SAM3.1 [3] 0.457 0.479
+0.468
+3.7
+8543
+0.420 0.437
+0.429
+6.3
+8450
+YouTube-VOS [24]
+STM [16]
+—
+—
+—
+—
+—
+—
+—
+—
+—
+—
+XMem [6]
+0.819 0.863
+0.841
+68.8
+721
+0.791 0.831
+0.811
+69.5
+650
+Cutie [7]
+0.797 0.839
+0.818
+73.9
+486
+0.759 0.798
+0.779
+74.8
+431
+SAM2 [20]
+0.586 0.590
+0.588
+10.3
+1282
+0.626 0.645
+0.636
+10.8
+1267
+SAM3.1 [3] 0.497 0.515
+0.506
+6.9
+8010
+0.465 0.478
+0.471
+7.2
+7500
+MOSE [8]
+STM [16]
+0.416 0.490
+0.454
+56.2
+1240
+0.438 0.483
+0.461
+60.4
+610
+XMem [6]
+0.527 0.609
+0.569
+66.2
+924
+0.457 0.539
+0.498
+69.9
+788
+Cutie [7]
+0.657 0.739
+0.699
+71.9
+510
+0.630 0.708
+0.669
+74.4
+490
+SAM2 [20]
+0.373 0.424
+0.398
+8.7
+1627
+0.462 0.541
+0.502
+11.2
+1591
+SAM3.1 [3] 0.354 0.386
+0.370
+5.8
+8108
+0.308 0.331
+0.319
+6.5
+7950
+LVOS-v2 [9]
+STM [16]
+0.396 0.324
+0.360
+6.9
+17542
+0.245 0.255
+0.250
+16.2
+17143
+XMem [6]
+0.514 0.534
+0.524
+31.9
+1074
+0.564 0.576
+0.570
+40.9
+989
+Cutie [7]
+0.697 0.673
+0.685
+30.1
+1323
+0.633 0.619
+0.626
+52.6
+1277
+SAM2 [20]
+0.769 0.769
+0.769
+7.8
+15197
+0.650 0.670
+0.660
+13.2
+12961
+SAM3.1 [3] 0.317 0.497
+0.407
+5.2
+25329
+0.370 0.372
+0.371
+6.3
+24563
+Table 1: Main results of RS3-Prune across five VOS benchmarks. Consistent with SOTA
+VOS evaluation metrics, we report J , F and the J &F score, and to display the efficiency
+and lower resources utilised, we report the FPS and VRAM used. VRAM is measured in MB.
+Green marks a gain. — indicates that STM cannot handle new object emergence in middle
+of the video sequence, a characteristic of YT-VOS. bold FPS/ VRAM in the RS3-Prune block
+marks improvement over Vanilla
+Averaged across the all architectures and datasets with measured timings in Table 1, RS3-
+Prune delivers a mean 38.8% FPS speedup and a mean 13.1% peak VRAM reduction
+relative to the unmodified networks. The gain is positive per architecture: averaged over five
+benchmarks (considering just four datasets for STM as STM has no released semi-supervised
+YT-VOS runner), RS3-Prune gives +58% FPS,−32% VRAM on STM, +26% FPS,−16%
+VRAM on XMem, +60% FPS,−7% VRAM on Cutie, +28% FPS,−4% VRAM on SAM2,
++22% FPS,−6% VRAM on SAM3.1.
+J &F -remains competitive over datasets and architectures, and on several video se-
+quences it is better than vanilla despite attending to only a fraction of the tokens and smaller
+context. This is due to the fact of keeping only the geometrically-supported foreground tokens,
+the read-side prune discards background context that a full-softmax readout would otherwise
+integrate as noise. On long or sparsely-annotated video (SAM2 on SA-V [20], YT-VOS and
+MOSE [8]) the prune therefore acts as a denoiser, lifting J &F by several points while still
+running faster and lighter. Concretely, at ρ=0.3 SAM2’s per-frame memory-attention query
+budget drops from the full 64×64 grid (4096 tokens) to ≈1228 (3.3× fewer), yet J &F does
+
+
+MANDAL, SHASHIKUMAR: RS3-PRUNE
+11
+Dataset
+Method
+SAM2
+SAM3.1
+STM
+XMem
+Cutie
+DAVIS-17 [18]
+Vanilla
+.882
+9.6/1809
+.560
+8.7/7375
+.802
+37.6/1043
+.862
+37.2/845
+.879
+23.8/436
+SparseViT [5]
+.508
+12.4/2324
+.545
+8.5/7175
+.647
+22.5/1730
+.791
+46.0/1207
+.808
+80.2/638
+DynamicViT [19]
+.041
+12.5/2324
+.392
+8.5/7175
+.612
+44.8/1730
+.554
+68.7/1207
+.798
+33.1/638
+VLTP [4]
+.133
+12.1/2905
+.012
+8.5/7175
+.275
+45.5/1730
+.291
+74.8/1207
+.553
+32.5/638
+RS3-Prune
+.797
+11.4/1791
+.548
+8.7/6154
+.770
+49.4/728
+.849
+69.7/655
+.868
+75.6/424
+SA-V [20]
+Vanilla
+.465
+9.1/2317
+.468
+3.7/8543
+.506
+32.2/1327
+.613
+65.8/859
+.639
+74.1/501
+SparseViT [5]
+.353
+4.6/3848
+.412
+6.3/8543
+.189
+18.4/3326
+.417
+64.5/1731
+.417
+34.8/883
+DynamicViT [19]
+.210
+5.9/3849
+.307
+4.2/8543
+.181
+38.1/3327
+.286
+66.0/1731
+.417
+35.0/883
+VLTP [4]
+.111
+9.5/4429
+.259
+3.3/9904
+.059
+37.3/3327
+.214
+72.5/1731
+.237
+33.9/883
+RS3-Prune
+.506
+10.8/2243
+.429
+6.3/8450
+.502
+50.5/739
+.541
+71.9/645
+.596
+78.0/428
+Table 2: Comparison against efficient token-reduction baselines. J &F (top) / FPS-
+VRAM in MB (bottom) for each method-backbone pair. All baselines are image-domain
+token-reduction methods with no object- or video-level prior.
+not fall — it improves — because the retained tokens are precisely the object-relevant ones.
+No human in the loop during the run.
+All numbers above come from RS3-Prune’s token
+pruning technique alone: we do not issue any human-in-the-loop prompt between frames of
+a sequence; the mask is propagated from the seed annotation exactly as in each backbone’s
+standard VOS protocol. The reported FPS/ VRAM gains and the competitive J &F are thus
+attributable purely to the read- and write-side pruning. Neither have we leveraged human in the
+loop prompting for the unpruned vanilla VOS network for fair and equal comparison. Because
+the prune is orthogonal to prompting, this same efficiency profile carries over unchanged
+when an interactive prompt is later added to both the pruned and unpruned pipeline.
+4.3
+Comparison of RS3-Prune against prior efficient-VOS methods
+We report the comparison of RS3-Prune against other efficient-VOS methods cited in prior
+works — SparseViT [5], DynamicViT [19], and VLTP [4] — at ρ=0.30, these methods incur
+huge loss in accuracy when plugged in with vanilla VOS methods. Inherently targeting an
+efficiency atop image segmentation backbones these methods are not competitive in video
+settings where the dynamicity of objects is a concern. Without a video/object prior they retain
+the background and drop the tracked object’s (foreground) tokens; RS3-Prune’s geometric
+prior avoids this underperformance.(Table 2)
+
+
+12
+MANDAL, SHASHIKUMAR: RS3-PRUNE
+5
+Ablation
+We isolate the three knobs that define RS3-Prune: (i) which of the two prunes does the work
+(read-side vs. write-side), (ii) how aggressive the read-side keep ratio ρ is, and (iii) how much
+of the stored bank the write-side dilation Dw retains. Throughout we explain each effect
+averaged across several benchmarks.
+5.1
+Read-side vs. write-side across architectures
+Table 3 decomposes RS3-Prune into its two interventions across every architecture in our
+suite. For each one we report Vanilla (V), read-side only (R), and the full recipe (R+W, both
+prunes active).
+Model
+Config
+J &F
+FPS
+VRAM (MB)
+STM [16]
+V
+0.802
+37.6
+1043
+R
+0.735
+40.4
+873
+R+W
+0.770
+49.4
+728
+XMem [6]
+V
+0.862
+37.2
+845
+R
+0.851
+56.1
+698
+R+W
+0.849
+69.7
+655
+Cutie [7]
+V
+0.879
+23.8
+436
+R
+0.867
+59.5
+435
+R+W
+0.868
+75.6
+424
+SAM2 [20]
+V
+0.882
+9.6
+1809
+R
+0.812
+10.2
+1805
+R+W
+0.797
+11.4
+1791
+Table 3: Read-side vs. write-side ablation on DAVIS-17 [18] val. R = read-side prune
+only; R+W = full RS3-Prune. On XMem and Cutie, the read-side prune delivers most of the
+speedup; adding the write-side prune yields a further ∼25% FPS gain and a further VRAM
+reduction over the read-side-only row (6% on XMem, 2.5% on Cutie) at negligible J &F
+cost. On SAM2 and STM, the write-side prune acts as an accuracy/efficiency knob: on SAM2
+it trades 1.5 J &F points for +12% FPS; on STM it improves J &F by 3.5 points while
+delivering the largest VRAM reduction in the suite (30.2% relative to Vanilla).
+The two prunes act on two different resources, and the decomposition makes their division
+of labour explicit. The read-side prune is the speed lever: by capping how many queries reach
+memory attention each frame, it accounts for essentially all of RS3-Prune’s throughput gain.
+The write-side prune is the memory lever: by shrinking the stored bank it delivers most of the
+VRAM reduction. Stacking the two is close to free on any architectures with a top-k readout
+filter — the positions the write side discards were already receiving near-zero attention weight
+at read time, so dropping them from the bank perturbs the readout only negligibly.
+5.2
+Keep ratio ρ within the spatial prior
+The read-side prune keeps the top-ρ·mn tokens inside the geometric prior, ranked by visual
+energy (Eq. 4), so ρ is the upper bound on how many queries reach memory attention
+
+
+MANDAL, SHASHIKUMAR: RS3-PRUNE
+13
+ρ
+J &F
+FPS
+VRAM (MB)
+|K(t)
+r |max
+0.2
+0.846
+74.0
+648
+819
+0.3
+0.849
+69.7
+655
+1228
+0.5
+0.852
+58.4
+681
+2048
+0.7
+0.853
+49.1
+712
+2867
+Vanilla (ρ=1.0)
+0.862
+37.2
+845
+4096
+Table 4: Keep-ratio sweep on XMem [6] (DAVIS-17 [18]) J &F stays within a 0.7 point
+band (0.846–0.853) across ρ ∈[0.2,0.7], while FPS drops by 1.5× and VRAM grows by
+10% as ρ increases. The geometric prior already confines Kr to the cells relevant to attention
+readout; higher ρ admits only background tokens. We adopt ρ=0.3 throughout as the point
+that maximises efficiency at near-optimal J &F.
+Config
+Dw
+J &F
+FPS
+VRAM (MB)
+Vanilla SAM2
+—
+0.882
+9.6
+1809
+Read-side only
+—
+0.812
+10.2
+1805
++ write-side (aggressive)
+12
+0.785
+13.6
+1772
++ write-side (default)
+24
+0.797
+11.4
+1791
+Table 5: Write-side dilation sweep on SAM2 [20] (DAVIS-17 [18]val). Larger Dw
+keeps more positions per stored frame and trades FPS for J &F. The Dw=24 row is the
+configuration used in Table 1.
+each frame. Table 4 sweeps ρ ∈{0.2,0.3,0.5,0.7} on XMem DAVIS-17 with every other
+component of RS3-Prune held fixed.
+The sweep is the empirical analogue of the Cauchy–Schwarz argument [21] of Sec. 3.4:
+the geometric prior already isolates the cells whose tokens carry the high ℓ2 energy, and
+ranking by energy inside that small set converges on the J &F -relevant positions almost
+immediately. Admitting more tokens past the prior only feeds the readout extra background
+energy, which its softmax then normalises away — leaving J &F unchanged while still
+paying the cross-attention cost. In other words, RS3-Prune’s efficiency knob is essentially
+axis-aligned with ρ: the most aggressive budget gives the best FPS/ VRAM at no measurable
+accuracy cost, which is why we adopt ρ=0.3 as the deployment default.
+5.3
+Write-side dilation on SAM2
+Table 5 sweeps the write-side dilation Dw on SAM2. The result is a clean accuracy–efficiency
+tradeoff parameterised by Dw: a smaller Dw aggressively shrinks the bank for more FPS at
+the cost of more J &F ; a larger Dw keeps more of the bank intact and trades that FPS back.
+We adopt Dw=24 as the default configuration in our main results reported in Table 1.
+6
+Discussion
+One prune for speed, one for memory.
+The decomposition in Table 3 gives RS3-Prune
+a clean mental model. The read-side prune is the speed lever — it caps how many queries
+reach memory attention each frame and so carries essentially all of the throughput gain —
+
+
+14
+MANDAL, SHASHIKUMAR: RS3-PRUNE
+while the write-side prune is the memory lever, shrinking the stored bank and delivering
+most of the VRAM reduction. Because the two act on different resources, their benefits
+add: averaged over its five benchmarks, RS3-Prune gives +58% FPS/−32% VRAM on STM,
++26% FPS/−16% VRAM on XMem, +60% FPS/−7% VRAM on Cutie, +28% FPS/−4% VRAM
+on SAM2, and +22% FPS/−6% VRAM on SAM3.1 — an overall +38.8% FPS,−13.1% VRAM
+with no retraining and no change to the released checkpoints.
+Why pruning can improve accuracy.
+The reason is structural, not a free lunch from extra
+capacity: by keeping only the geometrically-supported foreground tokens, the read-side prune
+withholds the background context that a full-softmax readout would otherwise integrate as
+noise. (as evident from the Green numbers in table 1)
+Relation to query-only token pruning.
+Prior attention-time token pruning [4, 5, 19]
+compresses only the queries that read from the bank; it cannot shrink Nmem. The write-side
+prune is the lever that compresses Nmem and therefore the peak memory of the long-video
+regime. The two prunes are complementary.
+7
+Limitation
+RS3-Prune holds the write keep-set fixed at the seed-frame footprint dilated by Dw. On videos
+whose objects travel far outside that footprint, the dilation either covers the trajectory at
+the cost of FPS or undercovers it at the cost of J &F — the honest sensitivity behind the
+long-video drops on the top-k backbones. A learned, motion-history-aware write keep-set
+would close this corner without disturbing the rest of the recipe. However, in our case, we
+have a fixed keep-set in memory for all object occurrences throughout the video; hence, one
+object completely moving out of frame won’t disrupt outputting masks for other objects.
+Likewise, the read-side keep-set is propagated from the previous prediction; under catastrophic
+prediction loss the streak-counted bounding-box fallback (Eq. 5) carries the system, but a
+dedicated re-detection branch would shorten the recovery window further. Both are plug-in
+extensions, not re-designs.
+8
+Conclusion
+We argued that the deployment ceiling of modern memory-bank VOS is not the algorithmic
+gap between the strongest networks, but the unbounded growth of the token budget that flows
+through their memory pipelines. RS3-Prune compresses that budget at the two structurally
+distinct points where it accumulates — between the image encoder and memory attention (the
+read side, our speed lever) and between the memory encoder and the memory bank (the write
+side, our memory lever) — with a single, training-free, geometric recipe that runs atop any
+VOS network and leaves the network’s consolidation machinery intact. RS3-Prune retains far
+more accuracy than other efficient-VOS methods at lower time and memory budget across
+the benchmark datasets. The recipe ports to any memory-bank VOS network that exposes
+the two encoder boundaries we identify, turning the token budget of these systems from an
+architectural constant into a tunable knob.
+
+
+MANDAL, SHASHIKUMAR: RS3-PRUNE
+15
+Acknowledgement
+The first author was affiliated with Attentive AI as a research engineer
+during the course of this work. We thank IIT Delhi for providing compute resources.
+References
+[1] Daniel Bolya, Cheng-Yang Fu, Xiaoliang Dai, Peizhao Zhang, Christoph Feichtenhofer,
+and Judy Hoffman. Token merging: Your vit but faster, 2023. URL https://arxiv.
+org/abs/2210.09461.
+[2] Sergi Caelles, Kevis-Kokitsi Maninis, Jordi Pont-Tuset, Laura Leal-Taixé, Daniel Cre-
+mers, and Luc Van Gool. One-shot video object segmentation. In Proceedings of the
+IEEE conference on computer vision and pattern recognition, pages 221–230, 2017.
+[3] Nicolas Carion, Laura Gustafson, Yuan-Ting Hu, Shoubhik Debnath, Ronghang Hu,
+Didac Suris, Chaitanya Ryali, Kalyan Vasudev Alwala, Haitham Khedr, Andrew Huang,
+Jie Lei, Tengyu Ma, Baishan Guo, Arpit Kalla, Markus Marks, Joseph Greer, Meng
+Wang, Peize Sun, Roman Rädle, Triantafyllos Afouras, Effrosyni Mavroudi, Katherine
+Xu, Tsung-Han Wu, Yu Zhou, Liliane Momeni, Rishi Hazra, Shuangrui Ding, Sagar
+Vaze, Francois Porcher, Feng Li, Siyuan Li, Aishwarya Kamath, Ho Kei Cheng, Piotr
+Dollár, Nikhila Ravi, Kate Saenko, Pengchuan Zhang, and Christoph Feichtenhofer.
+Sam 3: Segment anything with concepts, 2025. URL https://arxiv.org/abs/
+2511.16719.
+[4] Hanning Chen, Yang Ni, Wenjun Huang, Yezi Liu, SungHeon Jeong, Fei Wen, Nathaniel
+Bastian, Hugo Latapie, and Mohsen Imani. Vltp: Vision-language guided token pruning
+for task-oriented segmentation. In Proceedings of the Winter Conference on Applications
+of Computer Vision, pages 9335–9345, 2025.
+[5] Xuanyao Chen, Zhijian Liu, Haotian Tang, Li Yi, Hang Zhao, and Song Han. Sparse-
+vit: Revisiting activation sparsity for efficient high-resolution vision transformer. In
+Proceedings of the IEEE/CVF conference on computer vision and pattern recognition,
+pages 2061–2070, 2023.
+[6] Ho Kei Cheng and Alexander G Schwing. Xmem: Long-term video object segmentation
+with an atkinson-shiffrin memory model. In European conference on computer vision,
+pages 640–658. Springer, 2022.
+[7] Ho Kei Cheng, Seoung Wug Oh, Brian Price, Joon-Young Lee, and Alexander Schwing.
+Putting the object back into video object segmentation. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pages 3151–3161, 2024.
+[8] Henghui Ding, Chang Liu, Shuting He, Xudong Jiang, Philip HS Torr, and Song Bai.
+Mose: A new dataset for video object segmentation in complex scenes. In Proceedings
+of the IEEE/CVF international conference on computer vision, pages 20224–20234,
+2023.
+[9] Lingyi Hong, Zhongying Liu, Wenchao Chen, Chenzhi Tan, Yuang Feng, Xinyu Zhou,
+Pinxue Guo, Jinglun Li, Zhaoyu Chen, Shuyong Gao, et al. LVOS: A benchmark for
+large-scale long-term video object segmentation. IEEE Transactions on Pattern Analysis
+and Machine Intelligence, 2025.
+
+
+16
+MANDAL, SHASHIKUMAR: RS3-PRUNE
+[10] Anna Khoreva, Federico Perazzi, Rodrigo Benenson, Bernt Schiele, and Alexander
+Sorkine-Hornung. Learning video object segmentation from static images. arXiv
+preprint arXiv:1612.02646, 2016.
+[11] Alexander Kirillov, Eric Mintun, Nikhila Ravi, Hanzi Mao, Chloe Rolland, Laura
+Gustafson, Tete Xiao, Spencer Whitehead, Alexander C Berg, Wan-Yen Lo, et al. Seg-
+ment anything. In Proceedings of the IEEE/CVF international conference on computer
+vision, pages 4015–4026, 2023.
+[12] Zhenglun Kong, Peiyan Dong, Xiaolong Ma, Xin Meng, Mengshu Sun, Wei Niu, Xuan
+Shen, Geng Yuan, Bin Ren, Minghai Qin, Hao Tang, and Yanzhi Wang. Spvit: Enabling
+faster vision transformers via soft token pruning, 2022. URL https://arxiv.org/
+abs/2112.13890.
+[13] Youwei Liang, Chongjian Ge, Zhan Tong, Yibing Song, Jue Wang, and Pengtao Xie. Not
+all patches are what you need: Expediting vision transformers via token reorganizations,
+2022. URL https://arxiv.org/abs/2202.07800.
+[14] Avilasha Mandal, Chaoning Zhang, Fachrina Dewi Puspitasari, Xudong Wang, Jiaquan
+Zhang, Caiyan Qin, Guoqing Wang, Yang Yang, and Heng Tao Shen. Fast sam2 with
+text-driven token pruning, 2025. URL https://arxiv.org/abs/2512.21333.
+[15] Seoung Wug Oh, Joon-Young Lee, Kalyan Sunkavalli, and Seon Joo Kim. Fast video
+object segmentation by reference-guided mask propagation. In Proceedings of the IEEE
+conference on computer vision and pattern recognition, pages 7376–7385, 2018.
+[16] Seoung Wug Oh, Joon-Young Lee, Ning Xu, and Seon Joo Kim. Video object segmenta-
+tion using space-time memory networks. In Proceedings of the IEEE/CVF international
+conference on computer vision, pages 9226–9235, 2019.
+[17] Federico Perazzi, Jordi Pont-Tuset, Brian McWilliams, Luc Van Gool, Markus Gross,
+and Alexander Sorkine-Hornung. A benchmark dataset and evaluation methodology for
+video object segmentation. In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition (CVPR), June 2016.
+[18] Jordi Pont-Tuset, Federico Perazzi, Sergi Caelles, Pablo Arbeláez, Alex Sorkine-
+Hornung, and Luc Van Gool. The 2017 davis challenge on video object segmentation.
+arXiv preprint arXiv:1704.00675, 2017.
+[19] Yongming Rao, Wenliang Zhao, Benlin Liu, Jiwen Lu, Jie Zhou, and Cho-Jui Hsieh.
+Dynamicvit: Efficient vision transformers with dynamic token sparsification. Advances
+in neural information processing systems, 34:13937–13949, 2021.
+[20] Nikhila Ravi, Valentin Gabeur, Yuan-Ting Hu, Ronghang Hu, Chaitanya Ryali, Tengyu
+Ma, Haitham Khedr, Roman Rädle, Chloe Rolland, Laura Gustafson, et al. Sam 2:
+Segment anything in images and videos. In International Conference on Learning
+Representations, volume 2025, pages 28085–28128, 2025.
+[21] J Michael Steele. The Cauchy-Schwarz master class: an introduction to the art of
+mathematical inequalities. Cambridge University Press, 2004.
+
+
+MANDAL, SHASHIKUMAR: RS3-PRUNE
+17
+[22] Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan, Wen Bo, and Yunfeng Liu.
+Roformer: Enhanced transformer with rotary position embedding. Neurocomputing,
+568:127063, 2024.
+[23] Xinjian Wu, Fanhu Zeng, Xiudong Wang, and Xinghao Chen. Ppt: Token pruning and
+pooling for efficient vision transformers, 2024. URL https://arxiv.org/abs/
+2310.01812.
+[24] Ning Xu, Linjie Yang, Yuchen Fan, Dingcheng Yue, Yuchen Liang, Jianchao Yang,
+and Thomas Huang. Youtube-vos: A large-scale video object segmentation benchmark.
+arXiv preprint arXiv:1809.03327, 2018.
+[25] Yifan Xu, Zhijie Zhang, Mengdan Zhang, Kekai Sheng, Ke Li, Weiming Dong, Liqing
+Zhang, Changsheng Xu, and Xing Sun. Evo-vit: Slow-fast token evolution for dynamic
+vision transformer, 2021. URL https://arxiv.org/abs/2108.01390.
+[26] Fanhu Zeng and Deli Yu. M2M-TAG: Training-free many-to-many token aggregation
+for vision transformer acceleration. In NeurIPS 2024 Workshop, 2024. URL https:
+//openreview.net/pdf?id=LO3Mw8Jrk0.
+[27] Fanhu Zeng, Deli Yu, Zhenglun Kong, and Hao Tang. Token transforming: A unified
+and training-free token compression framework for vision transformer acceleration,
+2025. URL https://arxiv.org/abs/2506.05709.
+[28] Wenhui Zhu, Xiwen Chen, Zhipeng Wang, Shao Tang, Sayan Ghosh, Xuanzhao Dong,
+Rajat Koner, and Yalin Wang. Evtp-ivs: Effective visual token pruning for unifying
+instruction visual segmentation in multi-modal large language models. In Proceedings
+of the IEEE/CVF Winter Conference on Applications of Computer Vision (WACV), pages
+7158–7167, March 2026.
+Appendix
+Algorithm at a glance
+Algorithm 1 collects the full pipeline as it runs on a single video. No step introduces a
+new learned parameter and no step requires backbone retraining: every line either reuses a
+tensor already produced by the frozen VOS network (Zt, qt, ˆMt|o) or applies a deterministic
+geometric operation (dilation, downsampling, top-k selection) to it.
+Per-frame cost follows directly from the keep-set sizes rather than the full token grid.
+The read side attends |K(t)
+r | ≤ρ hw queries against the memory bank instead of the full
+hw, so read-side attention cost scales by ρ relative to the dense pipeline. The write side
+commits |Kw| ≪hw tokens per frame rather than the full grid, so the memory bank after T
+frames holds O(T ·|Kw|) entries instead of O(T ·hw) — the asymptotic source of the VRAM
+reduction reported in Experiments section of main paper. Both keep-sets are recomputed
+by cheap geometric operations (bounding-box dilation, nearest-neighbour downsampling, a
+single top-k) whose combined cost is negligible next to a single memory-attention layer.
+Two invariants hold throughout Algorithm 1 and are what make the recipe safe to drop
+into an unmodified backbone. First, Kw is fixed once at τo and reused for every write of the
+
+
+18
+MANDAL, SHASHIKUMAR: RS3-PRUNE
+same sequence (line 6 is never re-entered), so the memory bank’s own consolidation and
+pruning logic — which assumes a constant per-frame stride — continues to operate exactly
+as designed. Second, whenever Dw ≥rs + c, the containment P(t) ⊆Kw holds at every t,
+guaranteeing that the read side never queries a bank position that was never written — the
+read and write prunes never work at cross purposes.
+Algorithm 1: RS3-Prune— one pass over a video.
+Input
+:Frames I0,...,IT−1; seed masks {M(0)
+o }o∈O (palette PNG)
+Hyper-params :ρ=0.3, s=16, h=w=64, rs=4, c=14, Dw, closure kernel 9×9.
+Output
+:Per-frame palette masks ˆM1,..., ˆMT−1.
+// Frame 0:
+seed prior, write keep-set, memory bank
+if text prompt p given then
+M(0)
+o
+←rasterised bounding box from a grounded detector on (I0, p)
+end
+B(0)
+o
+←bbox(M(0)
+o );
+ˆBo ←B(0)
+o ;
+∆o ←0, ∀o
+P(0) ←S
+o dilaters(downs(B(0)
+o ))
+// Eq. 1
+Kw ←S
+o dilateDw(downs(M(τo)
+o
+))
+// Eq. 8
+Seed SAM 2’s memory bank from {M(0)
+o } via its native prompt path
+// Per-frame propagation
+for t ←1 to T −1 do
+Zt ←Φenc(It)
+// h×w×C tokens
+foreach o ∈O do
+if ˆMt−1|o non-empty then
+P(t)
+o
+←dilaters(downs( ˆMt−1|o))
+// Eq. 2
+else
+P(t)
+o
+←dilaters+min(∆o,c)(downs( ˆBo))
+// Eq. 5
+end
+end
+P(t) ←S
+o P(t)
+o
+K(t)
+r
+←arg-topρHW
+i∈P(t)
+∥zi∥2
+2
+// Eq. 4
+˜qt ←qt[K(t)
+r ]; ˜f ←f[K(t)
+r ]
+// Eq. 7
+A ←SK(t)
+r (softmax(˜qtK⊤/√Ck)V)
+// Eq. 6
+{ ˆMt|o} ←D(A); ˆMt|o ←close9×9( ˆMt|o), ∀o
+// Sec. 3.3
+foreach o ∈O do
+if ˆMt|o non-empty then
+ˆBo ←bbox( ˆMt|o); ∆o ←0
+else
+∆o ←∆o +1
+end
+end
+ˆMt ←argmaxo ˆMt|o
+˜Zt ←Zt[Kw]; (K,V) ←(K,V)∪Φmem( ˜Zt, ˆMt)
+// sparse write
+emit ˆMt
+end

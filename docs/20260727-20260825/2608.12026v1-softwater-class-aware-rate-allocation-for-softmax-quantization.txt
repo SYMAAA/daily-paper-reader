@@ -1,0 +1,3410 @@
+SOFTWATER: CLASS-AWARE RATE ALLOCATION FOR
+SOFTMAX QUANTIZATION
+Joao V. Cavalcanti & Ashia C. Wilson
+Department of Electrical Engineering and Computer Science
+Massachusetts Institute of Technology
+Cambridge, MA 02139, USA
+{caval,ashia}@mit.edu
+ABSTRACT
+Post-training quantization pipelines routinely leave the softmax output layer in
+high precision. Yet in small LLMs with modern vocabularies, the head holds 15–
+30% of all parameters, so a nominal “2-bit” model with an fp16 head can store
+several times as many bits per weight. We pose softmax-layer quantization as a
+rate-distortion problem under the KL divergence between the original and quan-
+tized output distributions. A second-order analysis reveals a class-aware geome-
+try: quantization error is weighted jointly by feature covariance and class-specific
+softmax curvature. A separability approximation replaces the Kn×Kn Cholesky
+with one n × n factorization rescaled per class, making the lattice encodable by
+successive interference cancellation, with both statistics from a single forward
+pass. The resulting method, SoftWater, gives fine grids to frequent, low-variance
+classes and coarse grids to rare ones, a large gap under Zipfian token distributions.
+Across five models from 1B to 32B, SoftWater outperforms the released WaterSIC
+quantizer (near-optimal under linear-layer WMSE but not output KL) at matched
+head rates on 59 of 60 test points, using none of that pipeline’s refinements and
+cutting head-induced KL by 6.5×–8.3× at 2 bits. On Llama-3.2-1B-Instruct with
+quantized bodies, a 2-bit head removes 45–60% of stored bytes for a 2.9–3.7%
+perplexity increase. Because the class-side statistic comes from calibration data,
+matching calibration to the deployment domain gives the lowest KL on that do-
+main throughout. On a tied model, a 4-bit head is near-lossless and a 2-bit head
+costs under 4% perplexity, making head quantization of such models practical.
+1
+INTRODUCTION
+Post-training quantization (PTQ) replaces trained weights with low-precision ones while keeping
+the output close to the original. For the linear layers that make up most of an LLM, the standard
+objective is a weighted mean-squared error (WMSE) on the layer output, E∥(W −ˆW)X∥2, targeted
+by sequential rounding Frantar et al. (2023a;b); Zhang et al. (2026); Chen et al. (2026), lattice
+codebooks Chee et al. (2024); Tseng et al. (2024; 2025); Savkin et al. (2025), or learned clipping
+and rotations Shao et al. (2024); Liu et al. (2025b); Ashkboos et al. (2024); Shao et al. (2025b).
+Most recently, WaterSIC Lifar et al. (2026) brought the WMSE problem within 0.255 bits of its
+information-theoretic limit.
+One layer does not fit this picture. When a linear map feeds a softmax, the model outputs a prob-
+ability distribution, so the distortion that matters is the KL divergence between the original and
+quantized outputs. PTQ pipelines usually skip this layer, leaving the head in high precision and
+excluding it from the reported bits per weight. That is costly: in small models with modern vocab-
+ularies the head holds 15–30% of all parameters (Table 1), so a “2-bit” Llama-3.2-1B with an fp16
+head stores nearly 5 bits per weight. Prior work on the output layer replaces it Grave et al. (2017);
+Jean et al. (2015); Liu et al. (2025a); Shao et al. (2025a); Tranheden et al. (2026); Lee et al. (2026)
+rather than quantizing it under the KL metric.
+We treat the head as a rate-distortion problem under KL. Where WMSE uses the error weight I⊗ΣX,
+a second-order expansion of the KL divergence gives E[(diag(p) −pp⊤) ⊗XX⊤]: the softmax
+1
+arXiv:2608.12026v1  [cs.LG]  12 Aug 2026
+
+
+Table 1: Share of total parameters held by the output head (vocab × hidden) in modern small LLMs.
+Model
+Vocab
+Hidden
+Head (M)
+% of total
+Gemma-3-1B
+262,144
+1152
+302
+30.2
+Qwen3-0.6B
+151,936
+1024
+156
+26.1
+Gemma-2-2B
+256,128
+2304
+590
+22.6
+Llama-3.2-1B
+128,256
+2048
+263
+21.3
+Qwen3-1.7B
+151,936
+2048
+311
+18.1
+Gemma-3-4B
+262,144
+2560
+671
+15.6
+Hessian ties every class to the input statistics. A separable surrogate, the diagonal statistic ¯λk =
+E[pk(1 −pk)] paired with the usual feature covariance, gives class k a grid scaled by ¯λ−1/2
+k
+and
+column i a grid scaled by |ℓii|−1. The resulting method, SoftWater, gives fine grids to frequent, low-
+variance classes and coarse grids to rare ones; token distributions are Zipfian, so this gap is large.
+Exploiting it costs one extra diagonal accumulator in the same calibration pass, and the decode
+format does not change.
+The raw allocation is coarsest where the expansion is least trustworthy: classes with vanishing
+calibration probability. We therefore smooth the calibration distribution with a prior, capping the
+grid spacing on those rows. The smoothing weight interpolates between two regimes: at one end
+the calibration distribution sets the allocation, at the other every class gets equal weight and we
+recover WaterSIC. SoftWater thus contains the WMSE treatment of the head as the case where the
+deployment distribution is assumed uniform.
+Our contributions are:
+• Problem formulation. We pose softmax-layer quantization as a rate-distortion problem
+under output KL and derive the induced error metric. A dither argument and a separability
+assumption, which we validate empirically, reduce it to a class-rescaled lattice problem
+whose two statistics are read off one calibration pass (§3–4).
+• The SoftWater algorithm. The class-side scale is class frequency discounted by cross-
+context variability, so SoftWater spends bits on classes that are frequent and low-variance.
+A smoothing prior caps the spacing on classes the calibration set leaves uncovered, keeping
+the allocation inside the range where the Taylor expansion is valid (§4.1–4.4).
+• Head quantization results. Across five models from 1B to 32B parameters, SoftWater
+outperforms the released WaterSIC quantizer at matched head rates on 59 of 60 test points
+while using none of that pipeline’s refinements, and transfers unchanged to models with
+released GuidedQuant bodies Kim et al. (2025). The class-side factor carries domain infor-
+mation the covariance does not, letting a head be targeted at its deployment domain, and it
+cuts whole-model size by up to 60% (§5).
+2
+PRIOR WORK
+We review the WMSE formulation of linear layer quantization, the WaterSIC algorithm whose SIC
+encoder we reuse, and recent work beyond MSE objectives.
+2.1
+LINEAR LAYER QUANTIZATION
+A linear layer takes an activation X ∈Rn and a weight matrix W ∈RK×n and outputs z = WX.
+Quantization looks for ˆW ∈RK×n minimizing the distortion
+D =
+1
+KnE∥( ˆW −W)X∥2
+F =
+1
+Kn
+K
+X
+k=1
+( ˆWk −Wk)ΣX( ˆWk −Wk)⊤,
+(1)
+where Wk and ˆWk are rows and ΣX = EX[XX⊤]. Most calibration-based PTQ methods target (1):
+GPTQ and its successors by sequential rounding (Frantar et al., 2023a;b; Zhang et al., 2026; Chen
+2
+
+
+et al., 2026), QuIP-style methods by incoherence processing and structured codebooks (Chee et al.,
+2024; Tseng et al., 2024; 2025; Savkin et al., 2025).
+2.2
+THE WATERSIC ALGORITHM
+Lifar et al. (2026) solve (1) within 0.255 bits of the information-theoretic limit (Lifar et al., 2026,
+Theorem 3.3) by allocating rates per column from ΣX.
+Let L be the lower triangular Cholesky factor of ΣX = LL⊤. WaterSIC restricts ˆWk to a scaled
+integer lattice Z1×nA, where A = diag(α1, · · · , αn) with |A|1/n = ¯α: the lattice has the same
+point density ¯α−n as ¯αZ1×n, but each αi sets the grid resolution of column i, which entropy coding
+turns into a per-column bit rate. The objective reads
+D =
+1
+Kn
+K
+X
+k=1
+∥( ˆWkA −Wk)L∥2,
+(2)
+with ˆWk restricted to Z1×n, an NP-hard problem. WaterSIC solves it approximately with successive
+interference cancellation (SIC), which exploits the triangular structure of L: columns are encoded in
+sequence by scalar equations that account for previously quantized entries. All rows are processed
+identically, since (2) decouples them.
+It remains to set the scales A. Assume the rows Wk are iid N(0, σ2
+W I) and σW /¯α →∞. Then the
+quantization error approaches a uniform distribution (Lifar et al., 2026, Lemma 3.2, Appendix B),
+and with per-column entropy coding the rate approaches, as K grows,
+RSIC ≈RHigh-Rate(D, ΣX) + 1
+2 log
+2πe
+12
+
++ 1
+2 log
+ 1
+n
+Pn
+i=1(αiℓii)2
+Qn
+i=1(αiℓii)2/n
+
+,
+(3)
+where RHigh-Rate(D, ΣX) is the optimal rate and ℓii is the i-th diagonal entry of L. The choice
+αi = cWS
+|ℓii|,
+i = 1, · · · , n,
+(4)
+kills the third term and attains the (1/2) log(2πe/12) ≈0.255 bit gap; here cWS > 0 sets the lattice
+density, and cWS = ¯α|L|1/n recovers the density ¯α−n.
+The released pipeline adds several modifications (Lifar et al., 2026, see §4). We keep the two that
+any unequal-rate scheme needs: entropy coding, which turns the integer codes into a bitstream and
+is what makes unequal per-column rates realizable, and rate assignment, which tunes cWS by the
+secant method since the post-coding rate cannot be set directly. The rest are quality refinements
+orthogonal to rate allocation, and we do not use them, so the gains in §5 are attributable to the
+allocation alone and are in principle additive with them. One deserves mention: dead feature erasure
+targets near-zero-variance coordinates in early-layer inputs, and the released quantizer applies it to
+the head too; because the head reads a well-conditioned final hidden state, we use nominal damping
+instead (δ = 10−6 mean(diagΣX)). Activation drift and residual stream correction are vacuous for
+a terminal layer that runs on a fixed body and writes into nothing, so we omit them.
+2.3
+QUANTIZATION METRICS BEYOND MSE
+WMSE is the standard metric in model quantization (e.g., Nagel et al., 2020; Frantar et al., 2023a),
+mainly because it is tractable: it decouples rows, admits tools like Cholesky decompositions, con-
+nects directly to rate-distortion theory, and needs forward passes only. But it is a proxy for output
+behavior, and recent work has looked for better metrics; Lifar et al. (2026) list approximating a target
+perplexity or KL loss as their first open direction. Lee et al. (2026) swap MSE for the cross entropy
+between full-precision and quantized logits in the final block before the head. Kim et al. (2025)
+weight the layerwise objective by end-loss guidance, made tractable by assuming Fisher coefficients
+coupling different output channels vanish, so the objective again decouples across rows; this is the
+end-to-end analogue of the cross-row decorrelation we derive in §4.3, which for the softmax layer
+we can justify rather than assume, and their released pipeline produces the quantized bodies of §5.
+Tseng et al. (2026) build YAQA on tractable Hessian sketches of end-to-end KL, also decomposing
+the Hessian as a Kronecker product, but target adaptive rounding for body layers, whereas we derive
+3
+
+
+the layer-local KL geometry of the softmax head and its rate allocation. A separate line replaces
+the head itself (Grave et al., 2017; Jean et al., 2015; Liu et al., 2025a; Shao et al., 2025a; Tranheden
+et al., 2026); we keep the architecture and quantize the existing head.
+3
+PROBLEM SETUP
+We consider a softmax layer that takes an input X ∈Rn with n features and produces a distribution
+p = softmax(z) ∈RK over K classes, where z = WX are the logits, W ∈RK×n are the weights
+with rows Wk ∈R1×n, and
+pk = softmax(z)k =
+exp(zk)
+PK
+l=1 exp(zl)
+.
+We treat X as a random vector drawn from the distribution of layer inputs induced by the data the
+model is deployed on, and estimate expectations with respect to it from a calibration sample. Both
+z and p are therefore functions of X; we suppress the dependence except where it matters.
+For LLM heads, K is the vocabulary size and W can hold a large fraction of all parameters, and
+is often tied to the input embedding (Table 1). To mitigate this cost, we replace W by a matrix ˆW
+whose entries are described by a budget of R bits per weight. Let ∆= ˆW −W and δ = ∆X
+denote the weight and logit perturbations, with rows ∆k ∈R1×n and entries δk = ∆kX. The class
+distribution of the quantized model is then q ∈RK, defined by qk = softmax(z + δ)k. Our goal
+is to find, for a given rate R, the ˆW that minimizes the discrepancy between p and q, which §4.2
+formalizes as an expected KL divergence.
+4
+SOFTWATER: PER-COLUMN AND PER-CLASS RATE ALLOCATION
+The KL geometry of a softmax layer induces rate allocation along two axes: input features and out-
+put classes. SoftWater allocates along both axes. A separability approximation makes the resulting
+lattice encodable by SIC at O(n3) cost. We derive its objective, reduce it to a tractable problem, add
+a smoothing step that keeps the proxy accurate, and contrast linear layer and softmax quantization.
+4.1
+LINEAR LAYER VS SOFTMAX QUANTIZATION
+In §2.2 we saw that SIC’s error geometry over the Cholesky factor L, combined with entropy coding,
+points to grid spacing proportional to |ℓii|−1. Our goal in this section is to show that, for softmax
+quantization, the grid spacing should instead be proportional to (¯λ1/2
+k
+|ℓii|)−1, where
+¯λk = EX[pk(1 −pk)] = EX[pk](1 −EX[pk]) −Var[pk].
+That is, the grid spacing is inversely proportional to the square root of class frequency discounted
+by cross-context variance, the spread of pk across contexts. Therefore, through (¯λ1/2
+k
+|ℓii|)−1,
+SoftWater corrects for in-feature geometry, class frequency and class variance.
+In particular, SoftWater allocates
+• more bits to frequent classes than infrequent classes;
+• more bits to low-variance classes than high-variance classes.
+The size of the gap between the two grid spacing choices belongs to the class distribution, not the
+algorithm. For a near-uniform distribution the ¯λk are nearly equal and SoftWater recovers WaterSIC.
+For the heavy tails of natural-language vocabularies, EX[pk] spans many orders of magnitude and
+the spread in ¯λ−1/2
+k
+is large, bounded only by the smoothing floor of §4.4. This is why the class
+side, not the feature side, is where a softmax layer’s rate budget is won or lost. Solving the softmax
+problem through WMSE therefore amounts to assuming identically distributed classes.
+4
+
+
+4.2
+OBJECTIVE DERIVATION
+Linear layer quantization measures distortion by the output WMSE (Frantar et al., 2023a; Lifar et al.,
+2026). A softmax output has more structure: it lies on the probability simplex and is a distribution.
+We therefore use the KL divergence, which captures changes in that distribution directly, and look
+for ˆW minimizing
+DKL (p ∥q) =
+X
+k
+pk(log pk −log qk).
+Writing
+log pk = zk −log
+K
+X
+l=1
+exp(zl),
+log qk = zk + δk −log
+K
+X
+l=1
+exp(zl + δl),
+and substituting gives
+DKL (p ∥q) = log
+K
+X
+l=1
+exp(zl + δl) −log
+K
+X
+l=1
+exp(zl) −p⊤δ.
+Let f(δ) = DKL (p ∥q), with
+∇f(δ) = softmax(z + δ) −p
+and
+∇2f(δ) = diag(q) −qq⊤.
+Since f(0) = 0 and ∇f(0) = 0, a second-order Taylor expansion at δ = 0 gives
+DKL (p ∥q) = f(0) + ∇f(0)⊤δ + 1
+2δ⊤∇2f(0)δ + O(∥δ∥3)
+≈1
+2X⊤∆⊤∇2f(0)∆X
+= 1
+2vec(∆)⊤(∇2f(0) ⊗XX⊤)vec(∆),
+(5)
+where vec(∆) ∈RKn stacks the rows of ∆and
+∇2f(0) = diag(p) −pp⊤.
+(6)
+The expansion (5) holds as long as the logit perturbation stays small; §4.4 enforces this and §5.6
+verifies the reduction that follows. The objective is then
+EX
+1
+2vec(∆)⊤(∇2f(0) ⊗XX⊤)vec(∆)
+
+= 1
+2vec(∆)⊤EX[∇2f(0) ⊗XX⊤]vec(∆).
+(7)
+The error weight is thus EX[∇2f(0) ⊗XX⊤], a Kn × Kn matrix coupling classes and features.
+Encoding against this directly would need a Cholesky factorization of that Kn×Kn matrix, costing
+O(K3n3) time and O(K2n2) memory. We need a tractable approximation, which its structure
+allows.
+4.3
+A TRACTABLE PROXY
+The obstacle is that the expectation couples ∇2f(0) and XX⊤, giving sample-dependent off-
+diagonal terms and a full matrix. If we can decouple them, then chol(A ⊗B) = chol(A) ⊗chol(B)
+splits the factorization into two smaller ones.
+Under SIC, rows are quantized independently against the same L, with sequential correction along
+coordinates within each row: errors are coupled within a row, not across rows. Per-entry subtractive
+dither makes this precise. Under the dither ensemble the errors are zero-mean and uncorrelated
+across rows, and the dither is drawn independently of the data, so the expectations over X and over
+∆factor. The cross-terms −pkpl, k̸ = l, then contribute nothing, and the class-side diagonal is
+exact:
+EX,∆[vec(∆)⊤(∇2f(0) ⊗XX⊤)vec(∆)] = EX,∆[vec(∆)⊤(λ ⊗XX⊤)vec(∆)],
+(8)
+5
+
+
+where λ is the softmax curvature
+λ = diag(p ⊙(1 −p)).
+(9)
+Replacing the error weight in (7) by its class-side diagonal gives
+1
+2vec(∆)⊤EX[λ ⊗XX⊤]vec(∆),
+(10)
+again a deterministic function of the perturbation. Dithering is thus the device that identifies (10) as
+the right target; empirically, undithered errors already behave as if uncorrelated across rows, so we
+drop it from the final scheme and leave it as an optional tweak.
+The matrix EX[λ ⊗XX⊤] is block diagonal, so K Cholesky decompositions of size n replace one
+of size Kn. Except for very small K that is still too expensive, so we assume that λ and XX⊤are
+separable.
+Assumption 1 (Separability). The softmax curvature λ and XX⊤are uncorrelated:
+EX[λ ⊗XX⊤] = EX[λ] ⊗EX[XX⊤].
+(11)
+Assumption 1 holds only approximately; we bound the error below and test it in §5.6. It lets the
+two Kronecker factors be estimated independently: the covariance ΣX separately from the expected
+curvature
+¯λ = EX[λ] = EX[diag(p ⊙(1 −p))].
+(12)
+Moreover, ¯λ is just K scalars, accumulated from the output distributions the calibration forward
+pass already produces: SoftWater needs no backward pass and no second pass over the data, and
+costs one K-vector alongside the n×n covariance, both from the same forward pass. The Cholesky
+factor L of ΣX is computed once and rescaled K times to give the factor L = ¯λ1/2 ⊗L of ¯λ ⊗ΣX.
+The distortion metric is then
+D = 1
+2vec(∆)⊤LL⊤vec(∆),
+(13)
+a WMSE over the joint index (k, i), which SIC minimizes directly on L.
+The induced grid spacing for class k and column i is
+α(k−1)n+i =
+cSW
+¯λ1/2
+k
+|ℓii|
+,
+k = 1, · · · , K,
+i = 1, · · · , n,
+(14)
+where cSW > 0 again sets the point density. Letting
+B = diag(¯λ−1/2
+1
+, · · · , ¯λ−1/2
+K
+),
+(15)
+A = diag(|ℓ11|−1, · · · , |ℓnn|−1),
+(16)
+and choosing
+cSW = ¯α|B|−1/K|A|−1/n,
+(17)
+gives point density ¯α−Kn. SoftWater therefore uses cSWBZK×nA, rescaled on the class side as
+well as the feature side. The hyperparameter cSW is the sole rate knob: it scales the lattice uniformly,
+raises the post-coding rate monotonically, and is set by secant search (§2.2).
+Remark.
+We notice that A and B are not just column and row rescalers; they change the grid
+spacing itself, redistributing rate across classes through the coupling with cSW. In contrast, plain
+column and row rescalers applied after coding change reconstruction but not rate.
+On the separability assumption.
+Although λk = λk(X) depends on X, separability does not
+require independence between class probabilities and the input. It requires only that the class-
+dependent curvature be weakly correlated with the second-order geometry of X. The error in the
+k-th block is
+EX[λk(X)XX⊤] −¯λkΣX = EX
+
+(λk(X) −¯λk)(XX⊤−ΣX)
+
+,
+(18)
+6
+
+
+so the approximation is accurate when examples with greater curvature on class k do not have
+systematically different feature covariance. More directly, for the k-th row ∆k of the perturbation,
+∆k
+ EX[λk(X)XX⊤] −¯λkΣX
+
+∆⊤
+k = CovX
+ λk(X), (∆kX)2
+.
+(19)
+The proxy therefore need not match each block in every direction. It is enough that class uncertainty
+be weakly correlated with feature energy along the error directions the algorithm produces. This is
+plausible when representations are normalized and their geometry is stable across contexts. If ∥X∥2
+is constant, for instance, the exact and separable blocks have the same trace,
+Tr
+ EX[λk(X)XX⊤]
+
+= ¯λk Tr(ΣX),
+so separability preserves the total curvature per class and drops only class-dependent anisotropy.
+Such factorizations are common for tractable Kronecker-factored curvature. Martens & Grosse
+(2015) reach the same approximation from natural gradient descent, where the Fisher matrix defines
+the KL trust region and its output-layer block is the Hessian of our objective; they need separability
+to invert the preconditioner via (A ⊗B)−1 = A−1 ⊗B−1. Tseng et al. (2026) reach Kronecker
+approximations in weight-only PTQ, but their treatment is agnostic to the output layer and does not
+exploit softmax structure, so they approximate the end-to-end error Hessian and obtain their factors
+by power iteration, whereas ours come from an explicit analytical expression. In §5.6 we measure
+how far our factors sit from the Frobenius-optimal Kronecker factorization of the same error weight,
+and find the proxy underestimates the true distortion by at most 10% across models, rates, and
+datasets.
+4.4
+A TRACTABLE AND ACCURATE PROXY: SMOOTHING
+The proxy (13) is accurate only if the above assumptions hold, which we verify in §5, and if the
+Taylor expansion of DKL (p ∥q) stays accurate, which requires a small logit perturbation δ.
+Grid spacing under our metric is proportional to (¯λ1/2
+k
+|ℓii|)−1, so rare classes get coarser grids. If
+a class is absent from the calibration data, then pk ≪1 and ¯λ1/2
+k
+≪1, the grid is far too coarse,
+the weights are badly perturbed, and (5) breaks down. We therefore smooth p to lower bound pk,
+computing
+˜λ = EX[diag(˜p ⊙(1 −˜p))],
+(20)
+where, given ϵ ∈(0, 1),
+˜p = (1 −ϵ)p + ϵ/K
+(21)
+mixes p with a uniform distribution over the K classes. Since ˜pk ≥ϵ/K pointwise, ˜λk ≥
+ϵ
+K (1−ϵ
+K ),
+while ˜λk ≤1/4 always. The ratio between the coarsest and finest class-side spacings is therefore
+at most 1
+2
+p
+K/ϵ up to an O(ϵ/K) correction, so ϵ caps the class-side rate spread at log2 of that
+quantity, whatever the calibration data. Uncovered classes thus keep logit perturbations inside the
+regime where (5) is valid.
+So ϵ interpolates the curvature. At ϵ = 0, ˜λ comes from the calibration data alone (12). At ϵ = 1,
+it weighs every class equally and recovers WaterSIC. We fix ϵ = 0.1 as default, and ˜λ replaces ¯λ in
+the grid spacings (14), the rescalers B, and the constant cSW.
+5
+EXPERIMENTS
+We evaluate SoftWater on five models from 1B to 32B parameters across the Llama and Qwen
+families: the head alone against an fp16 body (§5.1), then fully quantized models with released
+GuidedQuant bodies (§5.2), evaluated downstream in §5.4. Three further experiments probe the
+method: §5.3 targets calibration at a deployment domain, §5.5 asks what the class-side statistic
+needs to be, and §5.6 tests separability. Our arm runs the plain allocation with no post-hoc rescaler
+optimization, LMMSE shrinkage, or finetuning; the baseline is the full released WaterSIC pipeline
+minus finetuning.
+7
+
+
+Algorithm 1 SoftWater weight-only quantization of softmax
+Require: W ∈RK×n, ΣX ⪰0, ˜λ = EX[diag(˜p ⊙(1 −˜p))], ¯α > 0.
+Ensure: α ∈Rn
++, β ∈RK
++ , B1, . . . , Bn ∈{0, 1}∗s.t. ˆW = diag(β) ZSIC diag(α).
+1: Compute lower-triangular L ∈Rn×n s.t. ΣX = LL⊤
+▷Cholesky
+2: βk ←(Q
+l ˜λ1/2
+l
+)1/K
+˜λ1/2
+k
+,
+∀k ∈[K]
+▷class-side scales
+3: αi ←¯α · |L|1/n
+|ℓii| ,
+∀i ∈[n]
+▷feature-side water filling; ℓii is the ith diagonal element of L
+4: R ←WL
+5: for i = n : 1 do
+6:
+ZSIC,:,i ←round
+ R:,i ⊘(αiℓii β)
+
+▷⊘: elementwise division by the K-vector αiℓii β
+7:
+R ←R −αi
+ β ⊙ZSIC,:,i
+
+· Li,:
+▷⊙: elementwise product; Li,: is the ith row of L
+8: end for
+9: for i = 1 : n do
+10:
+Bi ←EC
+ ZSIC,:,i
+
+▷entropy coding of the ith column
+11: end for
+Table 2: The body is kept in fp16 and only the head matrix is quantized. KL is measured against
+the all-fp16 model on identical token streams. WS: WaterSIC w/o FT. Parentheses after each model
+name give its vocabulary size; on PPL cells, the increase over the fp16 row of the same model; on
+SW KL cells, the WS/SW KL ratio at that rate. Best value per head group in bold.
+Method
+Head
+WT2 PPL (↓)
+WT2 KL (↓)
+C4 PPL (↓)
+C4 KL (↓)
+Llama-3.2-1B (128,256)
+fp16
+16
+11.313
+0
+15.614
+0
+WS
+2
+12.049 (+6.5%)
+0.06192
+17.283 (+10.7%)
+0.09957
+SW (ours)
+2
+11.419 (+0.9%)
+0.00957 (6.5×)
+16.035 (+2.7%)
+0.02834 (3.5×)
+WS
+3
+11.469 (+1.4%)
+0.01364
+15.965 (+2.2%)
+0.02176
+SW (ours)
+3
+11.342 (+0.3%)
+0.00206 (6.6×)
+15.704 (+0.6%)
+0.00572 (3.8×)
+WS
+4
+11.356 (+0.4%)
+0.00319
+15.713 (+0.6%)
+0.00526
+SW (ours)
+4
+11.320 (+0.1%)
+0.00047 (6.8×)
+15.640 (+0.2%)
+0.00138 (3.8×)
+Qwen3-32B (151,936)
+fp16
+16
+8.452
+0
+12.269
+0
+WS
+2
+8.756 (+3.6%)
+0.05835
+13.029 (+6.2%)
+0.08106
+SW (ours)
+2
+8.498 (+0.5%)
+0.00703 (8.3×)
+12.479 (+1.7%)
+0.01596 (5.1×)
+WS
+3
+8.500 (+0.6%)
+0.01246
+12.439 (+1.4%)
+0.01683
+SW (ours)
+3
+8.464 (+0.1%)
+0.00147 (8.5×)
+12.315 (+0.4%)
+0.00341 (4.9×)
+WS
+4
+8.477 (+0.3%)
+0.00295
+12.302 (+0.3%)
+0.00397
+SW (ours)
+4
+8.457 (+0.1%)
+0.00035 (8.4×)
+12.275 (+0.1%)
+0.00081 (4.9×)
+5.1
+HEAD-ONLY ISOLATION
+We quantize the heads of five models to 2, 3 and 4 bits and keep their bodies in fp16; Llama-3.2-1B
+and Qwen3-1.7B tie head and embedding, so a separate fp16 embedding is kept. The baseline is
+the official WaterSIC release1 without finetuning, so both arms are purely layerwise, with nominal
+damping δ = 10−6 mean(diagΣX). Both are calibrated on 128 sequences of 1024 tokens from
+WikiText2 (WT2), and we measure perplexity (PPL) and DKL (pbase ∥pquant) on WT2 and C4.
+Table 2 shows two of the five models; Table 7 gives the rest. Every arm lands within 0.005 bits of its
+target rate, and SoftWater wins 59 of 60 cells; in all five models a 2-bit SoftWater head outperforms
+a 3-bit WaterSIC head on WT2 KL, so the method buys roughly one bit. The KL advantage is 6.5×
+to 8.3× on WT2 at 2 bits and nearly flat in head rate, but smaller out of domain2 (3.5×–5.1× on
+C4); perplexity behaves differently, with the gap to fp16 nearly closing at 4 bits.
+1Code downloaded from https://github.com/egorlifar/watersic.
+2In-domain means the distribution of the calibration data. Out-of-domain is analogous.
+8
+
+
+Table 3: Perplexity (PPL) on WikiText2 (WT2) and C4, and KL divergence from baseline: fp16-
+head, body quantized at 2 and 4 bits with GuidedQuant. Body and head columns give respective
+rates. WS: WaterSIC w/o FT. Parentheses give increase over the fp16-head row of the same body.
+Model size and reduction (∆size) after quantizing the tied head. Best value per head group in bold.
+Llama-3.2-1B-Instruct
+Body
+Method
+Head
+Size (MiB)
+∆size
+WT2 PPL (↓)
+WT2 KL (↓)
+C4 PPL (↓)
+C4 KL (↓)
+2
+fp16
+16
+737.3
+0.0%
+26.81
+0.497
+38.54
+0.511
+WS
+2
+297.0
+−59.7%
+31.53 (+17.6%)
+0.671 (+34.9%)
+47.14 (+22.3%)
+0.732 (+43.3%)
+SW (ours)
+2
+297.0
+−59.7%
+27.80 (+3.7%)
+0.536 (+7.9%)
+42.39 (+10.0%)
+0.607 (+18.8%)
+WS
+3
+327.7
+−55.6%
+27.60 (+3.0%)
+0.533 (+7.2%)
+40.75 (+5.7%)
+0.570 (+11.7%)
+SW (ours)
+3
+327.7
+−55.6%
+27.03 (+0.8%)
+0.506 (+1.7%)
+39.49 (+2.5%)
+0.536 (+4.9%)
+WS
+4
+358.4
+−51.4%
+27.16 (+1.3%)
+0.510 (+2.6%)
+39.03 (+1.3%)
+0.524 (+2.6%)
+SW (ours)
+4
+358.4
+−51.4%
+26.89 (+0.3%)
+0.501 (+0.7%)
+38.99 (+1.2%)
+0.521 (+2.1%)
+4
+fp16
+16
+962.6
+0.0%
+16.53
+0.028
+24.54
+0.028
+WS
+2
+532.5
+−44.7%
+18.14 (+9.7%)
+0.138 (+396.2%)
+28.11 (+14.5%)
+0.178 (+531.5%)
+SW (ours)
+2
+532.5
+−44.7%
+17.01 (+2.9%)
+0.056 (+101.9%)
+26.60 (+8.4%)
+0.106 (+276.9%)
+WS
+3
+563.2
+−41.5%
+16.83 (+1.8%)
+0.052 (+88.9%)
+25.26 (+2.9%)
+0.063 (+122.3%)
+SW (ours)
+3
+563.2
+−41.5%
+16.64 (+0.7%)
+0.034 (+24.1%)
+25.12 (+2.3%)
+0.052 (+84.6%)
+WS
+4
+594.0
+−38.3%
+16.65 (+0.7%)
+0.036 (+28.0%)
+24.70 (+0.6%)
+0.037 (+32.4%)
+SW (ours)
+4
+594.0
+−38.3%
+16.58 (+0.3%)
+0.030 (+9.3%)
+24.77 (+0.9%)
+0.035 (+25.3%)
+5.2
+QUANTIZED BODY, TIED HEAD
+We next evaluate fully quantized Llama-3.2-1B-Instruct, whose tied head means the quantized
+weights are also the embedding, so head quantization hits both ends of the model at once. Since
+the WaterSIC repository has no quantized bodies, we use released checkpoints3 (BlockLDLQ under
+GuidedQuant Hessians Kim et al. (2025) in the QTIP trellis format Tseng et al. (2025)), decoded to
+dense fp16 with a standalone reimplementation verified against the reference forward. Both quan-
+tizers calibrate on hidden states from the frozen quantized-body model, so ΣX and ˜λ reflect what
+the head sees at deployment, and neither activation drift nor residual compensation applies (§2.2).
+Table 3 shows two of the three body rates; Table 8 gives the third. The head is 21.3% of the fp16
+model’s parameters, but once the body is quantized it holds 52% to 68% of the stored bytes, so
+quantizing it is the only remaining way to shrink the model. A 2-bit SoftWater head removes 45–
+60% of the stored bytes for a 2.9–3.7% WT2 perplexity increase, against 9.7–17.6% for WaterSIC,
+and SoftWater is better in 35 of 36 cells; at 4 bits the head is essentially free, costing 0.2–0.3% while
+still removing at least 38%. The head also dominates as bodies improve: on the 4-bit body a 2-bit
+head already doubles total KL under SoftWater and quintuples it under the released quantizer.
+5.3
+DOMAIN-TARGETED CALIBRATION
+Rate allocation varies across domains, so we target calibration to five themes, EN Wikipedia, DE
+Wikipedia, Python, Math web and Case law, and evaluate in and out of domain; Table 9 in the
+appendix gives the corpora, splits and fields. We calibrate on 1.05M tokens rather than 131k, since
+at 131k most of the vocabulary is never observed and the domains would not be distinguishable
+through ˜λ.
+Table 4 shows the in-domain results from Table 10. The targeting claim holds exactly on KL:
+for every evaluation domain and head rate, the lowest KL among the ten arms is the SoftWater head
+calibrated on that domain, and at 2 bits matching calibration lowers KL by 2.0× to 5.0× over the best
+mismatched arm. On the diagonal SoftWater also outperforms the released quantizer everywhere at
+2 bits, by 1.9× to 6.5× in KL, and wins 41 of 50 stream cells overall; seven of the nine losses
+are the code column under non-code calibration, the expected cost of sharpening allocation toward
+calibration-frequent tokens.
+5.4
+ZERO-SHOT TASKS
+Perplexity and KL measure exactly what SoftWater controls, so we now check downstream accu-
+racy. We reuse the configurations of §5.2 with head arms bit-identical to the perplexity runs, and
+3https://huggingface.co/jusjinuk/Llama-3.2-1B-Instruct-2bit-GuidedQuant-QTIP.
+9
+
+
+Table 4: In-domain next-token top-1 accuracy of Llama-3.2-1B-Instruct, fp16 body with a tied head
+quantized at 2, 3 and 4 bits. Each arm is calibrated on the domain it is evaluated on. KL: divergence
+from the all-fp16 model on the matching stream. WS: WaterSIC w/o FT. Best value per rate in bold.
+Top-1 accuracy (%, ↑)
+KL (↓)
+Head
+Method
+WT2
+DeWiki
+Code
+Math
+Law
+WT2
+DeWiki
+Code
+Math
+Law
+16
+fp16
+45.6
+52.9
+66.9
+54.6
+44.5
+0.000
+0.000
+0.000
+0.000
+0.000
+2
+WS
+44.7
+50.0
+65.6
+53.5
+42.7
+0.096
+0.183
+0.099
+0.090
+0.163
+SW (ours)
+45.4
+52.5
+66.3
+54.3
+44.1
+0.021
+0.028
+0.052
+0.028
+0.025
+3
+WS
+45.4
+52.3
+66.7
+54.3
+44.1
+0.023
+0.040
+0.024
+0.023
+0.034
+SW (ours)
+45.5
+52.6
+66.8
+54.5
+44.4
+0.005
+0.011
+0.014
+0.009
+0.007
+4
+WS
+45.6
+52.6
+66.8
+54.5
+44.3
+0.006
+0.012
+0.007
+0.007
+0.009
+SW (ours)
+45.6
+52.9
+66.9
+54.4
+44.5
+0.002
+0.003
+0.004
+0.002
+0.002
+Table 5: Zero-shot accuracy (higher better) of Llama-3.2-1B-Instruct with a 2-bit tied head on
+GuidedQuant bodies at 2, 3 and 4 bits. WS: WaterSIC w/o FT; SW: SoftWater. CTX: context length
+of 131k WT2-train tokens. lm-evaluation-harness 0.4.12, 0-shot. Best value per body block in bold.
+Body
+Method
+CTX
+ARC-e
+ARC-c
+HellaS
+LAMB
+Wino
+PIQA
+OBQA
+Mean
+16
+fp16 head
+—
+63.8
+37.8
+61.7
+60.1
+61.6
+74.9
+37.2
+56.72
+2
+fp16 head
+—
+58.0
+32.4
+49.3
+46.3
+55.5
+69.2
+31.4
+48.86
+WS
+128
+53.6
+31.1
+47.2
+37.3
+55.7
+67.2
+30.6
+46.11
+WS
+1024
+53.2
+31.5
+47.4
+36.8
+55.3
+67.7
+29.4
+45.89
+SW (ours)
+128
+56.5
+31.7
+48.7
+45.4
+56.8
+67.8
+32.6
+48.49
+SW (ours)
+1024
+54.7
+31.1
+47.9
+43.9
+55.5
+68.5
+31.8
+47.63
+3
+fp16 head
+—
+63.0
+36.3
+58.3
+59.5
+61.7
+73.1
+35.6
+55.35
+WS
+128
+59.7
+34.5
+57.0
+50.7
+60.5
+72.2
+35.4
+52.84
+WS
+1024
+57.9
+32.8
+57.2
+53.1
+60.5
+71.8
+35.6
+52.68
+SW (ours)
+128
+62.8
+36.6
+57.2
+58.5
+60.2
+73.0
+35.2
+54.78
+SW (ours)
+1024
+61.0
+35.4
+57.5
+58.4
+60.2
+72.3
+36.2
+54.43
+4
+fp16 head
+—
+62.7
+37.7
+60.3
+60.1
+62.0
+73.6
+37.8
+56.30
+WS
+128
+60.5
+36.6
+58.9
+53.6
+61.5
+72.2
+35.8
+54.16
+WS
+1024
+60.3
+37.0
+59.2
+54.0
+60.9
+72.1
+37.2
+54.39
+SW (ours)
+128
+62.2
+37.4
+59.6
+59.4
+61.8
+73.2
+36.4
+55.72
+SW (ours)
+1024
+61.2
+37.5
+59.3
+59.2
+61.6
+72.7
+35.0
+55.23
+evaluate zero-shot with lm-evaluation-harness 0.4.12 on ARC-Easy, ARC-Challenge, HellaSwag,
+LAMBADA, WinoGrande, PIQA and OpenBookQA, reporting normalized accuracy where defined
+and accuracy for LAMBADA.
+Table 5 shows 2-bit heads on all three bodies; Tables 11–13 give every head rate. At a 2-bit head
+SoftWater roughly halves the mean accuracy lost to head quantization on every body, cutting the drop
+from 2.97, 2.67 and 1.91 points to 1.23, 0.92 and 1.07; the gap narrows with head rate and closes at
+4 bits. The difference is concentrated in LAMBADA, the only task scored by next-token prediction
+rather than by ranking continuations, and so the one KL controls directly: at 2 bits SoftWater gains
+5.2 to 7.1 points. Sharpening the grids of frequent, low-variance classes protects exactly the token-
+level distribution KL measures.
+Calibration diversity.
+Unlike ΣX, the extra per-class statistic is a token frequency, so it benefits
+from many distinct contexts rather than many tokens. Holding the budget at 131k tokens and re-
+chunking into 128-token contexts instead of 1024 lifts the 2-bit-head mean by 0.35 to 0.86 points,
+while moving WaterSIC by at most 0.23; quadrupling the budget at context length 1024 helps by a
+similar amount and buys nothing that re-chunking does not. Context count, not token count, is the
+binding resource for ˜λ.
+5.5
+CLASS-SIDE STATISTIC ABLATION
+For most tokens ˜pk(1 −˜pk) ≈˜pk because ˜pk is small, so we ask whether the second-moment
+correction matters: we replace the average softmax curvature EX[˜pk(1 −˜pk)] with the average
+marginal ¯pk = EX[˜pk]. We also replace it with ˜πk, the unigram frequency of token k smoothed
+the same way, which requires no forward pass and asks whether the model carries information the
+corpus does not.
+10
+
+
+Table 6: Separability diagnostics on Llama-3.2-1B.
+(a) ρ:
+relative proxy error (22).
+bits =
+1
+2 log2(1 + ρ). SW calibrated with WT2;
+Eval is the sample the ratio is measured on.
+Eval
+WT2
+C4
+Rate
+2
+3
+4
+2
+3
+4
+ρ
++0.10
++0.09
++0.09
++0.08
++0.08
++0.07
+Bits
+0.07
+0.06
+0.06
+0.06
+0.06
+0.05
+(b) Convergence of alternating power iteration to its fixed point
+(a⋆, B⋆) from three initializations. SW: a0 = ˜λ, B0 = ΣX;
+WS: a0 = I, B0 = ΣX; Id: a0 = I, B0 = I.
+Init
+SW (ours)
+WS
+Id
+Round
+0
+1
+2
+0
+1
+2
+0
+1
+2
+cos(a, a⋆)
+0.99
+1.00
+1.00
+0.03
+1.00
+1.00
+0.03
+0.99
+1.00
+cos(B, B⋆)
+0.98
+1.00
+1.00
+0.98
+1.00
+1.00
+0.05
+1.00
+1.00
+Table 14 shows the results. SoftWater and the ¯pk-variant are close in domain, but SoftWater wins
+every out-of-domain KL cell and 12 of 15 in-domain ones, so the second-moment correction is small
+but systematic and is what makes the allocation transfer off the calibration domain. Both variants
+beat ˜πk at every rate on every model, by roughly 2× in KL, so the model’s own marginal carries
+information the corpus count does not. Since ¯λk and ¯pk come from the same forward pass, SoftWater
+is the best of the three.
+5.6
+SEPARABILITY
+To test Assumption 1, define Qk = 1
+2∆kEX[λk(X)XX⊤]∆⊤
+k and Sk = 1
+2 ˜λk∆kΣX∆⊤
+k , the con-
+tribution of class k to the true and approximate distortion, and the relative proxy error
+ρ =
+PK
+k=1 Qk
+PK
+k=1 Sk
+−1,
+(22)
+whose rate penalty 1
+2 log2(1+ρ) is the extra bits needed to close the gap. Since Sk uses the smoothed
+˜λk that the deployed scheme optimizes, ρ combines the separability gap with the deliberate bias from
+smoothing. Quantizing the head with SoftWater calibrated on WT2 and computing both sums on
+WT2 and C4, Table 6a shows the proxy underestimates the true distortion by at most 10%, a rate
+penalty of at most 0.07 bits.
+Since the fit is imperfect, we ask whether better Kronecker factorizations exist. We adapt the power
+iteration of Tseng et al. (2026) (Appendix B) to obtain sketches a ⊗B with a diagonal, run on
+EX[˜λ(X)⊗XX⊤] at ϵ = 0.1, so its fixed point is the Frobenius-optimal factorization of the weight
+SoftWater targets. Comparing three initializations, (˜λ, ΣX) (SoftWater), (I, ΣX) (WaterSIC) and
+(I, I), Table 6b shows the SoftWater factors are close to optimal from the start.
+6
+CONCLUSION
+We posed softmax-layer quantization as a rate-distortion problem under output KL, and reduced it
+via a separable second-order surrogate to a class-rescaled lattice whose two statistics come from one
+calibration pass. SoftWater allocates rate by class frequency and variance, with a smoothing prior
+that caps the spread on uncovered classes and interpolates back to WaterSIC as the prior takes over.
+Across five models from 1B to 32B parameters it outperforms the released WaterSIC quantizer at
+matched head rates without any of that pipeline’s refinements, halves the zero-shot accuracy lost to
+a 2-bit head, targets a deployment domain through its calibration statistic, and shrinks whole-model
+size by up to 60%. Two limitations bound these results: the separable surrogate is accurate to within
+10% on the models we measure but not guaranteed in general, and the deployed-model experiments
+rest on a single family of released quantized bodies. Beyond LLM heads, the analysis applies to any
+linear-softmax layer with a fixed class dimension, including vision and speech classifiers and MoE
+routers, whose skewed expert utilization mirrors the Zipfian structure we exploit.
+11
+
+
+REFERENCES
+Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L. Croci, Bo Li, Pashmina Cameron, Mar-
+tin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. QuaRot: Outlier-Free 4-Bit In-
+ference in Rotated LLMs, October 2024. URL http://arxiv.org/abs/2404.00456.
+arXiv:2404.00456 [cs].
+Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and Christopher De Sa. QuIP: 2-Bit Quantization of
+Large Language Models With Guarantees, January 2024. URL http://arxiv.org/abs/
+2307.13304. arXiv:2307.13304 [cs].
+Jiale Chen, Yalda Shabanzadeh, Elvir Crnˇcevi´c, Torsten Hoefler, and Dan Alistarh. The Geometry
+of LLM Quantization: GPTQ as Babai’s Nearest Plane Algorithm, May 2026. URL http:
+//arxiv.org/abs/2507.18553. arXiv:2507.18553 [cs.LG].
+Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. GPTQ: Accurate Post-Training
+Quantization for Generative Pre-trained Transformers, March 2023a. URL http://arxiv.
+org/abs/2210.17323. arXiv:2210.17323 [cs].
+Elias Frantar, Sidak Pal Singh, and Dan Alistarh. Optimal Brain Compression: A Framework for
+Accurate Post-Training Quantization and Pruning, January 2023b. URL http://arxiv.org/
+abs/2208.11580. arXiv:2208.11580 [cs].
+Edouard Grave, Armand Joulin, Moustapha Ciss´e, David Grangier, and Herv´e J´egou. Efficient soft-
+max approximation for GPUs, June 2017. URL http://arxiv.org/abs/1609.04309.
+arXiv:1609.04309 [cs.CL].
+S´ebastien Jean, Kyunghyun Cho, Roland Memisevic, and Yoshua Bengio. On Using Very Large
+Target Vocabulary for Neural Machine Translation. In Proceedings of the 53rd Annual Meet-
+ing of the Association for Computational Linguistics and the 7th International Joint Confer-
+ence on Natural Language Processing (Volume 1: Long Papers), pp. 1–10, Beijing, China,
+2015. Association for Computational Linguistics.
+doi: 10.3115/v1/P15-1001.
+URL http:
+//aclweb.org/anthology/P15-1001.
+Jinuk Kim, Marwa El Halabi, Wonpyo Park, Clemens JS Schaefer, Deokjae Lee, Yeonhong Park,
+Jae W. Lee, and Hyun Oh Song. GuidedQuant: Large Language Model Quantization via Exploit-
+ing End Loss Guidance, September 2025. URL http://arxiv.org/abs/2505.07004.
+arXiv:2505.07004 [cs.LG].
+Jung Hyun Lee, June Yong Yang, Jungwook Choi, and Eunho Yang. LFQ: Logit-aware Final-block
+Quantization for Boosting the Generation Quality of Low-Bit Quantized LLMs, May 2026. URL
+http://arxiv.org/abs/2605.29756. arXiv:2605.29756 [cs.AI].
+Egor Lifar, Semyon Savkin, Or Ordentlich, and Yury Polyanskiy.
+WaterSIC: Information-
+Theoretically (Near) Optimal Linear Layer Quantization, June 2026. URL http://arxiv.
+org/abs/2603.04956. arXiv:2603.04956 [cs.LG].
+Dong Liu, Yanxuan Yu, and Ben Lengerich. CSV-Decode: Certifiable Sub-Vocabulary Decoding
+for Efficient Large Language Model Inference, November 2025a. URL http://arxiv.org/
+abs/2511.21702. arXiv:2511.21702 [cs.CL].
+Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghuraman Krish-
+namoorthi, Vikas Chandra, Yuandong Tian, and Tijmen Blankevoort. SpinQuant: LLM quantiza-
+tion with learned rotations, February 2025b. URL http://arxiv.org/abs/2405.16406.
+arXiv:2405.16406 [cs].
+James Martens and Roger Grosse. Optimizing Neural Networks with Kronecker-factored Approx-
+imate Curvature, 2015. URL https://arxiv.org/abs/1503.05671. Version Number:
+7.
+Markus Nagel, Rana Ali Amjad, Mart van Baalen, Christos Louizos, and Tijmen Blankevoort. Up or
+Down? Adaptive Rounding for Post-Training Quantization, June 2020. URL http://arxiv.
+org/abs/2004.10568. arXiv:2004.10568 [cs].
+12
+
+
+Semyon Savkin, Eitan Porat, Or Ordentlich, and Yury Polyanskiy. NestQuant: Nested Lattice Quan-
+tization for Matrix Products and LLMs, July 2025. URL http://arxiv.org/abs/2502.
+09720. arXiv:2502.09720 [cs.LG].
+Jintian Shao, Hongyi Huang, Jiayi Wu, YiMing Cheng, ZhiYu Wu, You Shan, and MingKai Zheng.
+VQ-Logits: Compressing the Output Bottleneck of Large Language Models via Vector Quan-
+tized Logits, May 2025a. URL http://arxiv.org/abs/2505.10202. arXiv:2505.10202
+[cs.CL].
+Wenqi Shao, Mengzhao Chen, Zhaoyang Zhang, Peng Xu, Lirui Zhao, Zhiqian Li, Kaipeng Zhang,
+Peng Gao, Yu Qiao, and Ping Luo.
+OmniQuant: Omnidirectionally Calibrated Quantization
+for Large Language Models, March 2024. URL http://arxiv.org/abs/2308.13137.
+arXiv:2308.13137 [cs.LG].
+Yuantian Shao, Yuanteng Chen, Peisong Wang, Jianlin Yu, Jing Lin, Yiwu Yao, Zhihui Wei, and
+Jian Cheng.
+DartQuant: Efficient Rotational Distribution Calibration for LLM Quantization,
+November 2025b. URL http://arxiv.org/abs/2511.04063. arXiv:2511.04063 [cs].
+Wilhelm Tranheden, Shahnawaz Ahmed, Devdatt Dubhashi, Jonna Matthiesen, and Hannes von
+Essen. FlashHead: Efficient Drop-In Replacement for the Classification Head in Language Model
+Inference, March 2026. URL http://arxiv.org/abs/2603.14591. arXiv:2603.14591
+[cs.LG].
+Albert Tseng, Jerry Chee, Qingyao Sun, Volodymyr Kuleshov, and Christopher De Sa. QuIP#: Even
+Better LLM Quantization with Hadamard Incoherence and Lattice Codebooks, June 2024. URL
+http://arxiv.org/abs/2402.04396. arXiv:2402.04396 [cs].
+Albert Tseng, Qingyao Sun, David Hou, and Christopher De Sa. QTIP: Quantization with Trellises
+and Incoherence Processing, June 2025.
+URL http://arxiv.org/abs/2406.11235.
+arXiv:2406.11235 [cs].
+Albert Tseng, Zhaofeng Sun, and Christopher De Sa. Model-Preserving Adaptive Rounding, June
+2026. URL http://arxiv.org/abs/2505.22988. arXiv:2505.22988 [cs.LG].
+Charles F. Van Loan.
+The ubiquitous Kronecker product.
+Journal of Computational and Ap-
+plied Mathematics, 123(1-2):85–100, November 2000.
+ISSN 03770427.
+doi:
+10.1016/
+S0377-0427(00)00393-9.
+URL https://linkinghub.elsevier.com/retrieve/
+pii/S0377042700003939.
+Shihao Zhang, Haoyu Zhang, Ian Colbert, and Rayan Saab. Qronos: Correcting the Past by Shaping
+the Future... in Post-Training Quantization, February 2026. URL http://arxiv.org/abs/
+2505.11695. arXiv:2505.11695 [cs.LG].
+13
+
+
+A
+EXPERIMENT DETAILS
+A.1
+HEAD-ONLY ISOLATION
+Table 7: Head-only isolation: the body is kept in fp16 and only the head matrix is quantized; tied
+models (Llama-3.2-1B, Qwen3-1.7B) retain an fp16 copy of the embedding. KL is measured against
+the all-fp16 model on identical token streams. WS: WaterSIC w/o FT. Parentheses after each model
+name give its vocabulary size V ; on PPL cells, the increase over the fp16 row of the same model;
+on SW KL cells, the WS/SW KL ratio at that rate. Best value per head group in bold.
+Method
+Head
+WT2 PPL (↓)
+WT2 KL (↓)
+C4 PPL (↓)
+C4 KL (↓)
+Llama-3.2-1B (128,256)
+fp16
+16
+11.313
+0
+15.614
+0
+WS
+2
+12.049 (+6.5%)
+0.06192
+17.283 (+10.7%)
+0.09957
+SW (ours)
+2
+11.419 (+0.9%)
+0.00957 (6.5×)
+16.035 (+2.7%)
+0.02834 (3.5×)
+WS
+3
+11.469 (+1.4%)
+0.01364
+15.965 (+2.2%)
+0.02176
+SW (ours)
+3
+11.342 (+0.3%)
+0.00206 (6.6×)
+15.704 (+0.6%)
+0.00572 (3.8×)
+WS
+4
+11.356 (+0.4%)
+0.00319
+15.713 (+0.6%)
+0.00526
+SW (ours)
+4
+11.320 (+0.1%)
+0.00047 (6.8×)
+15.640 (+0.2%)
+0.00138 (3.8×)
+Qwen3-1.7B (151,936)
+fp16
+16
+18.285
+0
+22.621
+0
+WS
+2
+18.876 (+3.2%)
+0.06788
+24.129 (+6.7%)
+0.09054
+SW (ours)
+2
+18.460 (+1.0%)
+0.00900 (7.5×)
+23.075 (+2.0%)
+0.01998 (4.5×)
+WS
+3
+18.374 (+0.5%)
+0.01448
+22.916 (+1.3%)
+0.02017
+SW (ours)
+3
+18.317 (+0.2%)
+0.00199 (7.3×)
+22.724 (+0.5%)
+0.00443 (4.6×)
+WS
+4
+18.277 (−0.0%)
+0.00347
+22.650 (+0.1%)
+0.00487
+SW (ours)
+4
+18.298 (+0.1%)
+0.00045 (7.7×)
+22.633 (+0.1%)
+0.00105 (4.6×)
+Llama-3.1-8B-Instruct (128,256)
+fp16
+16
+8.388
+0
+14.189
+0
+WS
+2
+8.758 (+4.4%)
+0.04583
+15.462 (+9.0%)
+0.07487
+SW (ours)
+2
+8.437 (+0.6%)
+0.00636 (7.2×)
+14.534 (+2.4%)
+0.02140 (3.5×)
+WS
+3
+8.458 (+0.8%)
+0.00940
+14.439 (+1.8%)
+0.01622
+SW (ours)
+3
+8.398 (+0.1%)
+0.00135 (7.0×)
+14.258 (+0.5%)
+0.00437 (3.7×)
+WS
+4
+8.402 (+0.2%)
+0.00221
+14.255 (+0.5%)
+0.00383
+SW (ours)
+4
+8.391 (+0.0%)
+0.00032 (6.8×)
+14.205 (+0.1%)
+0.00103 (3.7×)
+Qwen3-8B (151,936)
+fp16
+16
+10.832
+0
+15.486
+0
+WS
+2
+11.081 (+2.3%)
+0.04592
+16.229 (+4.8%)
+0.06861
+SW (ours)
+2
+10.898 (+0.6%)
+0.00654 (7.0×)
+15.689 (+1.3%)
+0.01385 (5.0×)
+WS
+3
+10.877 (+0.4%)
+0.00964
+15.572 (+0.6%)
+0.01319
+SW (ours)
+3
+10.848 (+0.1%)
+0.00132 (7.3×)
+15.523 (+0.2%)
+0.00295 (4.5×)
+WS
+4
+10.854 (+0.2%)
+0.00230
+15.511 (+0.2%)
+0.00320
+SW (ours)
+4
+10.836 (+0.0%)
+0.00031 (7.3×)
+15.501 (+0.1%)
+0.00073 (4.4×)
+Qwen3-32B (151,936)
+fp16
+16
+8.452
+0
+12.269
+0
+WS
+2
+8.756 (+3.6%)
+0.05835
+13.029 (+6.2%)
+0.08106
+SW (ours)
+2
+8.498 (+0.5%)
+0.00703 (8.3×)
+12.479 (+1.7%)
+0.01596 (5.1×)
+WS
+3
+8.500 (+0.6%)
+0.01246
+12.439 (+1.4%)
+0.01683
+SW (ours)
+3
+8.464 (+0.1%)
+0.00147 (8.5×)
+12.315 (+0.4%)
+0.00341 (4.9×)
+WS
+4
+8.477 (+0.3%)
+0.00295
+12.302 (+0.3%)
+0.00397
+SW (ours)
+4
+8.457 (+0.1%)
+0.00035 (8.4×)
+12.275 (+0.1%)
+0.00081 (4.9×)
+14
+
+
+A.2
+QUANTIZED BODY, TIED HEAD
+Table 8: Perplexity (PPL) on WikiText2 (WT2) and C4, and KL divergence from the baseline model,
+consisting of the body quantized at 2, 3 and 4 bits with GuidedQuant (BlockLDLQ, QTIP format,
+released checkpoints) and the head kept in fp16. Body and head columns give the respective rates.
+The quantized head matrix is tied (also the input embedding). WS: WaterSIC w/o FT. Parentheses
+give the increase over the fp16-head row of the same body. Whole-model size in MiB and reduction
+(∆size) after quantizing the head. Best value per head group in bold.
+Llama-3.2-1B-Instruct
+Body
+Method
+Head
+Size (MiB)
+∆size
+WT2 PPL (↓)
+WT2 KL (↓)
+C4 PPL (↓)
+C4 KL (↓)
+2.00
+fp16
+16.00
+737.3
+0.0%
+26.81
+0.497
+38.54
+0.511
+WS
+2.00
+297.0
+−59.7%
+31.53 (+17.6%)
+0.671 (+34.9%)
+47.14 (+22.3%)
+0.732 (+43.3%)
+SW (ours)
+2.00
+297.0
+−59.7%
+27.80 (+3.7%)
+0.536 (+7.9%)
+42.39 (+10.0%)
+0.607 (+18.8%)
+WS
+3.00
+327.7
+−55.6%
+27.60 (+3.0%)
+0.533 (+7.2%)
+40.75 (+5.7%)
+0.570 (+11.7%)
+SW (ours)
+3.00
+327.7
+−55.6%
+27.03 (+0.8%)
+0.506 (+1.7%)
+39.49 (+2.5%)
+0.536 (+4.9%)
+WS
+4.00
+358.4
+−51.4%
+27.16 (+1.3%)
+0.510 (+2.6%)
+39.03 (+1.3%)
+0.524 (+2.6%)
+SW (ours)
+4.00
+358.4
+−51.4%
+26.89 (+0.3%)
+0.501 (+0.7%)
+38.99 (+1.2%)
+0.521 (+2.1%)
+3.00
+fp16
+16.00
+850.0
+0.0%
+17.85
+0.101
+26.15
+0.096
+WS
+2.00
+409.6
+−51.8%
+19.99 (+12.0%)
+0.230 (+126.8%)
+30.84 (+17.9%)
+0.269 (+180.2%)
+SW (ours)
+2.00
+409.6
+−51.8%
+18.44 (+3.3%)
+0.136 (+34.5%)
+28.52 (+9.0%)
+0.180 (+87.5%)
+WS
+3.00
+440.3
+−48.2%
+18.23 (+2.1%)
+0.128 (+26.0%)
+26.96 (+3.1%)
+0.135 (+40.4%)
+SW (ours)
+3.00
+440.3
+−48.2%
+17.98 (+0.7%)
+0.109 (+7.1%)
+26.77 (+2.4%)
+0.119 (+23.8%)
+WS
+4.00
+471.0
+−44.6%
+18.08 (+1.3%)
+0.113 (+11.5%)
+26.45 (+1.1%)
+0.107 (+11.3%)
+SW (ours)
+4.00
+471.0
+−44.6%
+17.88 (+0.2%)
+0.104 (+2.3%)
+26.32 (+0.6%)
+0.102 (+6.7%)
+4.00
+fp16
+16.00
+962.6
+0.0%
+16.53
+0.028
+24.54
+0.028
+WS
+2.00
+532.5
+−44.7%
+18.14 (+9.7%)
+0.138 (+396.2%)
+28.11 (+14.5%)
+0.178 (+531.5%)
+SW (ours)
+2.00
+532.5
+−44.7%
+17.01 (+2.9%)
+0.056 (+101.9%)
+26.60 (+8.4%)
+0.106 (+276.9%)
+WS
+3.00
+563.2
+−41.5%
+16.83 (+1.8%)
+0.052 (+88.9%)
+25.26 (+2.9%)
+0.063 (+122.3%)
+SW (ours)
+3.00
+563.2
+−41.5%
+16.64 (+0.7%)
+0.034 (+24.1%)
+25.12 (+2.3%)
+0.052 (+84.6%)
+WS
+4.00
+594.0
+−38.3%
+16.65 (+0.7%)
+0.036 (+28.0%)
+24.70 (+0.6%)
+0.037 (+32.4%)
+SW (ours)
+4.00
+594.0
+−38.3%
+16.58 (+0.3%)
+0.030 (+9.3%)
+24.77 (+0.9%)
+0.035 (+25.3%)
+A.3
+DOMAIN-TARGETED CALIBRATION
+Table 9: Domains used for calibration and evaluation. Calibration and evaluation slices are disjoint:
+WT2 by split, the remaining domains by offsetting the calibration stream past the evaluation slice
+(skip 32). Every calibration slice is 1024×1024 tokens and every evaluation slice 32×1024 tokens.
+Domain
+Corpus
+Config
+Split
+Field
+WT2
+wikitext
+wikitext-2-raw-v1
+train / test
+text
+DeWiki
+wikimedia/wikipedia
+20231101.de
+train
+text
+Code
+codeparrot/codeparrot-clean-valid
+—
+train
+content
+Math
+open-web-math/open-web-math
+—
+train
+text
+Law
+HFforLegal/case-law
+—
+us
+document
+15
+
+
+Table 10: Calibration × evaluation domain crossover on Llama-3.2-1B-Instruct, fp16 body with
+a tied head quantized at 2, 3 and 4 bits. Each block gives the calibration domain used for both
+˜λ and ΣX; diagonal cells (calibration domain matches evaluation domain) are the targeting claim.
+Accuracy columns: next-token top-1 accuracy in percent, higher is better. KL columns: divergence
+from the all-fp16 model on the matching stream, lower is better. WS: WaterSIC w/o FT. The fp16-
+head row is repeated per rate as the reference. Best value per calibration block in bold; ties bold
+both.
+Accuracy (%, ↑)
+KL (↓)
+Calib
+Method
+WT2
+DeWiki
+Code
+Math
+Law
+WT2
+DeWiki
+Code
+Math
+Law
+Head @ 2 bits
+—
+fp16
+45.6
+52.9
+66.9
+54.6
+44.5
+0.000
+0.000
+0.000
+0.000
+0.000
+WT2
+WS
+44.7
+50.0
+64.8
+52.8
+42.9
+0.096
+0.212
+0.151
+0.123
+0.157
+SW (ours)
+45.4
+50.5
+64.2
+53.8
+43.6
+0.021
+0.200
+0.218
+0.080
+0.086
+DeWiki
+WS
+43.3
+50.0
+64.5
+52.1
+41.6
+0.172
+0.183
+0.174
+0.163
+0.252
+SW (ours)
+44.2
+52.5
+64.1
+53.0
+43.0
+0.117
+0.028
+0.219
+0.110
+0.141
+Code
+WS
+43.4
+49.5
+65.6
+53.1
+42.0
+0.173
+0.245
+0.099
+0.121
+0.210
+SW (ours)
+43.9
+49.5
+66.3
+53.9
+43.1
+0.135
+0.272
+0.052
+0.056
+0.138
+Math
+WS
+44.1
+50.2
+65.4
+53.5
+42.7
+0.135
+0.194
+0.118
+0.090
+0.165
+SW (ours)
+44.8
+51.4
+65.6
+54.3
+43.7
+0.062
+0.139
+0.119
+0.028
+0.083
+Law
+WS
+43.5
+49.4
+64.8
+52.7
+42.7
+0.144
+0.262
+0.157
+0.135
+0.163
+SW (ours)
+44.9
+50.2
+64.5
+54.0
+44.1
+0.060
+0.215
+0.182
+0.056
+0.025
+Head @ 3 bits
+—
+fp16
+45.6
+52.9
+66.9
+54.6
+44.5
+0.000
+0.000
+0.000
+0.000
+0.000
+WT2
+WS
+45.4
+52.2
+66.5
+54.1
+43.9
+0.023
+0.053
+0.034
+0.028
+0.040
+SW (ours)
+45.5
+52.2
+66.4
+54.4
+44.2
+0.005
+0.052
+0.049
+0.015
+0.022
+DeWiki
+WS
+45.1
+52.3
+66.4
+54.1
+44.0
+0.037
+0.040
+0.037
+0.034
+0.055
+SW (ours)
+45.2
+52.6
+66.3
+54.3
+43.9
+0.026
+0.011
+0.045
+0.024
+0.033
+Code
+WS
+45.0
+52.2
+66.7
+54.2
+43.9
+0.039
+0.059
+0.024
+0.030
+0.050
+SW (ours)
+45.2
+52.1
+66.8
+54.4
+44.2
+0.027
+0.062
+0.014
+0.013
+0.030
+Math
+WS
+45.4
+52.2
+66.5
+54.3
+44.0
+0.030
+0.047
+0.027
+0.023
+0.043
+SW (ours)
+45.4
+52.2
+66.6
+54.5
+44.2
+0.016
+0.041
+0.030
+0.009
+0.021
+Law
+WS
+45.1
+52.0
+66.4
+54.0
+44.1
+0.034
+0.057
+0.035
+0.031
+0.034
+SW (ours)
+45.5
+52.2
+66.4
+54.5
+44.4
+0.016
+0.056
+0.042
+0.013
+0.007
+Head @ 4 bits
+—
+fp16
+45.6
+52.9
+66.9
+54.6
+44.5
+0.000
+0.000
+0.000
+0.000
+0.000
+WT2
+WS
+45.6
+52.6
+66.8
+54.5
+44.1
+0.006
+0.015
+0.011
+0.008
+0.011
+SW (ours)
+45.6
+52.7
+66.8
+54.5
+44.4
+0.002
+0.016
+0.014
+0.005
+0.007
+DeWiki
+WS
+45.5
+52.6
+66.9
+54.5
+44.2
+0.010
+0.012
+0.011
+0.010
+0.014
+SW (ours)
+45.5
+52.9
+66.7
+54.5
+44.3
+0.009
+0.003
+0.015
+0.008
+0.011
+Code
+WS
+45.3
+52.5
+66.8
+54.5
+44.2
+0.011
+0.015
+0.007
+0.008
+0.014
+SW (ours)
+45.5
+52.6
+66.9
+54.5
+44.4
+0.008
+0.021
+0.004
+0.004
+0.009
+Math
+WS
+45.4
+52.7
+66.9
+54.5
+44.3
+0.008
+0.013
+0.008
+0.007
+0.013
+SW (ours)
+45.6
+52.7
+66.8
+54.4
+44.4
+0.006
+0.013
+0.009
+0.002
+0.007
+Law
+WS
+45.5
+52.5
+66.8
+54.4
+44.3
+0.009
+0.015
+0.009
+0.008
+0.009
+SW (ours)
+45.5
+52.7
+66.8
+54.5
+44.5
+0.005
+0.015
+0.011
+0.004
+0.002
+16
+
+
+A.4
+ZERO-SHOT TASKS
+Table 11: Zero-shot accuracy (higher better) of Llama-3.2-1B-Instruct with a 2-bit GuidedQuant
+body and a tied head quantized at 2, 3 and 4 bits. WS: WaterSIC w/o FT; SW: SoftWater. CTX:
+context length of 131k WT2-train tokens. lm-evaluation-harness 0.4.12, 0-shot. Best value per body
+block in bold.
+Head
+Method
+CTX
+Tokens
+ARC-e
+ARC-c
+HellaS
+LAMB
+Wino
+PIQA
+OBQA
+Mean
+16
+fp16 body
+—
+—
+63.8
+37.8
+61.7
+60.1
+61.6
+74.9
+37.2
+56.72
+16
+fp16 head
+—
+—
+58.0
+32.4
+49.3
+46.3
+55.5
+69.2
+31.4
+48.86
+2
+WS
+128
+131k
+53.6
+31.1
+47.2
+37.3
+55.7
+67.2
+30.6
+46.11
+WS
+256
+131k
+52.5
+29.9
+47.0
+36.6
+56.2
+67.4
+30.8
+45.78
+WS
+1024
+131k
+53.2
+31.5
+47.4
+36.8
+55.3
+67.7
+29.4
+45.89
+WS
+1024
+1.05M
+54.0
+30.7
+47.2
+38.4
+55.6
+67.1
+28.8
+45.97
+SW (ours)
+128
+131k
+56.5
+31.7
+48.7
+45.4
+56.8
+67.8
+32.6
+48.49
+SW (ours)
+256
+131k
+53.4
+29.7
+48.1
+44.9
+56.4
+66.9
+31.6
+47.30
+SW (ours)
+1024
+131k
+54.7
+31.1
+47.9
+43.9
+55.5
+68.5
+31.8
+47.63
+SW (ours)
+1024
+1.05M
+55.7
+31.7
+48.3
+44.8
+56.7
+68.0
+30.0
+47.87
+3
+WS
+128
+131k
+55.1
+31.3
+49.1
+43.7
+55.8
+68.8
+31.0
+47.83
+WS
+256
+131k
+55.2
+31.3
+48.9
+43.8
+55.2
+69.2
+30.4
+47.71
+WS
+1024
+131k
+56.1
+31.1
+48.8
+43.1
+56.9
+67.9
+30.2
+47.73
+WS
+1024
+1.05M
+56.3
+31.6
+49.1
+43.6
+56.5
+68.0
+30.0
+47.87
+SW (ours)
+128
+131k
+57.4
+32.1
+49.4
+45.9
+56.7
+68.7
+31.6
+48.82
+SW (ours)
+256
+131k
+58.0
+32.2
+49.3
+46.7
+57.5
+68.5
+31.2
+49.04
+SW (ours)
+1024
+131k
+57.0
+32.5
+49.0
+45.6
+56.6
+68.8
+31.6
+48.72
+SW (ours)
+1024
+1.05M
+57.3
+32.3
+49.2
+46.2
+57.2
+68.7
+31.6
+48.92
+4
+WS
+128
+131k
+57.6
+32.3
+49.3
+45.2
+56.0
+69.4
+31.8
+48.79
+WS
+256
+131k
+57.7
+32.3
+49.4
+45.2
+55.6
+69.6
+32.0
+48.82
+WS
+1024
+131k
+57.4
+31.8
+49.5
+45.5
+55.7
+69.2
+32.0
+48.74
+WS
+1024
+1.05M
+58.1
+32.1
+49.4
+45.6
+55.9
+68.9
+32.0
+48.85
+SW (ours)
+128
+131k
+57.4
+32.6
+49.2
+46.0
+56.4
+68.8
+31.6
+48.86
+SW (ours)
+256
+131k
+56.8
+32.3
+49.3
+46.1
+55.8
+69.0
+31.6
+48.70
+SW (ours)
+1024
+131k
+57.3
+31.7
+49.2
+46.3
+56.2
+69.3
+31.8
+48.83
+SW (ours)
+1024
+1.05M
+57.0
+31.6
+49.2
+46.1
+56.0
+69.3
+32.2
+48.77
+Table 12: Zero-shot accuracy (higher better) of Llama-3.2-1B-Instruct with a 3-bit GuidedQuant
+body and a tied head quantized at 2, 3 and 4 bits. Details as in Table 11. Best value per head group
+in bold.
+Head
+Method
+ARC-e
+ARC-c
+HellaS
+LAMB
+Wino
+PIQA
+OBQA
+Mean
+16
+fp16 body
+63.8
+37.8
+61.7
+60.1
+61.6
+74.9
+37.2
+56.72
+16
+fp16 head
+63.0
+36.3
+58.3
+59.5
+61.7
+73.1
+35.6
+55.35
+2
+WS-c128
+59.7
+34.5
+57.0
+50.7
+60.5
+72.2
+35.4
+52.84
+WS-c256
+59.6
+34.6
+56.8
+51.6
+59.5
+71.4
+37.0
+52.94
+WS-c1024
+57.9
+32.8
+57.2
+53.1
+60.5
+71.8
+35.6
+52.68
+WS-1M
+59.4
+34.0
+56.8
+52.3
+59.7
+71.7
+36.6
+52.93
+SW-c128
+62.8
+36.6
+57.2
+58.5
+60.2
+73.0
+35.2
+54.78
+SW-c256
+62.5
+36.6
+57.4
+58.5
+60.2
+72.3
+36.4
+54.85
+SW-c1024
+61.0
+35.4
+57.5
+58.4
+60.2
+72.3
+36.2
+54.43
+SW-1M
+61.3
+36.7
+57.3
+58.7
+61.1
+72.6
+36.4
+54.87
+3
+WS-c128
+63.0
+36.4
+57.7
+58.3
+62.4
+73.4
+36.0
+55.31
+WS-c256
+63.1
+37.0
+57.9
+57.1
+61.3
+73.3
+35.8
+55.08
+WS-c1024
+61.8
+36.8
+58.0
+57.9
+61.1
+73.0
+35.4
+54.84
+WS-1M
+62.1
+36.5
+58.0
+58.5
+61.1
+72.9
+35.6
+54.95
+SW-c128
+62.1
+35.2
+58.3
+59.3
+61.4
+72.7
+37.2
+55.18
+SW-c256
+62.5
+35.8
+58.3
+59.3
+60.9
+72.7
+36.8
+55.20
+SW-c1024
+62.1
+36.2
+58.0
+59.0
+61.2
+73.1
+35.8
+55.07
+SW-1M
+62.2
+36.2
+58.1
+59.3
+60.6
+73.1
+35.8
+55.05
+4
+WS-c128
+62.7
+36.5
+58.3
+58.8
+60.9
+73.4
+37.0
+55.38
+WS-c256
+62.8
+36.3
+58.2
+59.1
+61.8
+73.4
+36.4
+55.43
+WS-c1024
+63.1
+36.1
+58.2
+59.0
+61.6
+73.4
+35.8
+55.31
+WS-1M
+63.0
+36.6
+58.1
+58.8
+60.9
+72.9
+35.8
+55.16
+SW-c128
+63.1
+36.0
+58.2
+59.6
+61.1
+72.7
+35.6
+55.17
+SW-c256
+62.7
+36.6
+58.3
+59.3
+60.5
+72.9
+35.6
+55.14
+SW-c1024
+63.1
+36.0
+58.2
+59.7
+60.9
+73.5
+36.0
+55.34
+SW-1M
+62.8
+36.7
+58.2
+59.6
+61.1
+73.2
+36.6
+55.45
+17
+
+
+Table 13: Zero-shot accuracy (higher better) of Llama-3.2-1B-Instruct with a 4-bit GuidedQuant
+body and a tied head quantized at 2, 3 and 4 bits. Details as in Table 11. Best value per head group
+in bold.
+Head
+Method
+ARC-e
+ARC-c
+HellaS
+LAMB
+Wino
+PIQA
+OBQA
+Mean
+16
+fp16 body
+63.8
+37.8
+61.7
+60.1
+61.6
+74.9
+37.2
+56.72
+16
+fp16 head
+62.7
+37.7
+60.3
+60.1
+62.0
+73.6
+37.8
+56.30
+2
+WS-c128
+60.5
+36.6
+58.9
+53.6
+61.5
+72.2
+35.8
+54.16
+WS-c256
+61.0
+37.0
+59.0
+53.9
+60.7
+72.1
+36.2
+54.27
+WS-c1024
+60.3
+37.0
+59.2
+54.0
+60.9
+72.1
+37.2
+54.39
+WS-1M
+59.5
+35.5
+59.5
+55.0
+60.1
+72.5
+36.8
+54.12
+SW-c128
+62.2
+37.4
+59.6
+59.4
+61.8
+73.2
+36.4
+55.72
+SW-c256
+63.2
+38.7
+59.5
+59.2
+61.3
+73.3
+35.4
+55.81
+SW-c1024
+61.2
+37.5
+59.3
+59.2
+61.6
+72.7
+35.0
+55.23
+SW-1M
+62.5
+37.8
+59.7
+59.9
+62.0
+73.6
+36.2
+55.96
+3
+WS-c128
+62.2
+38.5
+60.4
+58.7
+60.9
+73.8
+37.4
+55.98
+WS-c256
+62.7
+38.6
+60.2
+58.6
+60.3
+73.4
+36.4
+55.74
+WS-c1024
+62.5
+38.2
+60.2
+58.2
+60.5
+73.1
+36.4
+55.60
+WS-1M
+62.7
+37.9
+60.3
+58.4
+60.5
+73.8
+37.0
+55.79
+SW-c128
+62.2
+37.9
+60.3
+59.5
+62.0
+73.5
+36.2
+55.94
+SW-c256
+62.5
+36.9
+60.2
+60.0
+61.8
+73.4
+36.6
+55.93
+SW-c1024
+62.8
+37.5
+60.2
+60.2
+61.1
+73.3
+37.6
+56.10
+SW-1M
+62.8
+38.1
+60.1
+60.1
+62.0
+73.6
+36.6
+56.18
+4
+WS-c128
+63.2
+37.0
+60.3
+59.5
+62.0
+73.7
+37.8
+56.23
+WS-c256
+62.6
+37.5
+60.4
+59.4
+62.0
+73.6
+38.0
+56.22
+WS-c1024
+63.1
+37.8
+60.3
+59.7
+62.0
+74.2
+37.8
+56.41
+WS-1M
+63.2
+37.7
+60.3
+59.5
+61.5
+73.6
+38.4
+56.30
+SW-c128
+62.5
+37.8
+60.2
+59.8
+62.5
+73.4
+37.6
+56.27
+SW-c256
+62.5
+38.0
+60.2
+59.9
+62.4
+74.0
+37.4
+56.35
+SW-c1024
+62.9
+37.5
+60.3
+60.3
+62.2
+73.6
+36.8
+56.22
+SW-1M
+62.4
+37.8
+60.3
+60.2
+61.9
+73.7
+37.8
+56.29
+18
+
+
+A.5
+CLASS-SIDE STATISTIC ABLATION
+Table 14: Class-side statistic ablation, head-only isolation: the body is kept in fp16 and only the
+head matrix is quantized; tied models (Llama-3.2-1B, Qwen3-1.7B) retain an fp16 copy of the em-
+bedding. All arms share the head, the damped ΣX Cholesky, the rate-matching routine and the
+ϵ = 0.1 smoothing prior, so they differ only in the class-side statistic: ¯p = EX[˜pk] is the model’s
+average marginal; π is the empirical unigram frequency of token k over the calibration window; SW
+uses ˜λk = EX[˜pk(1 −˜pk)]. KL is measured against the all-fp16 model on identical token streams.
+Every arm lands within 0.001 bits of its nominal head rate. Parentheses after each model name give
+its vocabulary size V ; on PPL cells, the increase over the fp16 row of the same model. Best value
+per column per head group in bold; ties bold both.
+Statistic
+Head
+WT2 PPL (↓)
+WT2 KL (↓)
+C4 PPL (↓)
+C4 KL (↓)
+Llama-3.2-1B (128,256)
+fp16
+16
+11.313
+0
+15.614
+0
+¯p
+2
+11.418 (+0.9%)
+0.00952
+16.102 (+3.1%)
+0.02959
+π
+2
+11.524 (+1.9%)
+0.02146
+16.549 (+6.0%)
+0.05830
+SW (ours)
+2
+11.419 (+0.9%)
+0.00957
+16.035 (+2.7%)
+0.02834
+¯p
+3
+11.344 (+0.3%)
+0.00213
+15.719 (+0.7%)
+0.00613
+π
+3
+11.356 (+0.4%)
+0.00437
+15.784 (+1.1%)
+0.01184
+SW (ours)
+3
+11.342 (+0.3%)
+0.00206
+15.704 (+0.6%)
+0.00572
+¯p
+4
+11.319 (+0.1%)
+0.00049
+15.624 (+0.1%)
+0.00147
+π
+4
+11.327 (+0.1%)
+0.00105
+15.658 (+0.3%)
+0.00280
+SW (ours)
+4
+11.320 (+0.1%)
+0.00047
+15.640 (+0.2%)
+0.00138
+Qwen3-1.7B (151,936)
+fp16
+16
+18.285
+0
+22.621
+0
+¯p
+2
+18.452 (+0.9%)
+0.00951
+23.138 (+2.3%)
+0.02110
+π
+2
+18.595 (+1.7%)
+0.01912
+23.494 (+3.9%)
+0.04421
+SW (ours)
+2
+18.460 (+1.0%)
+0.00900
+23.075 (+2.0%)
+0.01998
+¯p
+3
+18.310 (+0.1%)
+0.00206
+22.756 (+0.6%)
+0.00468
+π
+3
+18.360 (+0.4%)
+0.00389
+22.823 (+0.9%)
+0.00870
+SW (ours)
+3
+18.317 (+0.2%)
+0.00199
+22.724 (+0.5%)
+0.00443
+¯p
+4
+18.303 (+0.1%)
+0.00046
+22.636 (+0.1%)
+0.00112
+π
+4
+18.304 (+0.1%)
+0.00091
+22.669 (+0.2%)
+0.00203
+SW (ours)
+4
+18.298 (+0.1%)
+0.00045
+22.633 (+0.1%)
+0.00105
+Llama-3.1-8B-Instruct (128,256)
+fp16
+16
+8.388
+0
+14.189
+0
+¯p
+2
+8.441 (+0.6%)
+0.00658
+14.530 (+2.4%)
+0.02237
+π
+2
+8.501 (+1.3%)
+0.01356
+14.822 (+4.5%)
+0.04139
+SW (ours)
+2
+8.437 (+0.6%)
+0.00636
+14.534 (+2.4%)
+0.02140
+¯p
+3
+8.398 (+0.1%)
+0.00140
+14.252 (+0.4%)
+0.00465
+π
+3
+8.412 (+0.3%)
+0.00274
+14.293 (+0.7%)
+0.00852
+SW (ours)
+3
+8.398 (+0.1%)
+0.00135
+14.258 (+0.5%)
+0.00437
+¯p
+4
+8.390 (+0.0%)
+0.00033
+14.207 (+0.1%)
+0.00113
+π
+4
+8.396 (+0.1%)
+0.00066
+14.225 (+0.3%)
+0.00200
+SW (ours)
+4
+8.391 (+0.0%)
+0.00032
+14.205 (+0.1%)
+0.00103
+Qwen3-8B (151,936)
+fp16
+16
+10.832
+0
+15.486
+0
+¯p
+2
+10.915 (+0.8%)
+0.00643
+15.699 (+1.4%)
+0.01484
+π
+2
+10.965 (+1.2%)
+0.01183
+15.899 (+2.7%)
+0.02919
+SW (ours)
+2
+10.898 (+0.6%)
+0.00654
+15.689 (+1.3%)
+0.01385
+¯p
+3
+10.845 (+0.1%)
+0.00129
+15.544 (+0.4%)
+0.00328
+π
+3
+10.853 (+0.2%)
+0.00251
+15.577 (+0.6%)
+0.00585
+SW (ours)
+3
+10.848 (+0.1%)
+0.00132
+15.523 (+0.2%)
+0.00295
+¯p
+4
+10.835 (+0.0%)
+0.00032
+15.495 (+0.1%)
+0.00075
+π
+4
+10.839 (+0.1%)
+0.00059
+15.504 (+0.1%)
+0.00132
+SW (ours)
+4
+10.836 (+0.0%)
+0.00031
+15.501 (+0.1%)
+0.00073
+Qwen3-32B (151,936)
+fp16
+16
+8.452
+0
+12.269
+0
+¯p
+2
+8.516 (+0.8%)
+0.00709
+12.475 (+1.7%)
+0.01663
+π
+2
+8.571 (+1.4%)
+0.01461
+12.703 (+3.5%)
+0.03348
+SW (ours)
+2
+8.498 (+0.5%)
+0.00703
+12.479 (+1.7%)
+0.01596
+¯p
+3
+8.468 (+0.2%)
+0.00153
+12.303 (+0.3%)
+0.00347
+π
+3
+8.476 (+0.3%)
+0.00297
+12.356 (+0.7%)
+0.00687
+SW (ours)
+3
+8.464 (+0.1%)
+0.00147
+12.315 (+0.4%)
+0.00341
+¯p
+4
+8.457 (+0.1%)
+0.00036
+12.276 (+0.1%)
+0.00087
+π
+4
+8.461 (+0.1%)
+0.00072
+12.289 (+0.2%)
+0.00167
+SW (ours)
+4
+8.457 (+0.1%)
+0.00035
+12.275 (+0.0%)
+0.00081
+19
+
+
+B
+HESSIAN SKETCHING
+This appendix details the power iteration scheme used in §5 to compute optimized Kronecker factors
+of the head KL Hessian, adapted from the sketching subroutines of YAQA (Tseng et al., 2026).
+Setup.
+We seek the best diagonal-Kronecker approximation
+a⋆, B⋆=
+arg min
+a diagonal, B
+EX
+h
+˜λ(X) ⊗XX⊤i
+−a ⊗B
+
+2
+F ,
+(23)
+where ˜λ(X) = diag(˜p⊙(1−˜p)) is the softmax curvature under the smoothed output distribution ˜p of
+(21) with ϵ = 0.1. As noted by Tseng et al. (2026), following Van Loan (2000), the best Kronecker
+approximation is a rank-one approximation of a rearrangement of the target matrix, so alternating
+least squares (ALS) on the two factors is power iteration on that rearrangement and converges to
+the leading singular pair, which is unique up to the scale ambiguity (ca, B/c) whenever the leading
+singular value is simple. Since all our comparisons (cosine similarity to the fixed point, and the
+quantization lattice itself, through the coupling of cSW) are invariant to this rescaling, we do not
+normalize the factors during the iteration.
+Adapted updates.
+YAQA’s Sketch A estimates the per-token Hessian with a Monte-Carlo label
+sampled from the model’s predictive distribution and a modified backward pass. For the head layer
+both approximations are unnecessary: the layer’s KL Hessian at a hidden state X is available in
+closed form as (diag(˜p)−˜p˜p⊤)⊗XX⊤, requiring only a forward pass, and the token-independence
+bias of Sketch A does not arise because no computation mixes tokens after the head. We therefore
+replace the sampled label with the exact per-token curvature, which preserves the expectation of their
+estimator while removing its sampling variance. Moreover, since a is constrained to be diagonal,
+the off-diagonal coupling −˜p˜p⊤is Frobenius-orthogonal to the ansatz a ⊗B, and the diagonal of
+the exact class-side Hessian is precisely ˜λ = ˜p ⊙(1 −˜p); hence each update below is the exact ALS
+step for (23), not an approximation of it. Writing s(X) = ˜p ⊙(1 −˜p) ∈RK, one round consists
+of a class-side pass followed by a feature-side pass over the calibration set, mirroring the alternation
+order of the official YAQA release:
+a ←EX
+
+(X⊤BX) s(X)
+
+∥B∥2
+F
+,
+B ←EX
+
+⟨a, s(X)⟩XX⊤
+∥a∥2
+2
+,
+(24)
+where each update uses the other factor’s most recent value. Each pass costs one matrix-vector
+product with B (or one rank-one accumulation into B) plus the head forward pass per token, and
+requires no backpropagation, in contrast to the general-layer setting of Tseng et al. (2026).
+Protocol.
+We cache the calibration hidden states once (WT2-train) and run all initializations of
+Table 6b on the identical cached states, so that differences reflect the initialization alone. We run 8
+rounds of (24); the fixed point (a⋆, B⋆) is taken as the final iterate, and convergence is monitored
+by the cosine similarity of consecutive iterates, which exceeds 0.999999 for every initialization
+from round 3 onward. Note that the SoftWater factors (˜λ, ΣX) are not merely a good initialization:
+round 0 of Table 6b shows they already agree with the fixed point to cosine similarity 0.976–0.992,
+quantifying how close the analytical separable factorization is to the Frobenius-optimal one.
+20

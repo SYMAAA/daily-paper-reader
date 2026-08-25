@@ -1,0 +1,1704 @@
+FlashQuant: Sparse-Dense Fusion for Memory-Efficient
+Outlier-Aware LLM Inference
+Junqing Lin
+linjunqing@mail.ustc.edu.cn
+University of Science and Technology of China
+Hefei, China
+Jingwei Sun†
+sunjw@ustc.edu.cn
+University of Science and Technology of China
+Hefei, China
+Zhengding Hu
+huzd@mail.ustc.edu.cn
+University of Science and Technology of China
+Hefei, China
+Guangzhong Sun
+gzsun@ustc.edu.cn
+University of Science and Technology of China
+Hefei, China
+ABSTRACT
+Low-bit quantization reduces the memory footprint and compu-
+tational cost of large language model (LLM) inference. However,
+high-magnitude outlier weights can induce substantial quantiza-
+tion errors and degrade model accuracy. Outlier-aware quantization
+addresses this issue by retaining outliers in high precision while
+quantizing the remaining weights, resulting in a low-bit dense
+GEMM path and a high-precision sparse SpMM path. Existing im-
+plementations execute these paths in separate GPU kernels, despite
+their shared activations and outputs, thereby missing opportunities
+for intra-operator reuse and incurring redundant global-memory
+accesses. This inefficiency is particularly pronounced in memory-
+bound decoding workloads. We propose FlashQuant, a content-
+sharing execution framework for outlier-aware W4A16 decoding.
+FlashQuant fuses the dense GEMM and sparse outlier SpMM paths
+into a single GPU kernel, enabling on-chip reuse of activation and
+output tiles across heterogeneous computations. It introduces three
+key techniques: sparse-dense tiling, which aligns outlier process-
+ing with dense GEMM tiles; Tile-COO outlier encoding, which
+enables efficient sparse access and reduces shared-memory bank
+conflicts; and pipelined scheduling, which overlaps computation
+with data movement. Experiments show that FlashQuant reduces
+outlier-processing overhead, achieving 2.74×–4.18× speedup over
+cuBLAS BF16 and up to 1.53× speedup over the strongest unfused
+outlier-aware baseline.
+KEYWORDS
+Large Language Models, Outlier-Aware Weight Quantization, Mixed-
+precision Matrix Multiplication
+1
+INTRODUCTION
+Large language models (LLMs) deliver strong performance but im-
+pose substantial inference-time computational and memory costs [8,
+24, 27]. As parameter counts continue to grow, efficient deployment
+becomes increasingly difficult, particularly in latency-sensitive or
+resource-constrained environments. For example, Qwen3-235B [27]
+requires more than 470 GB of memory in BF16 precision, which
+exceeds the memory capacity of widely used GPUs such as the
+NVIDIA A100 Tensor Core GPU.
+†Co-corresponding author
+Weight-only quantization [1, 3–5, 9, 14, 15, 17–19, 23, 26, 28, 29]
+is widely adopted to reduce the memory footprint and bandwidth
+cost of LLM inference. By storing weights in low-bit formats, such
+as INT4, while retaining activations in higher precision, it offers
+a favorable accuracy–efficiency trade-off for decoding workloads.
+However, aggressive low-bit quantization remains vulnerable to
+high-magnitude outlier weights: quantizing these outliers together
+with regular weights can cause substantial reconstruction errors
+and degrade model accuracy.
+Outlier-aware quantization [3, 14, 15, 18, 29] mitigates quanti-
+zation error by preserving a small fraction of outlier weights in
+high precision while quantizing the remaining weights. For exam-
+ple, retaining 1% of outlier weights during INT4 quantization of
+LLaMA3-8B reduces WikiText2 perplexity from 6.896 to 5.979.
+This strategy decomposes the original matrix multiplication into
+two computational paths:
+𝑌= 𝑋·𝑊≈𝑋· dequant(𝑊𝑄) + 𝑋·𝑊𝑂,
+(1)
+where 𝑊𝑄is the low-bit dense weight matrix and 𝑊𝑂is the sparse
+high-precision outlier matrix. The dense component is computed
+via low-bit GEMM, while the outlier component is typically han-
+dled by high-precision SpMM. Although this formulation improves
+quantization accuracy, it introduces a mixed dense–sparse execu-
+tion pattern into the inference pipeline.
+Existing outlier-aware quantization systems typically execute the
+dense and sparse paths with separate GPU kernels, as illustrated in
+Figure 1(a). Although this design leverages highly optimized dense
+GEMM and sparse SpMM libraries, it overlooks a key data-sharing
+opportunity: both paths consume the same activation matrix and
+accumulate into the same output matrix. Separate execution there-
+fore reloads activation tiles from global memory and writes partial
+outputs independently, introducing redundant memory traffic. This
+overhead is especially pronounced in memory-bound decoding
+workloads, where even a small fraction of preserved outliers can
+cause disproportionate latency.
+To address this inefficiency, we propose FlashQuant, a unified ex-
+ecution framework for outlier-aware W4A16 decoding. FlashQuant
+fuses the low-bit dense GEMM path and the high-precision sparse
+outlier path into a single GPU kernel. Unlike conventional kernel
+fusion, which mainly combines producer–consumer operators or
+merges independent kernels to reduce launch overhead, FlashQuant
+1
+arXiv:2608.15531v1  [cs.DC]  16 Aug 2026
+
+
+Conference’17, July 2017, Washington, DC, USA
+Junqing Lin, Jingwei Sun, Zhengding Hu, and Guangzhong Sun
+Separation
+Shared 
+Memory
+Registers
+Global 
+Memory
+Tensor Core
+CUDA Core
+Fusion
+Tensor Core
+CUDA Core
+(a)
+(b)
+WQ
+X
+WO
+Y
+Compute 
+Units
+Figure 1: Execution flow of outlier-aware quantization ker-
+nels: (a) existing approaches; (b) FlashQuant.
+introduces content-sharing fusion: two heterogeneous computa-
+tion paths derived from the same mathematical operator are co-
+scheduled over a common tiled execution space. This design enables
+on-chip reuse of shared data across dense and sparse computations,
+thereby eliminating redundant global-memory accesses. Realizing
+this execution model is challenging because dense GEMM and
+sparse SpMM exhibit fundamentally different execution patterns.
+Dense GEMM relies on regular, hardware-aligned tiling and Tensor
+Core execution, whereas sparse outlier processing requires irregular
+metadata accesses, nonuniform nonzero handling, and CUDA-core
+accumulation. FlashQuant addresses these challenges with three co-
+designed techniques. First, sparse–dense tiling maps outlier compu-
+tation onto the dense GEMM tile hierarchy, establishing a common
+schedule for both paths. Second, Tile-COO organizes outliers by tile
+boundaries and bucket assignments, enabling vectorized decoding
+and conflict-free sparse accumulation. Third, a pipelined execution
+strategy overlaps data movement, dequantization, outlier decoding,
+and computation to hide memory latency.
+Experiments on NVIDIA GeForce RTX 3090, 4090, and 5090 GPUs
+show that FlashQuant effectively mitigates the performance over-
+head of outliers, achieving a 2.74×–4.18× quantization speedup. It
+also outperforms the strongest existing outlier-aware implementa-
+tion, which combines state-of-the-art dense quantized and sparse
+operators [6, 7], by up to 1.53×.
+In summary, this paper makes the following contributions:
+• We identify redundant memory access as a key system bot-
+tleneck in outlier-aware quantized inference. Existing im-
+plementations execute the quantized dense path and sparse
+outlier path in separate GPU kernels, limiting inference per-
+formance.
+• We propose FlashQuant, a unified sparse-dense execution
+framework that fuses low-bit GEMM and high-precision
+SpMM into a single GPU kernel. FlashQuant further im-
+proves efficiency through sparse-dense tiling, Tile-COO, and
+pipelined scheduling.
+• We evaluate FlashQuant on representative LLM operators
+across multiple GPU generations, showing consistently lower
+outlier-processing overhead and throughput improvements
+over outlier-aware baselines.
+2
+BACKGROUND
+2.1
+LLM Inference
+LLMs are predominantly based on the transformer architecture [31],
+which consists of stacked attention and feedforward layers. Each
+layer performs multiple GEMM operations, including query-key-
+value (QKV) projections, the self-attention output projection, and
+the two linear transformations in the feedforward network. In
+typical inference workloads, these GEMM kernels dominate both
+total FLOPs and end-to-end latency [25]. Therefore, improving
+GEMM efficiency is critical for accelerating practical LLM inference.
+LLM inference is typically divided into two phases: prefilling and
+decoding. During prefilling, the model processes the entire input
+prompt in a single forward pass, enabling all tokens to be propa-
+gated through the network in parallel. In contrast, decoding pro-
+ceeds autoregressively, generating one token at a time conditioned
+on previously generated tokens. At each decoding step, the activa-
+tion matrix 𝑋∈R𝐵×𝐾is multiplied by the projection weight matrix
+𝑊∈R𝐾×𝑁to produce the next hidden states. Because the batch size
+𝐵is typically small in resource-constrained settings, decoding offers
+limited parallelism and increasingly becomes memory-bound [12].
+2.2
+Outlier-Aware Quantization
+Low-bit quantization is an effective technique for reducing the
+memory footprint and computational cost of LLM inference [5,
+13]. In a standard 𝑏-bit affine uniform quantization scheme, each
+floating-point weight 𝑤∈R is mapped to an integer level 𝑞using
+a scale factor 𝑠and an integer zero-point 𝑧. The quantization and
+dequantization operations are defined as
+𝑞= round
+𝑤
+𝑠
+
++ 𝑧,
+(2)
+ˆ𝑤= 𝑠· (𝑞−𝑧),
+(3)
+where 𝑠= 𝑤max−𝑤min
+2𝑏−1
+, and 𝑧= round −𝑤min
+𝑠
+.
+However, aggressive quantization can substantially degrade model
+accuracy, particularly in layers whose weights have large dynamic
+ranges. Outlier-aware quantization [4, 5, 15, 29] mitigates this degra-
+dation by identifying high-magnitude weights, or outliers, and stor-
+ing them in higher precision, such as BF16, while quantizing the
+remaining weights using Equation (2). For example, preserving
+1% of outliers during INT4 quantization of LLaMA3-8B reduces
+WikiText2 perplexity from 6.896 to 5.979.
+During inference, an outlier-aware operator is typically decom-
+posed into two computational paths: GEMM for low-bit weights
+and SpMM for high-precision outliers. When executed as separate
+kernels, these two paths reload the same activation tile 𝑋and write
+independent partial outputs to global memory. This separation pre-
+vents shared tiling, activation reuse, and coordinated scheduling
+between dense and sparse computations. In bandwidth-limited LLM
+decoding, the resulting redundant memory traffic becomes a ma-
+jor performance bottleneck. As a result, although the SpMM path
+accounts for only a small fraction of the weights, it can contribute
+disproportionately to end-to-end latency.
+2.3
+GPU Architecture
+On GPUs, execution is organized into cooperative thread arrays
+(CTAs), each scheduled on a single streaming multiprocessor (SM).
+2
+
+
+FlashQuant
+Conference’17, July 2017, Washington, DC, USA
+Within a CTA, threads are grouped into 32-thread warps, the basic
+unit of single-instruction multiple-thread (SIMT) execution. This
+hierarchical execution model exposes massive parallelism and is
+particularly effective for throughput-oriented workloads.
+GPUs further rely on a hierarchical memory system that bal-
+ances bandwidth, latency, and capacity. The main levels include
+high-capacity but high-latency global memory, low-latency on-chip
+shared memory visible to threads within a CTA, and per-thread
+registers, which provide the lowest-latency storage. Shared mem-
+ory is divided into multiple banks to enable concurrent warp-level
+accesses. However, when multiple threads access the same bank
+within a transaction, bank conflicts occur, causing serialization and
+reducing shared-memory throughput.
+In outlier-aware quantization, irregular memory access patterns
+often arise, and naive concurrent execution of quantized and outlier
+paths can incur redundant memory traffic. Achieving high perfor-
+mance therefore requires memory access strategies that exploit the
+GPU execution model and memory hierarchy to improve parallel
+efficiency while reducing access overhead.
+3
+FLASHQUANT
+Outlier-aware quantization preserves model accuracy by retain-
+ing high-magnitude weights in higher precision. However, this
+benefit often incurs nontrivial performance overhead, as infer-
+ence must execute an additional SpMM operation alongside the
+low-bit dense GEMM. This extra computation further aggravates
+the compute–memory imbalance on modern GPUs. For example,
+the NVIDIA GeForce RTX 5090 delivers up to 209.5 TFLOPs of
+FP16/BF16 throughput but only 1792 GB/s of memory bandwidth,
+requiring an arithmetic intensity exceeding 100 FLOPs/byte to fully
+utilize its compute units. In LLM inference, especially during au-
+toregressive decoding, small batch sizes limit arithmetic intensity,
+making execution predominantly memory-bound. Consequently,
+even modest increases in memory traffic can directly degrade end-
+to-end latency and throughput.
+Existing implementations typically handle outliers using generic
+SpMM kernels optimized for standalone sparse workloads. Each
+SpMM invocation therefore reloads the activation matrix from
+global memory and writes intermediate results separately, leading
+to duplicated memory accesses. Notably, GEMM and SpMM operate
+on the same input and output matrices, exposing substantial op-
+portunities for intra-operator data reuse. A fused execution model
+could share activation tiles loaded into on-chip memory across both
+computation paths and accumulate partial results before write-back.
+Such fusion can reduce memory traffic and kernel launch overhead,
+thereby improving inference efficiency.
+However, fusing GEMM with SpMM remains challenging be-
+cause the two computation paths exhibit fundamentally different
+execution patterns. First, they impose different layout and tiling
+requirements: GEMM favors fixed, hardware-aligned tiles, whereas
+sparse outliers are often represented in irregular formats such as
+CSR, limiting on-chip reuse under naive fusion. Second, they oper-
+ate at different granularities: GEMM leverages regular warp-level
+Tensor Core operations, while sparse outlier processing requires
+fine-grained accumulation on CUDA cores, complicating coordi-
+nated scheduling within a single kernel. Third, the nonuniform
+distribution of outliers leads to irregular activation accesses and
+imbalanced workloads, causing uncoalesced memory transactions,
+shared-memory bank conflicts, and load imbalance.
+Outlier-Aware 
+Quantization
+Tiled Outliers
+Weight Matrix
+Output Matrix
+WQ & WO
+Outlier Encoding
+Sparse-Dense Tiling
+Dequant & Decode
+Activation Matrix
+Offline
+Online
+WOE
+Computation
+WQ
+Figure 2: Overview of FlashQuant.
+To address these challenges, we present FlashQuant, a framework
+that unifies low-bit GEMM and high-precision SpMM via tile-level
+scheduling and optimized outlier encoding. FlashQuant targets the
+decoding stage of LLM inference, where batch sizes are typically
+small. As shown in Figure 2, the framework consists of two stages:
+offline preprocessing and online inference. During preprocessing,
+FlashQuant performs outlier-aware quantization, decomposing the
+original weight matrix into a low-bit quantized matrix 𝑊𝑄and a
+sparse outlier matrix 𝑊𝑂. It then applies a unified sparse–dense
+tiling scheme that partitions𝑊𝑄and𝑊𝑂into aligned tiles, enabling
+the two computation paths to cooperatively load and reuse activa-
+tions in shared memory. To further improve efficiency, FlashQuant
+encodes outliers in Tile-COO and reorders nonzero elements to
+improve load balance and reduce shared-memory bank conflicts.
+During inference, FlashQuant fuses dense and sparse computation
+into a single kernel. Activations, quantized weights, and outlier
+tiles are first loaded into shared memory. The GEMM path performs
+low-bit matrix multiplication on Tensor Cores, while the SpMM
+path accumulates outlier contributions on CUDA Cores. By avoid-
+ing redundant activation reloads and intermediate global-memory
+write-backs, this fused design substantially reduces global memory
+traffic compared with separate GEMM and SpMM kernels.
+3.1
+Sparse–Dense Tiling
+Content-sharing fusion requires tile correspondence: the dense and
+sparse paths must operate on compatible activation and output
+tiles. However, the conventional GEMM tile hierarchy cannot be
+directly reused for outlier SpMM because sparse entries are stored
+and accessed irregularly. To address this, FlashQuant constructs
+a shared sparse-dense tile hierarchy. The dense path preserves
+the CTA-, warp-, and thread-level tiling required by Tensor Core
+GEMM, while the sparse path is mapped to the corresponding
+regions of the activation and output tiles. Figure 3 illustrates the
+resulting hierarchical partitioning and coordination between the
+two paths across CTA, warp, and thread levels.
+3
+
+
+Conference’17, July 2017, Washington, DC, USA
+Junqing Lin, Jingwei Sun, Zhengding Hu, and Guangzhong Sun
+CTA
+Warp
+Thread
+(a)
+(b)
+X
+WQ
+WO
+X
+…
+…
+…
+…
+…
+…
+…
+…
+Figure 3: Example of the sparse–dense tiling. (a) Outlier tiling. (b) Quantized-weight tiling. Colored regions denote the active
+tiles. The example uses three warps per CTA (one dedicated to outliers) and eight threads per warp for clarity.
+3.1.1
+CTA Level. At the CTA level, FlashQuant co-locates the dense
+and sparse computations that contribute to the same output tile.
+Specifically, the quantized weight matrix 𝑊𝑄∈R𝐾×𝑁and the
+sparse outlier matrix 𝑊𝑂∈R𝐾×𝑁are partitioned into correspond-
+ing CTA-level tiles. For each CTA, the associated activation tile is
+loaded into shared memory once and reused by both the GEMM
+and SpMM paths. The partial results from the two paths are ac-
+cumulated on chip before being written back to global memory,
+thereby avoiding redundant activation reloads and intermediate
+output traffic that would arise from separate-kernel execution.
+This organization is particularly beneficial during decoding.
+Since the batch size 𝐵is typically small, the activation matrix
+𝑋∈R𝑀×𝐾is heavily reused across output columns, while weight
+reuse is comparatively limited. Accordingly, FlashQuant partitions
+the weight matrix across CTAs while sharing the activation tile
+within each CTA. Each CTA operates on
+𝑋CTA ∈R𝐵×𝐾CTA,
+𝑊CTA
+𝑄
+∈R𝐾CTA×𝑁CTA,
+𝑊CTA
+𝑂
+∈R𝐾CTA×𝑁CTA.
+However, naive partitioning along the N dimension can cause load
+imbalance when output tiles are not evenly distributed across
+SMs. To address this issue, FlashQuant adopts Stream-K, which
+distributes the aggregate MAC iteration space across persistent
+CTAs. Each CTA is assigned a contiguous segment of this space,
+potentially spanning multiple output tiles. This work-centric de-
+composition improves load balance while preserving activation
+reuse within the shared sparse–dense tile.
+Each CTA-level tile is further decomposed into shared-memory
+tiles 𝑋𝑆𝐻𝑀, 𝑊𝑆𝐻𝑀
+𝑄
+, and 𝑊𝑆𝐻𝑀
+𝑂
+, whose sizes are selected to fit
+within the available shared-memory capacity. During execution,
+FlashQuant iteratively stages these subtiles from global memory
+to shared memory, allowing both dense and sparse computations
+to consume the same activation data through the on-chip memory
+hierarchy.
+3.1.2
+Warp Level. At the warp level, FlashQuant specializes warps
+according to the execution requirements of the dense and sparse
+computation paths. The dense path uses Tensor Core MMA instruc-
+tions and thus requires regular, hardware-aligned fragments. In
+contrast, the sparse path runs on CUDA cores, as irregular outlier
+locations prevent efficient Tensor Core utilization.
+For the dense path, each shared-memory tile𝑊𝑆𝐻𝑀
+𝑄
+is partitioned
+into warp-level fragments. FlashQuant extends Sliced-K parallelism
+to the warp level, enabling multiple warps within the same CTA
+to compute independent K-fragments of the same output tile. The
+resulting partial sums are reduced within the CTA. Each dense
+warp processes
+𝑋warp
+𝑄
+∈R𝐵×𝐾warp,
+𝑊warp
+𝑄
+∈R𝐾warp×𝑁warp.
+For the sparse path, the key challenge is balancing work while
+avoiding write conflicts. A uniform column-wise partition can as-
+sign highly uneven numbers of outliers to different warps, causing
+load imbalance. Conversely, a purely nonzero-balanced partition
+may cause multiple warps to update the same output columns,
+requiring atomic operations. FlashQuant avoids both issues by as-
+signing each sparse warp a disjoint set of output columns while
+accounting for the local nonzero distribution. This design preserves
+conflict-free accumulation and improves sparse workload balance.
+Each sparse warp processes
+𝑋warp
+𝑂
+∈R𝐵×𝐾CTA,
+𝑊warp
+𝑂
+∈R𝐾CTA×|𝐶𝑂,warp|,
+where 𝐶𝑂,warp denotes the set of output columns assigned to the
+warp. Because sparse outlier processing is more susceptible to mem-
+ory stalls than dense Tensor Core computation, FlashQuant allo-
+cates additional warps to the sparse path when needed, improving
+latency hiding through warp-level scheduling.
+3.1.3
+Thread Level. At the thread level, FlashQuant maps dense and
+sparse computations to distinct execution patterns while preserving
+a shared activation layout.
+For GEMM, threads within a warp are mapped to the Tensor
+Core MMA tile layout (e.g., 16×16×8), enabling efficient scheduling
+of quantized dense computations. In contrast, SpMM computations
+4
+
+
+FlashQuant
+Conference’17, July 2017, Washington, DC, USA
+are executed on CUDA cores because their irregular access patterns
+limit Tensor Core utilization.
+For dense computation, the activation matrix 𝑋𝑆𝐻𝑀is stored in
+shared memory in a row-major layout with an 8-element swizzle
+(16 bytes, 4 banks) to reduce intra-subwarp bank conflicts. Under
+this layout, adjacent elements within the same column of 𝑋𝑆𝐻𝑀
+are spaced across 4 banks. However, in SpMM, each thread reads
+only one element at a time due to the irregular sparsity pattern.
+Consequently, bank conflicts occur when more than 𝑁thread =
+bank_size
+4
+threads access the same column simultaneously. To miti-
+gate this, each 𝑊warp
+𝑂
+is partitioned along the column dimension
+into 𝑁𝑏𝑢𝑐𝑘𝑒𝑡= warp_size
+𝑁𝑡ℎ𝑟𝑒𝑎𝑑buckets, each mapped to a group of 𝑁thread
+threads. Specifically, each thread handles
+𝑋thread
+𝑂
+∈R
+𝐵
+𝑁thread ×𝐾CTA,
+𝑊thread
+𝑂
+∈R𝐾CTA×|𝐶𝑂,thread|,
+where 𝐶𝑂,thread denotes columns dynamically assigned to the bucket.
+3.2
+Outlier Encoding
+During workload partitioning, the outlier matrix is co-tiled with the
+quantized weight matrix, producing a coupled memory layout that
+is not well supported by conventional sparse formats such as CSR
+and COO. These formats are designed for standalone sparse ker-
+nels and do not explicitly preserve the tile-level locality required
+by fused sparse–dense GPU execution. In particular, the sparse
+representation in FlashQuant must satisfy four requirements: (1)
+alignment of outlier entries with GEMM tile boundaries, (2) vector-
+ized access to sparse metadata and values, (3) direct compatibility
+with the shared-memory activation layout, and (4) balanced work-
+load assignment under irregular outlier distributions. To meet these
+requirements, we introduce Tile-COO, a tile-local sparse format
+designed for efficient decoding within the sparse–dense tiling frame-
+work. We further apply offline reordering to improve load balance
+and reduce shared-memory bank conflicts.
+row_indices
+bucket_info
+tile_indptr
+0
+48
+20
+72
+92
+0
+0
+0
+1
+0
+6
+4
+5
+0
+8
+8
+12
+col_indices
+outlier_vals
+packed
+2
+3
+2
+3
+0
+2
+5
+7
+packed
+T0
+T1
+T2
+T3
+B0
+B1
+B0
+T0
+Figure 4: Example of Tile-COO with four tiles, each contain-
+ing two buckets.
+3.2.1
+Tile-COO Structure. As illustrated in Figure 4, the Tile-COO
+format comprises three arrays: tile_indptr, bucket_info, and
+packed_outliers. The packed_outliers array stores the row in-
+dices, column indices, and values of the outlier elements. Overall,
+the format is designed to balance compression efficiency, GPU-
+friendly decodability, and compatibility with dense-tile reuse.
+Tiles and Buckets. To align the sparse representation with the
+tiled execution of the quantized weight matrix, the outlier matrix is
+partitioned into shared-memory tiles that match the corresponding
+quantized weight tiles. The total number of 𝑊SHM
+𝑂
+tiles is
+𝑁tile =
+𝐾
+𝐾SHM
+×
+𝑁
+𝑁SHM
+.
+The tile_indptr array stores the starting offset of each tile using
+uint32_t indices. Within each tile, nonzero elements are further
+organized into column-oriented buckets to improve memory locality.
+For each bucket, bucket_info records both the starting offset and
+the number of nonzero elements. Since the number of elements per
+bucket is bounded, uint16_t is sufficient to encode bucket sizes,
+thereby reducing storage overhead.
+Packed Outliers. To support efficient decoding and vectorized
+memory access, nonzero elements within each bucket are packed
+into groups of four, with buckets containing fewer than four el-
+ements padded for alignment. During quantization, the unused
+padding slots can be repurposed to store original weight values,
+further improving model accuracy. Given the maximum shared-
+memory tile size of 256 × 256, both row_index and col_index can
+be represented using uint8_t, while outlier values are stored in
+bfloat16. Accordingly, every four outliers are packed into a uint4-
+based tuple consisting of row indices, column indices, and outlier
+values, enabling efficient parallel decoding during kernel execution.
+Table 1: Data fields and storage costs in Tile-COO.
+Component
+Field
+Type
+Count
+tile_indptr
+Tile offset
+UINT32
+𝑁tile + 1
+bucket_info
+Bucket offset
+UINT16
+𝑁𝐵
+Bucket nnz
+UINT16
+𝑁𝐵
+packed_outliers
+Row index
+UINT8
+nnz
+Column index
+UINT8
+nnz
+Outlier value
+BF16/FP16
+nnz
+𝑁𝐵= 𝑁tile𝑁warp𝑁bucket.
+Storage Analysis. Table 1 summarizes the data types and sizes
+of all fields in Tile-COO. Accordingly, the total storage cost of
+Tile-COO is
+𝑆𝑇𝑖𝑙𝑒−𝐶𝑂𝑂= (𝑁tile + 1) × 4 + 𝑁B × 4 + nnz × 4 bytes.
+Compared with CSR, Tile-COO reduces both metadata overhead
+and decoding complexity by exploiting tile-level structure. Specifi-
+cally, CSR requires a (𝐾+ 1)-entry row-pointer array and a 32-bit
+column index for each nonzero, yielding
+𝑆CSR = (𝐾+ 1) × 4 + nnz × 12 bytes.
+By amortizing indexing metadata across tiles and buckets, Tile-
+COO shifts the overhead from per-element indexing to tile- and
+bucket-level descriptors, scaling with 𝑁tile and 𝑁tile × 𝑁bucket. This
+compact layout is well suited to sparse outlier distributions and
+5
+
+
+Conference’17, July 2017, Washington, DC, USA
+Junqing Lin, Jingwei Sun, Zhengding Hu, and Guangzhong Sun
+GPU execution, as it improves memory locality and enables efficient
+parallel decoding.
+3.2.2
+Sparse Reordering. To mitigate irregular outlier distributions,
+we adopt a two-stage sparse reordering strategy: column reordering
+improves workload balance across buckets, while element reorder-
+ing reduces shared-memory bank conflicts.
+a f k
+p e
+f
+g
+b
+n k l
+c
+n
+d
+o r s
+h
+i w
+h
+o
+t
+e
+j
+z
+gid
+a
+b
+c
+d
+e
+s v
+t
+u
+w
+x
+y
+z
+f k
+p
+g
+n q
+l
+o r
+h
+i m
+j
+0
+0
+1
+1
+2
+2
+3
+3
+0
+0
+1
+1
+2
+2
+3
+3
+Column 
+Reordering
+Element 
+Reordering
+0 1 2 3 4 5 6 7
+0 5 6 7
+1 2 3 4
+B1
+s v
+q t
+l
+r u
+m
+w
+x
+y
+z
+m
+n
+o
+p
+q
+r
+u
+v
+w
+x
+y
+z
+√
+√
+√
+v
+√
+√
+f
+g
+h
+i
+j
+k
+a
+b
+c
+d
+e
+s
+t
+l
+×
+√
+√
+√
+×
+×
+×
+b1
+b0
+g
+q
+r
+m
+k
+p
+z
+v
+t
+y
+w
+x
+√
+√
+√
+v
+×
+√
+l
+h
+i
+f
+n
+o
+a
+b
+d
+e
+s
+c
+u j
+√
+√
+√
+√
+√
+√
+√
+b1
+b0
+gid
+B0
+×
+√
+Conflict
+Non-conflict
+Figure 5: Example of column and element reordering with
+two buckets.
+Column Reordering. Each shared tile 𝑊𝑆𝐻𝑀
+𝑂
+is partitioned into
+𝑁𝑤𝑎𝑟𝑝× 𝑁𝑏𝑢𝑐𝑘𝑒𝑡buckets, where each bucket is processed by a dedi-
+cated sub-warp. Since columns may have highly skewed nonzero
+counts, assigning them in their original order can cause significant
+workload imbalance across sub-warps. To address this, we first
+sort the columns within each tile in descending order of nonzero
+count. We then use a greedy heap-based scheduling strategy: a min-
+heap maintains the cumulative nonzero count of each bucket, and
+each column is assigned to the currently least-loaded bucket. This
+procedure balances the nonzero distribution across buckets and
+reduces inter-bucket workload imbalance. As shown in Figure 5,
+the eight columns in the tile are distributed across two buckets with
+approximately balanced nonzero counts.
+Element Reordering. Under our thread-to-data mapping, adjacent
+threads within a sub-warp access shared memory with a stride of
+four banks, as described in Section 3.1.3. Consequently, accesses
+from different sub-warps tend to follow a four-bank-group pattern,
+where target banks are grouped into four consecutive banks, such
+as banks 0–3 and 4–7. Bank conflicts arise when multiple sub-warps
+simultaneously access elements mapped to the same bank group.
+Since each sub-warp processes one bucket, we reduce such conflicts
+by reordering the nonzero elements within each bucket according
+to their target bank groups. Specifically, each element is assigned
+to one of four groups as
+gid =
+𝑘
+2
+
+%4,
+where 𝑘denotes the row index. Elements in each bucket are then
+selected following the bucket-dependent circular order
+([0, 1, 2, 3] + bucket_id) % 4.
+This ordering staggers accesses from different sub-warps across
+bank groups, thereby reducing inter-sub-warp bank conflicts. As
+shown in Figure 5, this strategy reduces the number of conflicts
+from 4 to 1.
+4
+IMPLEMENTATION
+This section presents two key components of the FlashQuant im-
+plementation. We first describe a pipelined execution strategy that
+overlaps computation with data movement to hide memory-access
+latency. We then introduce an optimized outlier decoding mech-
+anism that improves sparse–dense computation efficiency while
+preserving overall performance.
+4.1
+Efficient Pipelined Execution
+As shown in Figure 6, FlashQuant adopts a multi-stage pipelined
+execution model with double buffering to overlap data movement
+and computation, thereby reducing global-memory latency and
+improving hardware utilization. The operator consists of four stages:
+(1) loading data from global memory, (2) staging data in registers, (3)
+performing dequantization and outlier decoding, and (4) executing
+computation on Tensor Cores and CUDA Cores.
+In the first stage, the quantized weight matrix 𝑊𝑄, sparse out-
+lier matrix𝑊𝑂, and activation matrix 𝑋are transferred from global
+Listing 1 Sparse Outlier Decoding Procedure.
+1
+/* Input:
+2
+Packed outliers: outliers
+3
+Swizzles: swizzles
+4
+*/
+5
+// Thread Configuration
+6
+int bucket_id = threadIdx.x / 8;
+7
+int row = threadIdx.x % 8;
+8
+scalar_t* sh_x_row = sh_x + row * X_SHARE_STRIDE;
+9
+uint16_t bucket_start = outlier_ptr[bucket_id*2];
+10
+uint16_t bucket_nnz = outlier_ptr[bucket_id*2+1];
+11
+outlier_ptr += bucket_start;
+12
+13
+// Double buffer
+14
+uint4 outliers[2];
+15
+int buffer_id = 0;
+16
+outliers[buffer_id] = outlier_ptr[0];
+17
+18
+for (int i = 0; i < bucket_nnz; i++) {
+19
+// Unpack
+20
+if (i < bucket_nnz - 1)
+21
+outliers[buffer_id ^ 1] = outlier_ptr[i+1];
+22
+uint4 outlier = outliers[buffer_id];
+23
+buffer_id ^= 1;
+24
+uint32_t ks, col;
+25
+ks = reinterpret_cast<uint32_t*>(&outlier)[0];
+26
+col = reinterpret_cast<uint32_t*>(&outlier)[1];
+27
+scalar_t* vals = reinterpret_cast<scalar_t*>(&outlier);
+28
+29
+// Apply swizzle once
+30
+ks ^= swizzles;
+31
+32
+// Computation
+33
+#pragma unroll
+34
+scalar_t res = 0.0;
+35
+for (int i = 0; i < 4; i++) {
+36
+uint8_t k = reinterpret_cast<uint8_t>(&ks)[i];
+37
+scalar_t X_val = sh_x_row[k];
+38
+scalar_t O_val = vals[i];
+39
+res += X_val * O_val;
+40
+}
+41
+sh_c[row, col] = res;
+42
+43
+}
+6
+
+
+FlashQuant
+Conference’17, July 2017, Washington, DC, USA
+Timeline
+Load HBM to SHM
+Load SHM to RF
+Dequant WQ & Decode WO
+Tensor & CUDA Core
+0
+1
+0
+2
+0
+3
+0
+…
+N-1
+1
+2
+N-2
+N-1
+1
+N-3
+N-2
+N-1
+N-4
+N-1
+N-3
+N-2
+Figure 6: Illustration of the pipelined execution strategy.
+Blocks with the same color denote identical shared tiles.
+memory to shared memory using asynchronous copy operations. In
+the second stage, each thread loads the required quantized weights,
+activations, and compressed outlier values from shared memory
+into registers. Because outlier processing has relatively low arith-
+metic intensity and is therefore more sensitive to memory-access
+latency, we allocate additional warps to this task, enabling latency
+hiding through warp-level context switching. During computation,
+each thread dequantizes the dense quantized weights, multiplies
+them with the corresponding activations, and stores intermediate
+results in registers. In parallel, each thread decodes outlier elements,
+fetches the corresponding activations from shared memory, and
+accumulates the resulting outlier contributions in shared-memory
+buffers. After all tiles are processed, these contributions are reduced
+into registers. When required by the Stream-K strategy, a subse-
+quent global reduction is performed to produce the final outputs.
+The results are then written back to global memory.
+4.2
+High-Performance Outlier Decoding
+Efficient SpMM execution requires decoding the outlier matrix
+into a representation compatible with the kernel’s shared-memory
+layout. Listing 1 illustrates the GPU-optimized decoding procedure
+used to reconstruct outlier entries prior to computation.
+Each thread computes its bucket_id and the corresponding
+address in the shared-memory activation matrix (lines 6–8). For
+each bucket, the kernel loads the starting offset bucket_start and
+the number of nonzero outliers bucket_nnz, then processes these
+entries sequentially (lines 9–11). To hide global-memory latency, the
+implementation uses double buffering, prefetching the next outlier
+entry while decoding the current one (lines 14–15 and 20–23).
+Each packed outlier is decoded into three components: the 𝑘
+indices ks, a column index col, and four half-precision values vals
+(lines 24–27). To improve vectorization and register reuse, the num-
+ber of outliers per column is padded to a multiple of four, allowing
+four values from the same column to share a single encoded column
+index. The k indices are then transformed by a swizzle operation
+to match the shared-memory layout of the activation matrix 𝑋
+(line 30). The mask variable swizzles, consisting of four uint8_t
+entries, is precomputed once and reused across the four elements,
+reducing per-thread overhead.
+After decoding, each thread loads the corresponding activation
+values from shared memory using the swizzled indices and executes
+four unrolled fused multiply–add (FMA) operations (lines 33–40).
+The resulting partial sums are written back to shared memory
+according to the row and col indices (line 41).
+1.0%
+1.5%
+2.0%
+2.5%
+3.0%
+Density
+0
+1
+2
+3
+4
+Geometric Mean Speedup
+3.6
+2.8
+2.8
+2.7
+2.6
+2.5
+2.8
+2.6
+2.5
+2.4
+2.3
+1.5
+1.2
+0.9
+0.7
+0.6
+Marlin
+FlashQuant
+Sputnik
+cuSPARSE
+(a) Batch Size = 8, RTX 3090
+1.0%
+1.5%
+2.0%
+2.5%
+3.0%
+Density
+0
+1
+2
+3
+4
+5
+6
+Geometric Mean Speedup
+5.7
+3.8
+3.6
+3.5
+3.4
+3.3
+3.4
+3.1
+2.9
+2.8
+2.7
+1.6
+1.2
+0.9
+0.7
+0.6
+Marlin
+FlashQuant
+Sputnik
+cuSPARSE
+(b) Batch Size = 8, RTX 4090
+1.0%
+1.5%
+2.0%
+2.5%
+3.0%
+Density
+0
+1
+2
+3
+4
+5
+Geometric Mean Speedup
+4.5
+3.0
+3.0
+2.9
+2.8
+2.7
+2.4
+2.2
+2.1
+2.0
+1.9
+1.2
+0.9
+0.7
+0.6
+0.5
+Marlin
+FlashQuant
+Sputnik
+cuSPARSE
+(c) Batch Size = 8, RTX 5090
+1.0%
+1.5%
+2.0%
+2.5%
+3.0%
+Density
+0
+1
+2
+3
+4
+Geometric Mean Speedup
+3.6
+2.8
+2.7
+2.6
+2.6
+2.5
+2.7
+2.5
+2.4
+2.3
+2.2
+1.0
+0.8
+0.6
+0.5
+0.4
+Marlin
+FlashQuant
+Sputnik
+cuSPARSE
+(d) Batch Size = 16, RTX 3090
+1.0%
+1.5%
+2.0%
+2.5%
+3.0%
+Density
+0
+1
+2
+3
+4
+5
+6
+7
+Geometric Mean Speedup
+6.0
+4.2
+4.0
+3.9
+3.7
+3.6
+3.6
+3.3
+3.0
+2.8
+2.7
+1.1
+0.8
+0.6
+0.4
+0.4
+Marlin
+FlashQuant
+Sputnik
+cuSPARSE
+(e) Batch Size = 16, RTX 4090
+1.0%
+1.5%
+2.0%
+2.5%
+3.0%
+Density
+0
+1
+2
+3
+4
+5
+Geometric Mean Speedup
+4.7
+3.1
+3.0
+3.0
+2.9
+2.8
+2.5
+2.3
+2.1
+2.0
+1.8
+0.8
+0.6
+0.4
+0.3
+0.3
+Marlin
+FlashQuant
+Sputnik
+cuSPARSE
+(f) Batch Size = 16, RTX 5090
+Figure 7: Speedup of various outlier-aware quantization kernel implementations compared with cuBLAS (BF16).
+7
+
+
+Conference’17, July 2017, Washington, DC, USA
+Junqing Lin, Jingwei Sun, Zhengding Hu, and Guangzhong Sun
+Table 2: Hardware Configurations.
+GPU
+CUDA Cores
+(FP16/BF16)
+Tensor Cores
+(FP16/BF16)
+Bandwidth
+RTX 3090
+35.6 TFLOPS
+71.0 TFLOPS
+936 GB/s
+RTX 4090
+82.6 TFLOPS
+165.2 TFLOPS
+1008 GB/s
+RTX 5090
+104.8 TFLOPS
+209.5 TFLOPS
+1792 GB/s
+5
+EVALUATION
+5.1
+Setup
+Hardware. We evaluate FlashQuant on three representative con-
+sumer GPUs, the NVIDIA GeForce RTX 3090, RTX 4090, and RTX
+5090, which span three architectural generations. This selection
+enables a consistent assessment of the scalability and portability of
+our optimizations across evolving GPU microarchitectures. Table 2
+summarizes the relevant hardware characteristics, including peak
+FP16/BF16 throughput for CUDA Cores and Tensor Cores, as well
+as sustained memory bandwidth.
+Datasets. We extract representative quantization operator shapes
+from several LLM families, including LLaMA [8], Qwen [24], DeepSeek
+[20], and OPT [30]. For each operator shape, we generate five out-
+lier ratios: {1.0%, 1.5%, 2.0%, 2.5%, 3.0%}. This yields 340 INT4+BF16
+outlier-aware operator configurations. The resulting problem sizes
+range from (4096, 4096) to (75264, 14848).
+Baselines. We compare FlashQuant against strong unfused base-
+lines built from state-of-the-art dense and sparse kernels. To the
+best of our knowledge, prior systems do not provide a fused opera-
+tor for the mixed dense–sparse computation pattern required by
+outlier-aware quantized inference. Therefore, in existing systems,
+the practical deployment strategy is to execute the dense quantized
+path and the sparse outlier path separately. Following this design,
+we combine Marlin for dense quantized GEMM with either Sput-
+nik or cuSPARSE for sparse outlier processing, and we account for
+the full cost of the unfused pipeline. We also report cuBLAS BF16 as
+a high-precision reference. Methods such as MixQ [2], FLUTE [11],
+and framework-native quantization paths differ in outlier handling
+or execution formulation and are therefore discussed in related
+work rather than used as the main system baselines.
+5.2
+Kernel Benchmark
+Figure 7 compares FlashQuant with the baselines at batch sizes
+of 8 and 16. We include Marlin as an upper-bound reference for
+the outlier-aware kernel, corresponding to an idealized setting in
+which sparse outlier handling is ignored. Relative to cuBLAS BF16,
+FlashQuant achieves speedups of 2.74×–4.18×, primarily due to the
+benefits of quantized computation. Compared with the strongest
+unfused baseline, Sputnik+Marlin, FlashQuant achieves speedups
+of 1.03×–1.16× on the RTX 3090, 1.12×–1.37× on the RTX 4090,
+and 1.23×–1.53× on the RTX 5090.
+Beyond these overall speedups, Figure 7 reveals two additional
+trends. First, as outlier density increases, FlashQuant exhibits a
+smaller latency increase than Sputnik, demonstrating the benefit
+of fused sparse–dense execution in denser regimes. Second, the ad-
+vantage of FlashQuant becomes more pronounced on newer GPUs
+20
+21
+22
+23
+24
+25
+Batch Size
+0
+1
+2
+3
+4
+5
+6
+Speedup
+Marlin
+cuSPARSE + Marlin
+Sputnik + Marlin
+FlashQuant
+Figure 8: Speedup over cuBLAS BF16 on RTX 4090 for kernel
+(14848, 75264) with 3% outlier density.
+with higher floating-point throughput. Although fusion introduces
+additional computation, this overhead becomes relatively smaller
+on newer architectures, while the reduction in memory traffic con-
+tinues to provide performance benefits.
+Figure 8 evaluates performance across batch sizes. FlashQuant
+consistently outperforms the baselines at a batch size of 32, indi-
+cating good scalability to larger workload granularities. For batch
+sizes below 8, however, FlashQuant pads inputs to a minimum
+size of 8, introducing redundant computation and reducing parallel
+efficiency. Consequently, its advantage diminishes for very small
+batches, such as 1 and 2.
+5.3
+Cost Analysis
+0
+50
+100
+150
+200
+250
+300
+350
+Matrix ID (sorted by nnz)
+101
+Preprocess Time (s)
+FlashQuant
+Figure 9: Preprocessing time of FlashQuant.
+We report the preprocessing time and memory overhead of the
+proposed method. Preprocessing comprises reordering and packing,
+and Figure 9 shows that the total preprocessing time remains below
+100 s for all evaluated matrices. Because this cost is incurred only
+once at deployment, it is amortized across subsequent executions
+and does not affect steady-state performance. We further report
+the storage overhead normalized to the dense format across vary-
+ing matrix densities in Figure 10. The overhead is dominated by
+metadata, primarily indices, whose storage cost often exceeds that
+of the outlier values. By employing low-precision index encoding
+with 8-bit row and column indices, the Tile-COO format reduces
+metadata size and consequently requires less storage than CSR.
+8
+
+
+FlashQuant
+Conference’17, July 2017, Washington, DC, USA
+1.0%
+1.5%
+2.0%
+2.5%
+3.0%
+Density
+0
+5
+10
+Relative Memory Cost
+3.0%
+4.5%
+6.0%
+7.5%
+9.0%
+2.6%
+3.6%
+4.6%
+5.6%
+6.6%
+CSR
+Tile-COO
+Figure 10: Memory overhead of outlier matrices.
+1.0%
+1.5%
+2.0%
+2.5%
+3.0%
+Density
+0.5
+1.0
+1.5
+Geometric Mean Speedup
+SD
++EW
++RE
+Figure 11: Effect of various optimizations.
+5.4
+Ablation Study
+We perform an ablation study by incrementally enabling three tech-
+niques: sparse–dense tiling (SD), extra warp allocation (EW), and
+reordering (RE). Figure 11 reports the geometric mean speedups
+over Sputnik+Marlin on the RTX 4090. With only SD enabled,
+FlashQuant achieves a 6%–16% speedup over Sputnik+Marlin. This
+improvement stems from co-tiling sparse outlier processing with
+dense computation, which enhances on-chip reuse of activations
+and partial outputs while eliminating the additional global mem-
+ory accesses incurred by the sparse SpMM kernel. Figure 12 fur-
+ther shows that FlashQuant reduces memory traffic by up to 45.4%
+compared with Sputnik. Since outlier SpMM has low arithmetic
+intensity, we allocate dedicated warps to improve latency hiding,
+resulting in an additional 2%–4% speedup. Finally, to mitigate load
+imbalance caused by irregular sparsity, we reorder columns to
+distribute high-density columns more evenly across warps and re-
+order elements to reduce shared-memory bank conflicts. Enabling
+RE yields a further 4%–9% speedup.
+5.5
+End-to-End
+We evaluate FlashQuant in an end-to-end setting on LLaMA3-8B [8]
+and Qwen2.5-14B [24]. We compare the original models, GPTQ-
+quantized models, and SpQR-based outlier-aware quantized mod-
+els [4] across four quantization thresholds, where higher thresholds
+retain fewer outliers. Table 3 reports WikiText2 perplexity and
+1.0%
+1.5%
+2.0%
+2.5%
+3.0%
+Density
+0.0
+0.5
+1.0
+1.5
+2.0
+Memory Access Overhead (GB)
+Marlin
+FlashQuant
+Sputnik + Marlin
+Figure 12: Memory access overhead for a (16, 14848) ×
+(14848, 75264) kernel on an RTX 4090 GPU.
+Table 3: Perplexity on the WikiText2 dataset.
+Method
+Threshold
+LLaMA3-8B
+Qwen2.5-14B
+Memory (GiB)
+PPL
+Memory (GiB)
+PPL
+Baseline
+-
+14.96
+5.538
+27.51
+4.741
+GPTQ
+-
+5.34
+6.896
+9.30
+5.191
+SpQR
+5%
+6.06
+5.925
+10.73
+5.092
+10%
+5.83
+5.936
+10.26
+5.120
+15%
+5.75
+5.966
+10.10
+5.145
+20%
+5.70
+5.979
+10.01
+5.152
+model size. Compared with GPTQ, outlier-aware quantization con-
+sistently reduces perplexity with only modest memory overhead.
+We further evaluate four vLLM configurations [16]. BF16 de-
+notes the baseline using the original vLLM implementation with
+BF16 precision, while Marlin uses the Marlin backend with GPTQ-
+quantized models. cuSPARSE and FlashQuant are alternative
+implementations for outlier-aware quantized models, with the quan-
+tization threshold fixed at 5%. Table 4 reports decoding throughput.
+FlashQuant achieves a 2.01× end-to-end speedup over the BF16
+baseline at batch size 8 and a 1.98× speedup at batch size 16. More-
+over, Qwen2.5 does not fit in GPU memory under the BF16 baseline,
+whereas quantization sufficiently reduces the memory footprint
+to enable efficient execution. Overall, FlashQuant provides a more
+favorable accuracy–efficiency trade-off than the alternatives: al-
+though it is slower than Marlin, it preserves higher accuracy and
+incurs less overhead than cuSPARSE.
+Table 4: Throughput comparison in decoding (tokens/s).
+Model
+Batch Size
+BF16
+Marlin
+cuSPARSE
+FlashQuant
+LLaMA3
+8
+56.9
+138.5
+90.7
+114.4
+16
+56.1
+132.3
+75.3
+107.6
+Qwen2.5
+8
+OOM
+81.4
+52.5
+68.3
+16
+OOM
+79.4
+41.0
+64.2
+6
+RELATED WORK
+Quantization [1, 3–5, 15, 19] is widely used to improve the effi-
+ciency of LLM inference; however, outliers in Transformer weights
+9
+
+
+Conference’17, July 2017, Washington, DC, USA
+Junqing Lin, Jingwei Sun, Zhengding Hu, and Guangzhong Sun
+remain a major obstacle to low-bit quantization. Prior work has
+mitigated weight outliers through value redistribution [10, 19] or
+matrix-transformation-based methods [1, 21]. A complementary
+approach, outlier-aware quantization [3, 14, 15, 29], retains a small
+subset of outlier weights in higher precision while quantizing the
+remaining weights to low-bit formats. Although this strategy im-
+proves the accuracy–compression trade-off, it introduces a mixed
+dense–sparse computation pattern during inference.
+In practice, extracting and applying high-precision outliers typ-
+ically requires an SpMM operator. Existing implementations [14,
+15, 29] commonly rely on general-purpose sparse libraries such
+as cuSPARSE [22] and Sputnik [7]. However, processing outliers
+through a separate sparse path from the quantized dense computa-
+tion incurs redundant memory traffic and kernel launch overhead,
+reducing end-to-end throughput. To address this inefficiency, we
+propose a fused kernel that integrates quantized dense computa-
+tion with outlier handling, streamlining the SpMM component and
+improving overall inference efficiency.
+Our design is orthogonal to kernel optimizations for other quan-
+tization operators. Marlin [6] implements a highly optimized dense
+low-bit GEMM kernel for weight-only quantization, but does not
+address the sparse outlier component introduced by outlier-aware
+weight quantization. MixQ [2] targets activation outliers in weight–
+activation quantization, and FLUTE [11] accelerates lookup-based
+quantization with specialized kernels. FlashQuant focuses on the
+mixed dense–sparse computation induced by outlier-aware weight
+quantization, which differs from the operator formulations targeted
+by these prior systems.
+7
+CONCLUSION
+This paper presents FlashQuant, a unified execution framework
+for outlier-aware quantization that integrates low-bit GEMM with
+high-precision SpMM. By jointly leveraging sparse–dense tiling,
+a GPU-efficient outlier encoding format, and pipelined execution,
+FlashQuant reduces memory-access overhead while sustaining high
+throughput across diverse GPU architectures. Experiments show
+that FlashQuant achieves a 2.74×–4.18× speedup over cuBLAS BF16
+and up to a 1.53× improvement over the best existing outlier-aware
+implementation. Moreover, Tile-COO reduces storage and decoding
+overhead compared with CSR. In end-to-end quantized inference,
+FlashQuant delivers a 2.01× speedup. Currently, FlashQuant tar-
+gets INT4 weight-only quantization with BF16 outliers and relies
+on offline preprocessing to generate the Tile-COO representation;
+future work will extend the fused design to lower-precision formats
+such as INT2.
+REFERENCES
+[1] Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L Croci, Bo Li, Pashmina
+Cameron, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman.
+2024. Quarot: Outlier-free 4-bit inference in rotated llms. Advances in Neural
+Information Processing Systems 37 (2024), 100213–100240.
+[2] Yidong Chen, Chen Zhang, Rongchao Dong, Haoyuan Zhang, Yonghua Zhang,
+Zhonghua Lu, and Jidong Zhai. 2024. Mixq: Taming dynamic outliers in mixed-
+precision quantization by online prediction. In SC24: International Conference for
+High Performance Computing, Networking, Storage and Analysis. IEEE, 1–15.
+[3] Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. 2022. Gpt3.
+int8 (): 8-bit matrix multiplication for transformers at scale. Advances in neural
+information processing systems 35 (2022), 30318–30332.
+[4] Tim Dettmers, Ruslan Svirschevski, Vage Egiazarian, Denis Kuznedelev, Elias
+Frantar, Saleh Ashkboos, Alexander Borzunov, Torsten Hoefler, and Dan Alistarh.
+2023.
+Spqr: A sparse-quantized representation for near-lossless llm weight
+compression. arXiv preprint arXiv:2306.03078 (2023).
+[5] Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. 2022. Gptq:
+Accurate post-training quantization for generative pre-trained transformers.
+arXiv preprint arXiv:2210.17323 (2022).
+[6] Elias Frantar, Roberto L Castro, Jiale Chen, Torsten Hoefler, and Dan Alistarh.
+2025. Marlin: Mixed-precision auto-regressive parallel inference on large lan-
+guage models. In Proceedings of the 30th ACM SIGPLAN Annual Symposium on
+Principles and Practice of Parallel Programming. 239–251.
+[7] Trevor Gale, Matei Zaharia, Cliff Young, and Erich Elsen. 2020. Sparse gpu
+kernels for deep learning. In SC20: International Conference for High Performance
+Computing, Networking, Storage and Analysis. IEEE, 1–14.
+[8] Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek
+Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex
+Vaughan, et al. 2024. The llama 3 herd of models. arXiv preprint arXiv:2407.21783
+(2024).
+[9] Ziyi Guan, Hantao Huang, Yupeng Su, Hong Huang, Ngai Wong, and Hao Yu.
+2024. Aptq: Attention-aware post-training mixed-precision quantization for
+large language models. In Proceedings of the 61st ACM/IEEE Design Automation
+Conference. 1–6.
+[10] Cong Guo, Jiaming Tang, Weiming Hu, Jingwen Leng, Chen Zhang, Fan Yang,
+Yunxin Liu, Minyi Guo, and Yuhao Zhu. 2023. Olive: Accelerating large language
+models via hardware-friendly outlier-victim pair quantization. In Proceedings of
+the 50th Annual International Symposium on Computer Architecture. 1–15.
+[11] Han Guo, William Brandon, Radostin Cholakov, Jonathan Ragan-Kelley, Eric
+Xing, and Yoon Kim. 2024. Fast matrix multiplications for lookup table-quantized
+llms. In Findings of the Association for Computational Linguistics: EMNLP 2024.
+12419–12433.
+[12] Ke Hong, Guohao Dai, Jiaming Xu, Qiuli Mao, Xiuhong Li, Jun Liu, Kangdi
+Chen, Yuhan Dong, and Yu Wang. 2024. Flashdecoding++: Faster large language
+model inference with asynchronization, flat gemm optimization, and heuristics.
+Proceedings of Machine Learning and Systems 6 (2024), 148–161.
+[13] Wei Huang, Yangdong Liu, Haotong Qin, Ying Li, Shiming Zhang, Xianglong
+Liu, Michele Magno, and Xiaojuan Qi. 2024. BiLLM: Pushing the Limit of Post-
+Training Quantization for LLMs. In International Conference on Machine Learning.
+PMLR, 20023–20042.
+[14] Wei Huang, Haotong Qin, Yangdong Liu, Yawei Li, Qinshuo Liu, Xianglong Liu,
+Luca Benini, Michele Magno, Shiming Zhang, and Xiaojuan Qi. 2024. SliM-LLM:
+Salience-driven mixed-precision quantization for large language models. arXiv
+preprint arXiv:2405.14917 (2024).
+[15] Sehoon Kim, Coleman Hooper, Amir Gholami, Zhen Dong, Xiuyu Li, Sheng
+Shen, Michael W Mahoney, and Kurt Keutzer. 2024. SqueezeLLM: dense-and-
+sparse quantization. In Proceedings of the 41st International Conference on Machine
+Learning. 23901–23923.
+[16] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng,
+Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient
+memory management for large language model serving with pagedattention. In
+Proceedings of the 29th symposium on operating systems principles. 611–626.
+[17] Jinhao Li, Jiaming Xu, Shiyao Li, Shan Huang, Jun Liu, Yaoxiu Lian, and Guohao
+Dai. 2024. Fast and Efficient 2-bit LLM Inference on GPU: 2/4/16-bit in a Weight
+Matrix with Asynchronous Dequantization. In Proceedings of the 43rd IEEE/ACM
+International Conference on Computer-Aided Design. 1–9.
+[18] Shiyao Li, Xuefei Ning, Ke Hong, Tengxuan Liu, Luning Wang, Xiuhong Li,
+Kai Zhong, Guohao Dai, Huazhong Yang, and Yu Wang. 2023. Llm-mq: Mixed-
+precision quantization for efficient llm deployment. In The Efficient Natural
+Language and Speech Processing Workshop with NeurIPS, Vol. 9. 3.
+[19] Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen
+Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. 2024. Awq:
+Activation-aware weight quantization for on-device llm compression and accel-
+eration. Proceedings of machine learning and systems 6 (2024), 87–100.
+[20] Aixin Liu, Bei Feng, Bing Xue, Bingxuan Wang, Bochao Wu, Chengda Lu, Cheng-
+gang Zhao, Chengqi Deng, Chenyu Zhang, Chong Ruan, et al. 2024. Deepseek-v3
+technical report. arXiv preprint arXiv:2412.19437 (2024).
+[21] Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary,
+Raghuraman Krishnamoorthi, Vikas Chandra, Yuandong Tian, and Tijmen
+Blankevoort. 2024. SpinQuant: LLM Quantization with Learned Rotations. In
+The Thirteenth International Conference on Learning Representations.
+[22] Maxim Naumov, L Chien, Philippe Vandermersch, and Ujval Kapasi. 2010. Cus-
+parse library. In GPU Technology Conference, Vol. 12.
+[23] Wenqi Shao, Mengzhao Chen, Zhaoyang Zhang, Peng Xu, Lirui Zhao, Zhiqian
+Li, Kaipeng Zhang, Peng Gao, Yu Qiao, and Ping Luo. 2024. OmniQuant: Omnidi-
+rectionally Calibrated Quantization for Large Language Models. (2024).
+[24] Qwen Team. 2024. Qwen2 technical report. arXiv preprint arXiv:2407.10671
+(2024).
+[25] Haojun Xia, Zhen Zheng, Yuchao Li, Donglin Zhuang, Zhongzhu Zhou, Xiafei
+Qiu, Yong Li, Wei Lin, and Shuaiwen Leon Song. 2023. Flash-llm: Enabling cost-
+effective and highly-efficient large generative model inference with unstructured
+sparsity. arXiv preprint arXiv:2309.10285 (2023).
+10
+
+
+FlashQuant
+Conference’17, July 2017, Washington, DC, USA
+[26] Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song
+Han. 2023. Smoothquant: Accurate and efficient post-training quantization for
+large language models. In International conference on machine learning. PMLR,
+38087–38099.
+[27] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng,
+Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, et al. 2025. Qwen3 technical
+report. arXiv preprint arXiv:2505.09388 (2025).
+[28] Zhihang Yuan, Lin Niu, Jiawei Liu, Wenyu Liu, Xinggang Wang, Yuzhang Shang,
+Guangyu Sun, Qiang Wu, Jiaxiang Wu, and Bingzhe Wu. 2023. Rptq: Reorder-
+based post-training quantization for large language models.
+arXiv preprint
+arXiv:2304.01089 (2023).
+[29] Zhihang Yuan, Yuzhang Shang, and Zhen Dong. 2023. PB-LLM: Partially Binarized
+Large Language Models. In The Twelfth International Conference on Learning
+Representations.
+[30] Susan Zhang, Stephen Roller, Naman Goyal, Mikel Artetxe, Moya Chen, Shuohui
+Chen, Christopher Dewan, Mona Diab, Xian Li, Xi Victoria Lin, et al. 2022. Opt:
+Open pre-trained transformer language models. arXiv preprint arXiv:2205.01068
+(2022).
+[31] Wayne Xin Zhao, Kun Zhou, Junyi Li, Tianyi Tang, Xiaolei Wang, Yupeng Hou,
+Yingqian Min, Beichen Zhang, Junjie Zhang, Zican Dong, et al. 2023. A Survey
+of Large Language Models. arXiv preprint arXiv:2303.18223 (2023).
+11

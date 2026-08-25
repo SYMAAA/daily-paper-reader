@@ -1,0 +1,944 @@
+Title: BaKron: Efficient Quantization with Kronecker-Factored Hessians
+
+URL Source: https://arxiv.org/pdf/2608.06291v1
+
+Published Time: Fri, 07 Aug 2026 01:16:02 GMT
+
+Number of Pages: 26
+
+Markdown Content:
+# BaKron: Efficient Quantization with Kronecker-Factored Hessians 
+
+Johann Birnick Department of Mathematics University of California San Diego La Jolla, California, United States 
+
+jbirnick@ucsd.edu 
+
+Rayan Saab Department of Mathematics and HDSI University of California San Diego La Jolla, California, United States 
+
+rsaab@ucsd.edu 
+
+Abstract 
+
+We accelerate a family of algorithms for neural network quantization whose geometry is informed by any Kronecker-factored approximation of the Hessian. GPTQ-style adaptive rounding typically uses one-sided information derived from input activations. Two-sided Kronecker-factored Hessian approximations can additionally capture correlations across output coordinates, but applying GPTQ directly in the vectorized weight domain is computationally expensive. Building on the two-sided adaptive-rounding formulation used by BoA and YAQA, we introduce BaKron, an efficient solver that combines anti-diagonal parallelism with a recursive divide-and-conquer construction. For an m × n weight matrix, BaKron uses O(m + n) sequential steps while reducing the total work from O(m2n2) to O(mn (m + n)) . Thus, it matches the cubic scaling of GPTQ while exploiting richer curvature information. Moreover, BaKron is modular with respect to both the base quantizer and the Hessian estimator. We also provide practical benchmarks, consider a range of Hessians that BaKron can be called with, find an efficient technique to compute these Hessians, and evaluate the algorithm experimentally. 
+
+# 1 Introduction 
+
+Consider the problem of quantizing the weights of a neural network post training. Here, we are given a trained neural network, and for each linear unit x 7 → W x , represented by a weight matrix 
+
+W ∈ Rm×n, we wish to replace W by another weight matrix V of low numerical precision, while maintaining overall accuracy of the network. Each linear unit W is quantized separately. However, simply rounding each entry of W to the closest element of the quantization alphabet is suboptimal. Instead, one has to take the geometry of the network into account. The well-known GPTQ/OPTQ algorithm by Frantar et al. [2022] uses input correlations to inform the quantization algorithm. Concretely, the algorithm aims to find a V that approximately minimizes ∥(W − V )X∥2 
+
+> F
+
+. Here X represents a calibration dataset, so that each column x ∈ Rn is a sample input of the linear unit W . Hence the Gram matrix XX T is used to inform the geometry of the GPTQ algorithm, since when V is vectorized into vec( V ) ∈ Rmn , the Hessian of the above quadratic optimization problem (up to a scalar multiple) is exactly XX T ⊗ Im.One interpretation of the identity matrix Im that appears in this Hessian is that GPTQ treats all output features equally and does not consider correlations between them. We consider a natural extension of the GPTQ algorithm to the more general setting of an arbitrary Kronecker-factored Hessian of the form A ⊗ B, where A ∈ Rn×n and B ∈ Rm×m are arbitrary positive definite matrices. In particular, unlike GPTQ, it does not require B to be the identity matrix. 1arXiv:2608.06291v1 [cs.LG] 6 Aug 2026 This natural extension has been used in a functionally equivalent form in the previous papers by Kim et al. [2024] (BoA) and Tseng et al. [2025] (YAQA), however, the concrete algorithmic implementation in these previous works is computationally suboptimal. Kim et al. [2024] run a straightforward implementation which requires O(mn ) sequential steps and O(m2n2) total work. Tseng et al. [2025] improve on that by improving on parallelization, requiring only O(m+n) sequential steps, but still requiring O(m2n2) total work. 
+
+Contributions. In this paper, we add an additional algorithmic ingredient, namely a recursive divide-and-conquer approach, to accelerate the algorithm and bring the total work down to just 
+
+O(mn (m + n)) , while still requiring only O(m + n) sequential steps. This matches the cubic complexity of GPTQ, which also needs cubic O(mn 2) total cost and linear O(n) sequential steps, while allowing the quantization algorithm to capture richer geometric information than GPTQ. We call the resulting algorithm Ba bai Quantization for Kron ecker-factored Hessians, or BaKron . See Table 1 for an overview of the complexity of these algorithms. We also implement the algorithm and demonstrate the practical speed-up with empirical bench-marks. Additionally, we consider a range of Kronecker-factored Hessians A ⊗ B that can be used for quantizing neural networks, in particular transformer-based architectures, with BaKron. These Hessians are partially inspired by previous work, and here we focus on two subquestions: Which loss to consider for W , and how to Kronecker-factor (or approximate) the resulting Hessian. For the loss we consider a rich global loss and a cheap local loss. For the Kronecker-factoring procedure, we also propose two approaches: A K-FAC-style procedure which is based on an independence assumption, and a Shampoo-style procedure which is based on a power iteration scheme to find the best Kronecker-factorization of a matrix. In total we consider four possible Hessians to be used with BaKron. We also provide an algorithmic technique for computing the rich global Hessians efficiently. This improves over the way YAQA computes the Hessians, significantly decreasing memory requirements. Lastly, we experimentally evaluate BaKron with the different Hessians. The rest of the paper is organized as follows. In Section 2 we discuss related work. In Section 3, we derive and explain the BaKron algorithm in detail. Then we also analyze its computational complexity and provide theoretical guarantees. In Section 4 we explore different Kronecker-factored approximations to the Hessian that might be used with BaKron. Section 5 explains how to compute backpropagated Hessians efficiently. Finally, Section 6 features benchmarks, and Appendix D contains end-to-end experiments. 
+
+# 2 Related Work 
+
+Neural network quantization is a very active area of research, with numerous algorithms proposed in recent years. Some methods focus on making the entries of W “well-behaved” and therefore easier to quantize, for example by applying a random or learned rotation to W [Chee et al., 2023, Ashkboos et al., 2024, Liu et al., 2024]. Other methods treat quantization as an (integer) optimization problem: After choosing a proxy for the distortion caused to the network when replacing W by V , one tries to find a quantized matrix V that minimizes this distortion. A common proxy is to consider a quadratic optimization problem in the variable vec( V ), which is characterized by its associated Hessian. This Hessian would ideally be chosen as HW = ∇2vec( W )L,where L is the loss function used to train the network. However, this matrix is impractical to store due to its m2n2 many entries, an issue that is often circumvented by utilizing approximations such as Kronecker factorizations. Many algorithms, most notably GPTQ [Frantar et al., 2022], use a 2“one-sided” approximation of the Hessian on the input side, HW ≈ E[xx T ] ⊗ I.
+
+BoA and YAQA. There are existing works, such as [Kim et al., 2024, Tseng et al., 2025, Lamaakal et al., 2025], which also use a two-sided approximation of the Hessian, HW ≈ A ⊗ B. The BoA algorithm by Kim et al. [2024] and the YAQA algorithm by Tseng et al. [2025] are closely related to our work, as those works also utilize GPTQ in the vectorized weight space to accommodate a Kronecker-factored Hessian approximation. Thus, their algorithms are functionally equivalent to the algorithm presented here, but crucially are less computationally efficient, hence slower than BaKron. Our method thus accelerates BoA and YAQA. In Section 3 we derive BaKron step by step and explain the relation to BoA and YAQA in more detail. 
+
+Concurrent work. Recently, Chen et al. [2026] have posted similar results on arXiv, considering the same problem and obtaining an algorithm with the same cubic complexity as BaKron. Our work is fully independent, and the cubic-time algorithm presented here predates that preprint. 1 We also note that they use a different algorithmic technique to get the complexity down to O(mn (m + n)) ,and that our paper additionally features benchmarks, Hessians, an efficient algorithm to compute the Hessians, and experiments. 
+
+# 3 The BaKron Algorithm 
+
+3.1 Notation and Conventions 
+
+For simplicity of exposition, we model the quantized matrix V ∈ Zm×n as an integer matrix. In practice, with only b + 1 bits available, the quantization alphabet may be {− 2b, ..., 2b − 1} instead of 
+
+Z, and one finds scaling factors s ∈ R for each row and/or column of W to map the alphabet to an appropriate range. This, however, does not change the algorithms. For all algorithms described in this paper, one may simply replace “ round ” by a “ quantize ” function that maps a scalar to the closest element of the quantization alphabet. When A is a matrix, we use Aj to denote the jth column of A, and we denote submatrices like Ai:i′,j :j′ . The upper endpoint of such a range is exclusive, so that consecutive ranges i : i′ and 
+
+i′ : i′′ do not overlap. An omitted endpoint denotes the first or the last index, so that for example 
+
+A:,j = Aj . We use A ⊗ B to denote the Kronecker product of matrices A and B, and we recall that it satisfies (A ⊗ B)( A′ ⊗ B′) = ( AA ′) ⊗ (BB ′), assuming the dimensions match. In particular, matrix factorizations like the Cholesky decomposition or the QR-decomposition factorize/distribute over the Kronecker product. If A is a positive definite matrix, then Cholesky( A) denotes the unique lower triangular matrix 
+
+L that satisfies LL T = A and has positive diagonal entries, and similarly RevCholesky( A) denotes the unique lower triangular matrix L that satisfies LT L = A with positive diagonal entries. For an m × n matrix W we define vec( W ) to be the column-major flattening of W into a vector of length m · n. This defines an isomorphism of vector spaces vec : Rm×n → Rmn which satisfies 
+
+∥vec( W )∥2 = ∥W ∥F . We also have the following well known relation. 
+
+Proposition 3.1. (A ⊗ B) · vec( W ) = vec( BW A T )
+
+When A is a square matrix, we define diag( A) to be the diagonal square matrix of the same size 
+
+(not a vector), which has the same diagonal as A and zeros everywhere else. When W is an m × n
+
+matrix, we define its kth anti-diagonal as the collection of all entries Wi,j with i + j = k. Thus, W 
+
+> 1A version of this work has been submitted for publication. The cubic-time algorithm presented here was documented, with a verifiable timestamp, in the written record of the review process before the above preprint appeared on arXiv.
+
+3has m + n − 1 anti-diagonals, with indices k = 2 , ..., m + n. We further define antidiag k(W ) to be the m × n matrix which keeps the kth anti-diagonal of W and has all other entries set to 0. Similarly we use antidiag k:k′ (W ) to denote a matrix that contains a range of anti-diagonals. 
+
+3.2 BaKron-naive: GPTQ in the Vectorized Weight Domain 
+
+We recall the GPTQ algorithm, which is described in Algorithm 1 for the case of quantizing a single neuron w, corresponding to a single row Wi, : of W . In practice, this is executed in parallel for all rows of W .
+
+Algorithm 1 GPTQ on a single neuron 
+
+Input: w ∈ Rn, H ∈ Rn×n
+
+L ← Cholesky( H−1)
+
+Normalize columns of L by the diagonal entries; i.e., replace Li ← Li/L i,i for all i = 1 , ..., n .
+
+for i = 1 to n do 
+
+v ← round( wi).
+
+∆ ← v − wi
+
+w ← w + ∆ · Li
+
+end for Output: w (which satisfies w ∈ Zn)The first insight, as already observed by Kim et al. [2024], is that for dealing with a Kronecker-factored approximation to the Hessian HW ≈ A ⊗ B, we can apply Algorithm 1 to w = vec( W )
+
+and H = A ⊗ B. Via Proposition 3.1 we can describe all the operations of Algorithm 1 in the unvectorized weight space, and we obtain Algorithm 2. 
+
+Algorithm 2 BaKron-naive (GPTQ in vectorized weight domain) 
+
+Input: W ∈ Rm×n, A ∈ Rn×n, B ∈ Rm×m
+
+L(A), L (B) ← Cholesky( A−1), Cholesky( B−1)
+
+Normalize columns of L(A), L (B) by the diagonal entries. 
+
+for i = 1 to m do for j = 1 to n do 
+
+v ← round( Wi,j ).
+
+∆ ← v − Wi,j 
+
+W ← W + L(B) 
+
+> i
+
+· ∆ · (L(A) 
+
+> j
+
+)T
+
+end for end for Output: W (which satisfies W ∈ Zm×n)We note that the idea of running GPTQ in the vectorized weight domain is not arbitrary, but can be motivated from different perspectives. Recent work [Birnick, 2025, Chen et al., 2025] has shown that finding a v ∈ Zn which approximates w in the sense of a quadratic loss with Hessian 
+
+H corresponds to solving a closest vector problem for the lattice with basis M , where M is any matrix satisfying M T M = H. They also showed that GPTQ is equivalent to Babai’s nearest plane algorithm, which is a classic algorithm to solve this task. Our goal is precisely to find vec( V ) ∈ Zmn which approximates vec( W ) in the sense of a quadratic loss with Hessian H = A ⊗ B. Thus it is natural to use Babai’s nearest plane algorithm, or GPTQ, for this task, and this is exactly what Algorithm 2 does. 4One can also motivate the algorithm in a similar way to how GPTQ, or rather its predecessor Op-timal Brain Surgeon [Hassibi et al., 1993], was motivated: First, V1,1 is simply chosen as round( W1,1).Then W is updated by minimizing the quadratic loss with respect to the Hessian H = A ⊗ B, under the constraint that W1,1 = V1,1. Then the algorithm proceeds in the same fashion with the other entries, always updating “future” entries to compensate for the error introduced by rounding the current entry. A big issue with Algorithm 2 is that it requires m · n sequential steps. Therefore it can only be employed for small matrices. For example, Kim et al. [2024] use the algorithm in this form, and they overcome the computational burden by only quantizing matrices from the attention block and taking a separate Hessian approximation for each attention head, so that they can process multiple attention heads in parallel while each attention head only yields small matrices. 
+
+3.3 BaKron-antidiagonal: Batch Processing of Anti-Diagonals for m + n Sequen-tial Steps 
+
+To bring the number of sequential steps down, one has to process some of these steps in parallel. This can be done by analyzing the dependency graph among the entries, as first shown by Tseng et al. [2025]. The main observation is that the update caused by an entry Wi,j only updates entries to the bottom-right of itself, i.e., it only updates entries Wi′,j ′ which satisfy i′ ≥ i and j′ ≥ j. Conversely, this means that Wi′,j ′ will only ever be changed by updates caused by entries to the top-left of itself. Thus one can round Wi,j and perform the corresponding update to W as soon as all entries above the anti-diagonal i + j have been processed. As shown in Theorem 3.2, this allows one to go from anti-diagonal to anti-diagonal, and process each one in parallel, via: 
+
+for k = 2 to m + n do for (i, j ) in anti-diagonal k in parallel do 
+
+v ← round( Wi,j ).
+
+∆ ← v − Wi,j 
+
+W ← W + L(B) 
+
+> i
+
+· ∆ · (L(A) 
+
+> j
+
+)T
+
+end for end for 
+
+Now the inner loop adds outer products of vectors to W . Since a sum of outer products can be described by a matrix multiplication, one can batch all updates in the inner loop together using a single matrix multiplication. This yields the BaKron-antidiagonal algorithm, described in Algorithm 3. 
+
+Algorithm 3 BaKron-antidiagonal (BaKron-naive with parallel processing of anti-diagonals) 
+
+Input: W ∈ Rm×n, A ∈ Rn×n, B ∈ Rm×m
+
+L(A), L (B) ← Cholesky( A−1), Cholesky( B−1)
+
+Normalize columns of L(A), L (B) by the diagonal entries. 
+
+for k = 2 to m + n do 
+
+D ← antidiag k(W ) ∈ Rm×n
+
+V ← round( D).
+
+∆ ← V − DW ← W + L(B) · ∆ · (L(A))T
+
+end for Output: W (which satisfies W ∈ Zm×n)5The iterative version of the YAQA algorithm described by Tseng et al. [2025, Appendix 6] is essentially equivalent to Algorithm 3, although they use a different base quantizer. While it requires only O(m + n) sequential steps, note that it still requires O(m2n2) total work, just like the naive Algorithm 2. This is because each step costs O(min( m, n )2(m + n)) due to the two matrix multiplications. 
+
+3.4 BaKron-recursive: Divide-and-Conquer Approach for O(mn (m + n)) Total Work 
+
+We would like to further reduce the total cost of the algorithm. Initially, and to illustrate the idea, in this section we present an algorithm that starts again with BaKron-naive, i.e. not using the parallel anti-diagonals idea, and brings down only the total cost of the algorithm, keeping the suboptimal 
+
+O(m · n) sequential steps. The main observation is that the outer product update W ← W + L(B) 
+
+> i
+
+· ∆ · (L(A) 
+
+> j
+
+)T costs 
+
+O(m · n), but most of the matrix entries that are updated will only be accessed much later (namely the values in the bottom right region of the matrix). One would like to hold these updates back, so that later one can perform a batched update of the form W ← W + L(B) · ∆ · (L(A))T with ∆ being a dense matrix .A similar idea was already used by Frantar et al. [2022] in the original GPTQ paper, however, they used a fixed block size for the lazy batch updates. We will use a block size that depends on the remaining problem size, making the algorithm recursive and divide-and-conquer style. We solve the first half of the problem, propagate the introduced errors to the second half, and then solve the second half of the problem. For GPTQ on a single neuron, this could be implemented via Algorithm 4. 
+
+Algorithm 4 GPTQ-recursive on a single neuron 
+
+Input: w ∈ Rn, H ∈ Rn×n
+
+L ← Cholesky( H−1)
+
+Normalize columns of L by the diagonal entries; i.e., replace Li ← Li/L i,i for all i = 1 , ..., n .
+
+if n = 1 then return round( w) {base case} 
+
+else 
+
+v1: n/ 2 ← GPTQ-recursive (w1: n/ 2, L 1: n/ 2,1: n/ 2) {process first half recursively} 
+
+wn/ 2: ← wn/ 2: + Ln/ 2: ,1: n/ 2 · (v1: n/ 2 − w1: n/ 2) {propagate errors to second half} 
+
+vn/ 2: ← GPTQ-recursive (wn/ 2: , L n/ 2: ,n/ 2: ) {process second half recursively} 
+
+return v
+
+end if 
+
+While for GPTQ this approach does not change the total cost, if we apply it to BaKron-naive in a two-dimensional way as shown in Algorithm 5, it does bring the total cost down to just O(mn (m+n)) ,which is essentially the same as the total cubic cost of GPTQ, see Table 1. 6Algorithm 5 BaKron-recursive (BaKron-naive with recursive divide-and-conquer approach) 
+
+Input: W ∈ Rm×n, A ∈ Rn×n, B ∈ Rm×m
+
+L(A), L (B) ← Cholesky( A−1), Cholesky( B−1)
+
+Normalize columns of L(A), L (B) by the diagonal entries. 
+
+if n = m = 1 then return round( W )
+
+else if m < n then 
+
+V:,1: n/ 2 ← BaKron-recursive (W:,1: n/ 2, L (A)1: n/ 2,1: n/ 2, L (B))
+
+W:,n/ 2: ← W:,n/ 2: + L(B) · (V:,1: n/ 2 − W:,1: n/ 2) · (L(A)
+
+> n/ 2: ,1: n/ 2
+
+)T
+
+V:,n/ 2: ← BaKron-recursive (W:,n/ 2: , L (A)
+
+> n/ 2: ,n/ 2:
+
+, L (B))
+
+return V
+
+else 
+
+V1: m/ 2,: ← BaKron-recursive (W1: m/ 2,:, L (A), L (B)1: m/ 2,1: m/ 2)
+
+Wm/ 2: ,: ← Wm/ 2: ,: + L(B) 
+
+> m/ 2: ,1: m/ 2
+
+· (V1: m/ 2,: − W1: m/ 2,:) · (L(A))T
+
+Vm/ 2: ,: ← BaKron-recursive (Wm/ 2: ,:, L (A), L (B)
+
+> m/ 2: ,m/ 2:
+
+)
+
+return V
+
+end if 
+
+3.5 BaKron: Combining the Two Algorithmic Approaches 
+
+Finally, we can combine the two techniques, yielding the final BaKron algorithm: We process anti-diagonals in parallel, and we do a recursive divide-and-conquer approach over the “anti-diagonal dimension”. The latter means that we recursively process the first half of anti-diagonals, then we propagate the error to the second half of anti-diagonals, and after that we recursively process the second half of anti-diagonals. See Algorithm 6. This unites the best of both worlds: Just O(m + n)
+
+sequential steps and just O(mn (m + n)) total work. 
+
+Algorithm 6 BaKron (combination of BaKron-antidiagonal and BaKron-recursive) 
+
+Input: W ∈ Rm×n, A ∈ Rn×n, B ∈ Rm×m, k, l {k : l is the range of anti-diagonals that shall be processed, initially for the main call k = 2 and l = m + n + 1 }
+
+L(A), L (B) ← Cholesky( A−1), Cholesky( B−1)
+
+Normalize columns of L(A), L (B) by the diagonal entries. 
+
+if l = k + 1 then return round(antidiag k(W )) 
+
+else 
+
+V ← BaKron (k, k+l 
+
+> 2
+
+)
+
+W ← W + antidiag k+l 
+
+> 2:l
+
+
+
+L(B) · (V − antidiag k: k+l
+
+> 2
+
+(W )) · (L(A))T
+
+
+
+V ← V + BaKron ( k+l 
+
+> 2
+
+, l )
+
+return V
+
+end if 
+
+The following theorem asserts that all the modifications we have done are valid, i.e., they do not change the output of the algorithm. It is proved in Appendix B. 
+
+Theorem 3.2. The algorithms BaKron-naive, BaKron-antidiagonal, BaKron-recursive, and BaKron are all equivalent, i.e., they produce the same outputs. 
+
+73.6 Computational Complexity 
+
+Table 1 summarizes the number of sequential steps and total cost of all the described algorithms. These results are proved in Appendix C. We can see that BaKron recovers essentially the same complexity as GPTQ both with respect to parallelizability (linear sequential depth) and total cost (cubic), while being able to handle an arbitrary Kronecker-factored Hessian, making the algorithm informed not just by the geometry of input features but also by the geometry of output features. Table 1: Comparison of the asymptotic computational costs of the algorithms, for quantizing a weight matrix W ∈ Rm×n. Both number of sequential steps and total cost are considered. All costs are up to constants and consider only the core part of the algorithm, without Cholesky decomposition. Algorithm Geometry (Hessian) Steps Total Cost GPTQ one-sided n mn 2
+
+BaKron-naive (essentially BoA) two-sided mn m2n2
+
+BaKron-antidiagonal (essentially YAQA) two-sided m + n m2n2
+
+BaKron-recursive two-sided mn mn (m + n)
+
+BaKron two-sided m + n mn (m + n)
+
+We note that these costs neither include the Cholesky decomposition, nor the accumulation of the Hessian from the calibration dataset, nor the matrix multiplications needed to send the calibration dataset through the neural network. The latter turns out to actually be the dominant cost. Indeed, suppose we quantize a linear module W ∈ Rm×n based on a calibration dataset containing 
+
+k sample inputs. 2 For GPTQ with Hessian H ≈ E[xx T ] ⊗ Im, it takes: • O(kn 2) operations to accumulate the Hessian • O(n3) operations to compute the inverse and the Cholesky decomposition of the Hessian • O(mn 2) operations for the core algorithm ( n sequential steps with O(mn ) operations each) • O(kmn ) operations for sending the calibration data through the linear module We note that, since usually k ≫ m and k ≫ n, the dominant cost for GPTQ is from accumulating the Hessian and sending the calibration data through the linear module. In comparison, for BaKron it takes: • O(k(n2 + m2)) = O(k max( m, n )2) operations to accumulate the Hessian A ⊗ B
+
+• O(n3 + m3) = O(max( m, n )3) operations to compute inverses and Cholesky decompositions • O(mn (m + n)) operations for the core algorithm (split over m + n sequential steps) • O(kmn ) operations for sending the calibration data through the linear module We can see that, once again, the first and the last term dominate. Thus, in this calibration regime, as with GPTQ, the core BaKron algorithm does not dominate the end-to-end quantization cost. Instead, the principal costs arise from accumulating the Hessian and propagating the calibration data through the module. Note that this would not be the case without our algorithmic improvement:           
+
+> 2Note that, for quantizing medium-sized Transformer-based large language models, one usually has k≈28·211
+> (256 sequences of length 2048 each), and 29≲m, n ≲214 .
+
+8The previously best implementation of the considered algorithm was YAQA (BaKron-antidiagonal), which has quartic total cost instead of cubic, thus becoming the dominant cost when the size of matrices increases. 
+
+3.7 Guarantees 
+
+We recall the error bound from GPTQ as proved recently in the works by Zhang et al. [2025], Birnick [2025], Chen et al. [2025]. 
+
+Theorem 3.3. Suppose Algorithm 1 outputs v ∈ Zn on inputs w ∈ Rn and H ∈ Rn×n. Let 
+
+L = RevCholesky( H). Then 
+
+∥L(v − w)∥22 ≤ 14
+
+> n
+
+X
+
+> i=1
+
+L2 
+
+> i,i
+
+≤ 14
+
+> n
+
+X
+
+> i=1
+
+Hi,i = 14 tr( H).
+
+From this we can deduce an error bound for BaKron. 
+
+Corollary 3.4. Suppose Algorithm 3 outputs V ∈ Zm×n on inputs W ∈ Rm×n and A ∈ Rn×n,
+
+B ∈ Rm×m. Let L(A) = RevCholesky( A) and L(B) = RevCholesky( B). Then 
+
+∥L(B)(V − W )( L(A))T ∥2 
+
+> F
+
+≤ 14
+
+> m
+
+X
+
+> i=1
+> n
+
+X
+
+> j=1
+
+(L(B) 
+
+> i,i
+
+)2(L(A) 
+
+> j,j
+
+)2 ≤ 14 tr( A) · tr( B).
+
+Proof. By Theorem 3.2, it suffices to prove this for the output of Algorithm 2. But the output of Algorithm 2 is just the output of Algorithm 1 when called with w := vec( W ) and H := A ⊗ B. Now Theorem 3.3 guarantees that 
+
+∥(L(A) ⊗ L(B)) · vec( V − W )∥22 ≤ 14
+
+> m·n
+
+X
+
+> i=1
+
+(L(A) ⊗ L(B))2 
+
+> i,i
+
+≤ 14
+
+> m·n
+
+X
+
+> i=1
+
+(A ⊗ B)i,i .
+
+We finish by applying Proposition 3.1. Note that the outer inequality ∥L(v − w)∥22 ≤ tr( H)/4, and the corresponding result for BaKron, actually hold for any L that satisfies LT L = H, not just for the lower-triangular reverse Cholesky decomposition. Indeed, that is because two such L, L ′ are related by L′ = OL with O having orthonormal columns, and ∥ · ∥ 2 is invariant under multiplying a vector by O on the left. In the case of GPTQ, which is equivalent to running BaKron with the Hessian H = XX T ⊗ Im,we obtain the error bound ∥(V − W )X∥2 
+
+> F
+
+≤ 14 · tr( XX T ) · m. More generally with BaKron, 
+
+∥B1/2(V − W )A1/2∥2 
+
+> F
+
+≤ 14 tr( A) · tr( B).
+
+If A and B encode the geometries that are relevant to the layer, then ∥B1/2(V − W )A1/2∥2 
+
+> F
+
+is a more natural proxy for the loss induced by quantization. Moreover, the bound depends on tr( A) tr( B)
+
+rather than on tr( A)m. Therefore, when B has low effective rank, or more generally when tr( B) is small compared with the identity baseline under a comparable normalization, BaKron can yield a sharper numerical bound than GPTQ. 94 Hessian Approximations 
+
+BaKron applies to any Kronecker-factored approximation HW = A ⊗ B of the Hessian of the loss with respect to W , provided A and B are positive definite. In practice they only need to be positive 
+
+semi -definite, and they will be regularized by adding a small multiple of the identity matrix. It remains to decide: 1. Which loss to consider for W .2. How to approximate the resulting Hessian by a Kronecker product. These two questions are briefly sketched in the next two subsections, and discussed in detail in Appendix A. For the loss we consider two possibilities: The first is the global loss function, involving labels, on which the neural network was trained. The second is a local loss function based on the current module, or on the current module together with the next few modules of the network. See Section 4.1. For the Kronecker factorization, we also consider two possibilities. The first is based on an independence assumption (“K-FAC-style”). The second is based on a power iteration scheme (“Shampoo-style”). See Section 4.2. In total, these choices give four possibilities for the Kronecker-factored Hessian approximations in BaKron. We compare their empirical performance in Appendix D. 
+
+4.1 Choosing the Loss: Local vs. Global 
+
+Quantizing W to a matrix V incurs some distortion to the neural network, and our goal is to choose 
+
+V so as to minimize this distortion. We model the distortion by a positive definite quadratic form in the quantity vec( W ) − vec( V ). That is, we assume the distortion is given by 
+
+(vec( W ) − vec( V )) T H(vec( W ) − vec( V )) = ∥vec( W ) − vec( V )∥2
+
+> H
+
+where H is a positive definite matrix. However, there are still multiple sensible choices for H.Denote the input to the linear unit W by a and the output by b, so that b = W a . If we write 
+
+Lx,y (W ) = − log pfW (y | x) for the negative log-likelihood of a sample (x, y ) and g = ∇bLx,y , then 
+
+∇vec( W )Lx,y = a ⊗ g. The Hessian of the cross entropy loss of the network with respect to its own predictive distribution is the Fisher information matrix: 
+
+HW = ExEy∼fW (x)
+
+(a ⊗ g)( a ⊗ g)T  = ExEy∼fW (x)
+
+aa T ⊗ gg T 
+
+This is the most natural Hessian to consider, however it comes at the cost of backpropagation. If done naively, this can incur high computational and memory requirements. See Section 5 for an improved method of computing this Hessian. However, even the improved method is not as efficient as using a local Hessian approximation that does not require any backward passes. This approach is used by the BoA algorithm [Kim et al., 2024]. They consider a local loss for the self-attention module of a Transformer and derive the Hessians: 
+
+HWQ = XX T ⊗ KK T where K = WK XHWK = XX T ⊗ QQ T where Q = WQX
+
+10 We derive similar local Hessians for the MLP module of a Transformer: 
+
+HWup = E[xx T ⊗ (gg T ⊙ W T
+
+> down
+
+Wdown )] where g = σ(Wgate x)
+
+HWgate = E[xx T ⊗ (f f T ⊙ W T
+
+> down
+
+Wdown )] where f = σ′(Wgate x) ⊙ Wup x
+
+See Section A.1 for details. 
+
+4.2 Choosing the Factorization: Independence vs. Power Iteration 
+
+Once we have a Hessian of the form 
+
+H = E[aa T ⊗ bb T ]
+
+we still have to find a Kronecker-factored approximation of it. We consider two ways of doing that. The first (“K-FAC style”) makes an independence assumption to pull the expectation out, yielding 
+
+H ≈ E[aa T ] ⊗ E[bb T ].
+
+The second (“Shampoo style”) finds the best Kronecker approximation to H using power iteration. For example, with identity initialization and a single iteration one obtains 
+
+H ≈ E[tr( bT b) · aa T ] ⊗ E[tr( aT a) · bb T ].
+
+The same technique has already been used by Tseng et al. [2025]. See Section A.2 for details. 
+
+# 5 Computing Backpropagated Hessians Efficiently 
+
+In this section, we explain an algorithmic technique to compute the “global” Hessian from Section 4.1 efficiently. It works for both the K-FAC style and the Shampoo style approximation. Denote the number of layers of the neural network by ℓ. First recall that for the classic GPTQ flow, we proceed layer by layer, and only load one layer at a time into memory. The computational cost is therefore O(ℓ) and the memory cost is O(1) . This flow also works for the local Hessian variants of BaKron. Now recall that for the global Hessian of a linear module we need both the input of the module and the gradient of the output of the module, for a whole calibration dataset. Naively, one could proceed layer by layer, and to compute the output gradients do a full backward pass each time. But this requires O(ℓ2) compute effort, making it impractical. Another naive method is to do a single backward pass and use it to accumulate the Hessians of all layers at the same time. This is the approach used by Tseng et al. [2025] for YAQA. But this requires O(ℓ) memory, with a big constant hidden in the asymptotic notation. Indeed, storing the Hessian approximation for an m by n matrix requires m2 + n2 memory, thus storing the Hessian approximations for all matrices in the model requires multiple times the model size in memory. This is why YAQA requires a whole GPU rack even to quantize relatively small models. We propose a recursive technique that finds a sweet spot for compute and memory requirements. Given a range of layers, initially the full list of layers, the recursive algorithm requires the input to the first layer and the gradient of the output of the last layer. Then a forward and backward pass is required to compute the activations as well as their gradient at exactly the middle of the layer list (“mid-layer activations”). Then one can split the layer list into the first half and second half. For each of those lists one has the input as well as the gradient of the output, so one can call the algorithm 11 recursively on the two layer lists. When the list consists of just a single layer, one has reached the base case, which consists of calling BaKron to quantize the layer. This divide-and-conquer approach requires O(ℓ log ℓ) compute and O(log ℓ) memory. See Table 2. We discuss in Section 5.1 what this means in practice, and why the memory improvement over YAQA is of a different nature than the asymptotics suggest. Table 2: Compute and memory requirements for quantizing ℓ layers with different quantization flows. Only the dependence on the number of layers ℓ is displayed. The constants suppressed by the asymptotic notation differ substantially between the rows, since the rows store different objects; see Section 5.1.                            
+
+> Method Compute Memory Stored quantity
+> Local Hessians: no backward passes
+> Layer-by-layer flow O(ℓ)O(1) activations, 1layer
+> Global Hessians: backward passes required
+> Naive I: backward pass per layer O(ℓ2)O(1) activations & gradients, 1layer Naive II: all Hessians at once (YAQA) O(ℓ)O(ℓ)Hessians, all ℓlayers
+> Ours: recursive halving O(ℓlog ℓ)O(log ℓ)activations & gradients, O(log ℓ)layers
+
+5.1 Memory Requirements in Practice 
+
+The O(log ℓ) versus O(ℓ) comparison in Table 2 looks more favorable than it is, and it is worth spelling out why. The two rows do not measure the same unit of memory: YAQA stores Hessians ,whereas our recursion stores activations and activation gradients , and a Hessian is by far the smaller object. To make this concrete, suppose the network consists of ℓ layers, each an n × n matrix, and that the calibration dataset consists of k sample inputs. YAQA holds, for every layer, the two Hessian factors A ∈ Rn×n and B ∈ Rn×n, hence 2ℓn 2 numbers. Our recursion holds, at every level of the recursion, the activations and the gradient activations at the boundaries of the current layer range, each of which is a k × n matrix. Along a single root-to-leaf path at most 2(log 2 ℓ + 1) of these matrices are alive simultaneously, hence 2kn (log 2 ℓ + 1) numbers. The point is that the Hessian factor A = XT X is a summary of the activation matrix X ∈ Rk×n from which it was accumulated, compressed by the factor k/n . Storing raw activations instead of Hessians therefore only pays off once ℓ/ log 2 ℓ exceeds k/n , which in the calibration regime of Section 3.6 is a factor on the order of 
+
+10 2.For actual transformer architectures the comparison is more favorable to us than this idealized computation suggests, because the recursion splits the network at block boundaries, where activations are only as wide as the residual stream, whereas the Hessian factors of the linear modules inside a block are much larger due to the MLP expansion factor. For Llama-3-8B, with residual width d = 4096 and 
+
+ℓ = 32 blocks, the Hessian factors of one block comprise 45 .9 d2 entries, while a boundary activation matrix comprises only kd = 128 d2 entries for k = 2 19 calibration tokens. In absolute terms, YAQA holds about 99 GB of Hessians in float32, whereas the at most 12 simultaneously live boundary matrices amount to about 52 GB in bfloat16. So in terms of raw memory our flow is comparable to YAQA, and better only by a small constant factor. The decisive difference lies elsewhere, namely in what kind of memory the two flows require. YAQA accumulates all ℓ Hessians during a single backward pass, so every microbatch of calibration data updates every one of the ℓ Hessians. All of them must therefore stay in fast accelerator-local memory for the entire pass. Offloading them to CPU memory would require either transferring 12 the whole Hessian state across the host interconnect once per microbatch, or performing the rank updates on the CPU, which for Llama-3-8B amounts to roughly 10 16 floating point operations and thus hours of CPU time. Neither is practical, which is why the Hessians must instead be distributed across many accelerators. Our recursion has no such requirement. Each boundary activation and gradient activation matrix is written once and then read exactly once by each of the two recursive calls, in a single sequential sweep over the calibration dataset, which is processed microbatch by microbatch. These matrices can therefore be kept in CPU memory and streamed to the accelerator, overlapped with computation. The only accelerator-resident state is the weights of the layer currently being traversed, one microbatch of activations, and, in the base case, the Hessian of the single layer being quantized. Moreover, the streaming is comfortably bandwidth-bound: for Llama-3-8B the entire run moves on the order of 1 TB across the host interconnect while performing on the order of 10 17 floating point operations of forward and backward work, which at 25 GB/s and 250 TFLOP/s is well under a minute of transfer against several minutes of computation, so the transfers can be hidden behind the computation. This, rather than the asymptotic memory bound, is the practical improvement: our flow reduces the accelerator-resident memory needed for the global Hessians from several times the model size to essentially the size of a single layer, at the price of a O(log ℓ) factor of additional compute. We finally note that the two flows are the extreme points of a family of flows: one may stop the recursion at a leaf consisting of s layers and accumulate the Hessians of all s layers there in a single pass, which trades a compute factor of log 2(ℓ/s ) against 2sn 2 additional resident memory. YAQA is the case s = ℓ, and s can be chosen to fill the memory of the available accelerator. 
+
+# 6 Benchmarks 
+
+In addition to the theoretical complexity results we empirically benchmark the algorithms on matrices of different sizes to demonstrate the practical speedup. See Table 3. Table 3: Runtime in seconds of the core quantization algorithm on a single weight matrix W ∈ Rm×n,excluding Hessian accumulation and Cholesky factorization. Measured on a single NVIDIA RTX PRO 6000 in float32, with CUDA Graphs and custom Triton kernels for all four algorithms. BaKron additionally uses custom memory layouts: weights, errors, and workspace are stored in anti-diagonal-major order, and the two inverse factors in diagonal-major order. The last column is the speedup of BaKron over BaKron-antidiagonal (equivalently YAQA), the previously best implementation of the algorithm.                                                                    
+
+> Matrix size GPTQ BaKron BaKron-antidiag. BaKron-naive Speedup
+> 1024 ×1024 0.005 0.025 0.092 56.052 3.7×
+> 2048 ×2048 0.012 0.074 0.599 225.179 8.1×
+> 4096 ×4096 0.025 0.288 7.648 >300 26 .6×
+> 8192 ×8192 0.059 1.839 110.379 >300 60 .0×
+> 8192 ×2048 0.013 0.335 6.445 >300 19 .3×
+> 2048 ×8192 0.046 0.322 6.037 >300 18 .7×
+> 14336 ×4096 0.030 1.600 72.886 >300 45 .6×
+> 4096 ×14336 0.088 1.717 73.437 >300 42 .8×
+
+The speedup of BaKron over BaKron-antidiagonal grows with the matrix size, as the quartic versus cubic total cost predicts, reaching 60 × on the largest square shape. BaKron-naive is impractical 13 beyond the smallest shapes: it costs about 50 microseconds per weight, so on Llama-3-8B its mn 
+
+sequential steps alone would take more than four days. 14 References 
+
+Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. GPTQ: Accurate post-training quantization for generative pre-trained transformers. arXiv preprint arXiv:2210.17323 , 2022. Junhan Kim, Ho-young Kim, Eulrang Cho, Chungman Lee, Joonyoung Kim, and Yongkweon Jeon. BoA: Attention-aware post-training quantization without backpropagation. arXiv preprint arXiv:2406.13474 , 2024. Albert Tseng, Zhaofeng Sun, and Christopher De Sa. Model-preserving adaptive rounding. arXiv preprint arXiv:2505.22988 , 2025. Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and Christopher M De Sa. QuIP: 2-bit quantization of large language models with guarantees. Advances in Neural Information Processing Systems ,36:4396–4429, 2023. Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. QuaRot: Outlier-free 4-bit inference in rotated LLMs. Advances in Neural Information Processing Systems , 37:100213–100240, 2024. Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghuraman Kr-ishnamoorthi, Vikas Chandra, Yuandong Tian, and Tijmen Blankevoort. SpinQuant: LLM quantization with learned rotations. arXiv preprint arXiv:2405.16406 , 2024. Ismail Lamaakal, Chaymae Yahyati, Yassine Maleh, Khalid El Makkaoui, and Ibrahim Ouahbi. BayesQ: Uncertainty-guided Bayesian quantization. arXiv preprint arXiv:2511.08821 , 2025. Jiale Chen, Torsten Hoefler, and Dan Alistarh. GPTQ-2D: Cubic-time two-sided adaptive rounding, 2026. URL https://arxiv.org/abs/2607.27042 .Johann Birnick. The lattice geometry of neural network quantization – a short equivalence proof of GPTQ and Babai’s algorithm. arXiv preprint arXiv:2508.01077 , 2025. Jiale Chen, Yalda Shabanzadeh, Elvir Crnčević, Torsten Hoefler, and Dan Alistarh. The geometry of LLM quantization: GPTQ as Babai’s nearest plane algorithm. arXiv preprint arXiv:2507.18553 ,2025. Babak Hassibi, David G Stork, and Gregory J Wolff. Optimal brain surgeon and general network pruning. In IEEE international conference on neural networks , pages 293–299. IEEE, 1993. Haoyu Zhang, Shihao Zhang, Ian Colbert, and Rayan Saab. Provable post-training quantization: Theoretical analysis of OPTQ and Qronos. arXiv preprint arXiv:2508.04853 , 2025. James Martens. New insights and perspectives on the natural gradient method. Journal of Machine Learning Research , 21(146):1–76, 2020. James Martens and Roger Grosse. Optimizing neural networks with Kronecker-factored approximate curvature. In International conference on machine learning , pages 2408–2417. PMLR, 2015. Depen Morwani, Itai Shapira, Nikhil Vyas, Eran Malach, Sham Kakade, and Lucas Janson. A new perspective on Shampoo’s preconditioner. arXiv preprint arXiv:2406.17748 , 2024. Charles F Van Loan and Nikos Pitsianis. Approximation with Kronecker products. In Linear algebra for large scale and real-time applications , pages 293–314. Springer, 1993. 15 Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, et al. The Llama 3 herd of models. arXiv preprint arXiv:2407.21783 , 2024. An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388 ,2025. Leo Gao, Stella Biderman, Sid Black, Laurence Golding, Travis Hoppe, Charles Foster, Jason Phang, Horace He, Anish Thite, Noa Nabeshima, Shawn Presser, and Connor Leahy. The Pile: An 800GB dataset of diverse text for language modeling. arXiv preprint arXiv:2101.00027 , 2020. Leo Gao, Jonathan Tow, Baber Abbasi, Stella Biderman, Sid Black, Anthony DiPofi, Charles Foster, Laurence Golding, Jeffrey Hsu, Alain Le Noac’h, Haonan Li, Kyle McDonell, Niklas Muennighoff, Chris Ociepa, Jason Phang, Laria Reynolds, Hailey Schoelkopf, Aviya Skowron, Lintang Sutawika, Eric Tang, Anish Thite, Ben Wang, Kevin Wang, and Andy Zou. The language model evaluation harness, 07 2024. URL https://zenodo.org/records/12608602 .16 A Hessian Approximations in Detail 
+
+In this section we describe the Hessian constructions from Section 4 in detail. 
+
+A.1 Choosing the Loss: Local vs. Global 
+
+Recall from Section 4.1 that we measure the distortion induced by quantization as 
+
+(vec( W ) − vec( V )) T H(vec( W ) − vec( V )) = ∥vec( W ) − vec( V )∥2
+
+> H
+
+where H is a positive definite matrix. The most desirable way to measure the distortion is to use the loss function L(W ) which was also used to train the network. Since the network is given to us in trained state, it is natural to assume the network parameters are at (or near) a local minimizer of L, so that ∇vec( W )L ≈ 0 and 
+
+∇2vec( W )L is positive (semi-)definite. Keeping only the quadratic term in the Taylor expansion of L
+
+around W then gives the minimization problem above with H = ∇2vec( W )L.Now suppose the output fW (x) of the neural network represents a probability distribution for the label y. Since the quantized model should approximate the original model, a natural choice is the cross entropy loss with respect to the model’s own predictive distribution. That is, the expectation below is taken over the calibration input data and over labels sampled from the predictive distribution of the original model: 
+
+L(V ) = ExEy∼fW (x)[− log pfV (y|x)] 
+
+In this case, it is well known [Martens, 2020] that the Hessian at V = W is equal to an expectation over gradient outer products, namely it is equal to the Fisher information matrix (FIM): 
+
+∇2vec( W )L = ExEy∼fW (x)[∇vec( W ) log pfW (y|x)∇vec( W ) log pfW (y|x)T ]
+
+Since W is a matrix, this expression has additional structure. Denote the input to the linear unit W by a and the output by b, so that b = W a . If we write Lx,y (W ) = − log pfW (y | x) and 
+
+g = ∇bLx,y , then ∇vec( W )Lx,y = a ⊗ g. Thus the Fisher information matrix associated with W is: 
+
+HW = ExEy∼fW (x)
+
+(a ⊗ g)( a ⊗ g)T  = ExEy∼fW (x)
+
+aa T ⊗ gg T 
+
+One could instead take the label y from the calibration dataset, rather than sampling it from the model’s predictive distribution. In this case, the corresponding matrix is known as the empirical 
+
+Fisher information matrix. For BaKron, this choice would make the quantization more strongly adapted (“overfitted”) to the calibration dataset, which may or may not be desired. This global Hessian is what we would want to use ideally to inform the quantization algorithm. However, it comes at a cost of backpropagation. While our technique from Section 5 makes this practically possible, it still requires some level of backpropagation, for example an initial backward pass of the calibration dataset. In a strongly memory-constrained setting, for example for really large models or a GPU with little memory, one cannot afford backpropagation at all. We therefore consider a second option: a local Hessian approximation, which does not require a full backward pass through the network. This approach is used by the BoA algorithm [Kim et al., 2024]. BoA considers the self-attention module in Transformer-based architectures, where the attention matrix is computed as XT W TQ WK X. If one uses a Frobenius loss for the attention matrix alone, then the resulting local Hessians are: 
+
+HWQ = XX T ⊗ KK T where K = WK XHWK = XX T ⊗ QQ T where Q = WQX
+
+17 The BoA algorithm forms these local Hessians separately for each attention head, which allows the attention heads to be processed in parallel. This parallelism is key to making their method practical. Indeed, BoA applies GPTQ-style updates in the vectorized weight domain, but does not use any of the algorithmic performance improvements that we discussed in this paper. BaKron therefore provides a direct acceleration of BoA. Further, the approach of Kim et al. [2024] does not consider the MLP module in the Transformer architecture. Matrices in this module do not naturally split into a collection of smaller matrices like the attention heads in the attention module. Thus, applying GPTQ-style updates in the vectorized weight domain would require m · n sequential steps in the MLP module, making the approach impractical for large weight matrices. BaKron makes this computation feasible, so we derive local Hessians for the MLP module. Concretely, we focus on the case of a Gated Linear Unit (GLU) followed by another linear unit, as employed by many modern Transformer-based architectures. For simplicity of exposition we ignore biases. Fix an activation function σ. Then the MLP is given by: 
+
+MLP( x) = Wdown (Wup x ⊙ σ(Wgate x)) 
+
+If we use Ds to denote a diagonal matrix with the vector s on the diagonal, this can be written as: 
+
+MLP( x) = Wdown Dσ(Wgate x)Wup x
+
+So if we use an ℓ2-loss for the output of the MLP module alone, the corresponding local Hessians are: 
+
+HWup = E[xx T ⊗ (gg T ⊙ W T
+
+> down
+
+Wdown )] where g = σ(Wgate x)
+
+HWgate = E[xx T ⊗ (f f T ⊙ W T
+
+> down
+
+Wdown )] where f = σ′(Wgate x) ⊙ Wup x
+
+Note that the Schur product theorem guarantees that the Hadamard product of two positive (semi-)definite matrices is itself positive (semi-)definite. 
+
+A.2 Choosing the Factorization: Independence vs. Power Iteration 
+
+In the previous section we considered both a global and a local approach for computing Hessians for the linear unit W ∈ Rm×n. In both cases the resulting Hessian has the form 
+
+H = E[aa T ⊗ bb T ]
+
+where a, b may be vectors or matrices, and the expectation is taken over the calibration data. In both the global and local settings, a is the input to the linear unit. In the global setting, b is the gradient of the output of the linear unit with respect to the global loss, and in the local MLP setting b = DgW T 
+
+> down
+
+or b = Df W T
+
+> down
+
+.However, this Hessian is an expectation over Kronecker factored matrices, and therefore is itself 
+
+not a Kronecker factored matrix, in general. We therefore seek a Kronecker product approximation of the form H ≈ A ⊗ B.One simple approach to obtain such an approximation is to assume that the Kronecker factors are independent, so that the Kronecker product can be pulled out of the expectation. This gives 
+
+H ≈ E[aa T ] ⊗ E[bb T ].
+
+We refer to this as a K-FAC-style approximation, since the same approximation is used in K-FAC-based optimization [Martens and Grosse, 2015]. We also propose another approach based on a power iteration scheme. We refer to this as a 
+
+Shampoo-style approximation following the interpretation of Shampoo given by Morwani et al. [2024]. 18 The same technique has already been employed by Tseng et al. [2025] for YAQA, deriving essentially the same Hessian as our “global Shampoo-style” Hessian. We explain the technique in detail below. Suppose we want to find the best Kronecker-factored approximation to the matrix H, in the sense of minimizing ∥H − A ⊗ B∥F . This problem was studied by Van Loan and Pitsianis [1993]. They define a rearrangement operator R which maps an mp × nq matrix to an mn × pq matrix. This operator R is linear, invertible, and satisfies: 
+
+∥R (M )∥F = ∥M ∥F ⟨R (M ), R(N )⟩ = ⟨M, N ⟩ R(M ⊗ N ) = vec( M ) vec( N )T
+
+Since R preserves the Frobenius norm, minimizing ∥H − A ⊗ B∥F is equivalent to minimizing 
+
+∥R (H) − vec( A) vec( B)T ∥F . Thus, the best Kronecker approximation of H is obtained from the best rank-1 approximation of R(H). In our setting, 
+
+R(H) = E[R(aa T ⊗ bb T )] = E[vec( aa T ) vec( bb T )T ]
+
+The best rank-1 approximation to a matrix is given by the outer product of the top left and top right singular vectors, scaled by the top singular value. Since the algorithms in this paper are invariant under multiplying the Hessian by a scalar, we only need the top left and top right singular vectors of 
+
+R(H) up to scaling. These singular vectors can be found using the power iteration. Given a matrix 
+
+M , and initial vectors u(0) and v(0) , the iterations (without normalization) take the form 
+
+u(i+1) = M v (i) v(i+1) = M T u(i)
+
+Substituting M = R(H) and identifying u = vec( A) and v = vec( B) gives 
+
+vec( A(i+1) ) = E[vec( aa T ) vec( bb T )T vec( B(i))] = E[vec( aa T ) tr( bb T B(i))] 
+
+Applying vec −1 and using the cyclic property of the trace yields 
+
+A(i+1) = E[tr( bT B(i)b) · aa T ] B(i+1) = E[tr( aT A(i)a) · bb T ].
+
+Compared to the K-FAC-style approximation above, this approach weighs the outer products aa T
+
+by tr( bT B(i)b). If we perform only a single iteration initialized with A(0) = In, B(0) = Im, we obtain 
+
+A ≈ E[tr( bT b) · aa T ] B ≈ E[tr( aT a) · bb T ].
+
+One can also do multiple power iterations, although each iteration requires a separate pass over the calibration data. Finally, if a and b are both vectors, as in our global Hessian case, the arguments of the trace operators above become scalars, and one can drop the “ tr ” from the expressions. For the local MLP Hessians, we have b = DgW T 
+
+> down
+
+or b = Df W T
+
+> down
+
+, and we find (in the former case): 
+
+tr( bT b) = tr( Wdown D2 
+
+> g
+
+W T
+
+> down
+
+) = tr( D2 
+
+> g
+
+W T
+
+> down
+
+Wdown ) = gT diag( W T
+
+> down
+
+Wdown )g
+
+# B Equivalence Proofs 
+
+Throughout this section we work in exact arithmetic and fix a rule for breaking rounding ties. Recall that after the normalization step, L(A) and L(B) are lower triangular with all diagonal entries equal to one. 
+
+Conventions for the recursive algorithms. By the convention of Section 3.1, the two children of a midpoint split in Algorithms 5 and 6 operate on disjoint ranges which together cover the range of the parent. The Cholesky factorizations and the column normalization are performed only in 19 the top-level call; a recursive call receives the corresponding submatrices of the already normalized factors. The recursive calls operate in place on views of a common workspace W . Such a call returns the quantized values V on its active set, while the workspace on that set retains the values that were present immediately before those entries were rounded. Finally, round(antidiag k(W )) means that rounding is applied only to the entries on the kth anti-diagonal, and that the returned matrix is zero elsewhere. 
+
+Proof of Theorem 3.2. Let S be a set of matrix indices, and let E be a matrix which is supported on S, with entries ei,j . Since a sum of outer products can be written as a single matrix product, we have 
+
+L(B)E(L(A))T = X
+
+> (i,j )∈S
+
+L(B) 
+
+> i
+
+ei,j (L(A) 
+
+> j
+
+)T ,
+
+ L(B)E(L(A))T  
+
+> p,q
+
+= X
+
+> (i,j )∈S
+
+L(B) 
+
+> p,i
+
+ei,j L(A) 
+
+> q,j
+
+.
+
+(1) In other words, one matrix multiplication performs exactly the elementary updates that BaKron-naive would perform for all entries of S, in a single batch. Since L(A) and L(B) are lower triangular, the coefficient L(B) 
+
+> p,i
+
+L(A) 
+
+> q,j
+
+vanishes unless i ≤ p and j ≤ q.Thus, writing (i, j ) ⪯ (p, q ) if i ≤ p and j ≤ q, the error committed at (i, j ) can only affect entries 
+
+(p, q ) with (i, j ) ⪯ (p, q ), as already observed in Section 3. Moreover, any such entry other than 
+
+(i, j ) itself satisfies i + j < p + q, and hence lies on a strictly later anti-diagonal. In particular, two distinct entries on the same anti-diagonal never affect one another. We now describe the intended output in a way that does not refer to any traversal order. Let 
+
+W (0) be the input matrix, let Ik = {(i, j ) : i + j = k} denote the kth anti-diagonal, and for an index set S let ΠS denote the operator which keeps the entries on S and sets all other entries to zero, so that ΠIk = antidiag k. Define matrices fWk, V k, E k for k = 2 , ..., m + n by 
+
+fWk = Π Ik
+
+
+
+W (0) + L(B) P  
+
+> l<k
+
+El
+
+(L(A))T
+
+
+
+, Vk = round( fWk), Ek = Vk − fWk. (2) The right hand side of the first equation only involves El with l < k , so this is a valid recursive definition, and it determines the matrix V := P 
+
+> k
+
+Vk uniquely. Here fWk collects the values at which the entries of the kth anti-diagonal are supposed to be rounded, and Ek collects the errors committed there. We show that all four algorithms output this V .BaKron-naive traverses the entries in row-major order, which respects the partial order ⪯: if 
+
+(i, j ) ⪯ (p, q ) and (i, j )̸ = ( p, q ), then (i, j ) is processed first. Hence, at the time the algorithm reaches 
+
+(p, q ), all errors which can affect this entry have already been committed, and all errors committed so far which cannot affect it enter (1) with coefficient zero. By induction along the traversal, the value at which (p, q ) is rounded is therefore the (p, q )-entry of fWp+q, so the algorithm computes (2) entry by entry. BaKron-antidiagonal performs the same computation one anti-diagonal at a time. By (1), its matrix multiplication in step k applies precisely the elementary updates caused by the entries on the kth anti-diagonal. Since the diagonal entries of L(A) and L(B) are equal to one, this update in particular replaces the active entries fWk by fWk + Ek = Vk, and no later update can change them again. So the algorithm outputs P 
+
+> k
+
+Vk = V .It remains to show that the two recursive algorithms only delay and batch these same updates. We prove by induction over the recursion tree that a call with active set S rounds its entries at the values prescribed by (2), provided that all updates caused by entries outside of S have been applied to the workspace before the call. Here the active set is a block of consecutive rows and columns for 20 BaKron-recursive, and a range of consecutive anti-diagonals for BaKron. In the base case a single entry, respectively a single anti-diagonal, is rounded, which is (2) by assumption on the workspace. For the inductive step, let S1 and S2 be the active sets of the two children of the call. No error committed in S2 can affect an entry of S1, because BaKron-recursive splits into consecutive ranges of rows or columns, and BaKron splits into earlier and later anti-diagonals. Therefore the first child can be completed before the second one is started. When the first child returns, the workspace on S1
+
+still holds the values at which its entries were rounded, since neither algorithm ever writes an update into an already processed set. Hence the matrix V − W formed at this point is exactly the matrix E
+
+of errors committed on S1. By (1), the multiplication between the two recursive calls thus applies 
+
+ΠS2 (L(B)E(L(A))T ), which is precisely the batch of all updates from S1 to S2. Updates within S1
+
+or within S2 are handled deeper in the recursion, so the hypothesis of the second child is satisfied. Hence both recursive algorithms output V as well. 
+
+# C Complexity Proofs 
+
+In this section, we prove the bounds on sequential steps and total cost reported in Table 1. 
+
+Complexity model. We analyze only the core quantization algorithm, and exclude the Cholesky factorizations and the column normalizations, which are performed once. The “Total Cost” column measures work , i.e., the number of scalar arithmetic operations. The “Steps” column counts the number of sequential invocations of parallel primitives, where we regard both an elementwise map and a matrix multiplication as a single such invocation. Thus “sequential steps” refers to coarse-grained synchronization rounds, rather than to span at the level of individual scalar operations. This reflects how the algorithms are executed in practice, where a matrix multiplication is a single call to a GPU kernel. As throughout the paper, all costs are up to constant factors, and all midpoint splits are disjoint and balanced, as in the convention of Appendix B. If one insists on measuring span in the standard bounded-fan-in work–span model, where a matrix product with inner dimension p has span O(log(1 + p)) because of the dot product reductions, then the picture does not change for the recursive algorithms. Indeed, if the recursion tree has 
+
+N leaves, then at height h above the leaves there are O(N/ 2h) nodes, each of span O(h), so that summing over the whole tree gives 
+
+X
+
+> h≥1
+
+O
+
+ N h 
+
+2h
+
+
+
+= O(N ).
+
+Hence BaKron-recursive and BaKron have scalar span O(mn ) and O(m + n) respectively, matching their entries in Table 1. Only BaKron-antidiagonal picks up a logarithmic factor, namely its scalar span is O(( m + n) log(1 + min( m, n ))) .
+
+GPTQ. At iteration j, the m rows are independent and can be processed in parallel. Quantizing the current column and applying its errors to the remaining columns costs O(m(n − j + 1)) , so the total work is nX
+
+> j=1
+
+O(m(n − j + 1)) = O(mn 2).
+
+The n columns are processed one after another, giving n steps. 
+
+BaKron-naive. By lower triangularity, the update caused by entry (i, j ) is supported on 
+
+{i, ..., m } × { j, ..., n }. This rank-one update therefore costs O(( m − i + 1)( n − j + 1)) , and summing 21 over all entries gives 
+
+> m
+
+X
+
+> i=1
+> n
+
+X
+
+> j=1
+
+(m − i + 1)( n − j + 1) = m(m + 1) n(n + 1) 4 = O(m2n2).
+
+The two nested loops round one entry at a time, hence the algorithm uses mn steps. 
+
+BaKron-antidiagonal. Set r = min( m, n ). In each step, ∆ is supported on a single anti-diagonal, so it has at most r nonzero entries, no two of which share a row or a column. If that anti-diagonal contains d entries, at positions (i1, j 1), ..., (id, j d) and with errors δ = ( δ1, ..., δ d), then the update can be evaluated as 
+
+L(B) 
+
+> i1
+
+· · · L(B)
+
+> id
+
+ Dδ
+
+L(A) 
+
+> j1
+
+· · · L(A)
+
+> jd
+
+T .
+
+After scaling the selected columns of L(B) by the δi, this is a product of an m × d matrix and a 
+
+d × n matrix, which costs O(mnd ). A full anti-diagonal has d = r, in which case the cost is 
+
+O(mnr ) = O r2(m + n),
+
+where the equality holds because mn = r max( m, n ) and m + n = O(max( m, n )) . A constant fraction of the m + n − 1 anti-diagonals have length proportional to r, so the total work is 
+
+O r2(m + n)2 = O(m2n2).
+
+Since the entries on one anti-diagonal do not depend on one another, each anti-diagonal is handled by one matrix product, giving m + n − 1 steps. 
+
+BaKron-recursive. Let T (m, n ) denote the total work of the algorithm. Suppose m < n , so that the columns are split as n = n1 + n2 with n1 = ⌊n/ 2⌋. The update between the two recursive calls multiplies an m × m matrix by an m × n1 matrix, and the result by an n1 × n2 matrix. Its cost is 
+
+O(m2n1 + mn 1n2) = O(mn 1n2),
+
+where the equality uses m < n ≤ 2n2. Now the function F (m, n ) = mn (m + n) satisfies 
+
+F (m, n ) − F (m, n 1) − F (m, n 2) = m n2 − n21 − n22
+
+ = 2 mn 1n2,
+
+so induction on mn , with a sufficiently large constant in the induction hypothesis, gives T (m, n ) = 
+
+O(F (m, n )) . When m ≥ n, the algorithm splits the rows as m = m1 + m2 instead, the update costs 
+
+O(nm 1m2), and the same argument applies with 
+
+F (m, n ) − F (m1, n ) − F (m2, n ) = 2 nm 1m2.
+
+Thus the total work is O(mn (m + n)) . The recursion tree has one leaf for each of the mn entries and mn − 1 internal nodes, and the two children of a node are executed one after another, so the algorithm uses O(mn ) steps. 
+
+BaKron. Set r = m + n − 1, the number of anti-diagonals. Consider a recursive call whose active set is a range I of q anti-diagonals, and let N (I) be the number of matrix entries on them. The update between its two recursive calls is evaluated as two restricted band products: first M = L(B)E
+
+on the band I, and then M (L(A))T on the band of the second child. Each requested entry of M is a sum of at most q terms, because E is supported on anti-diagonals in I. The same is true for the second product: an output entry (p, q ′) only receives contributions from the entries Mp,j with j ≤ q′,22 and Mp,j vanishes unless p + j ≥ min I, so again at most q indices j contribute. The work at this node is therefore 
+
+O(qN (I)) .
+
+We charge this work uniformly to the N (I) entries of the band, at O(q) each. A fixed matrix entry lies in one band per level of the recursion, and the widths of these bands along the path from the root to its leaf are at most r, ⌈r/ 2⌉, ⌈r/ 4⌉, ... , which sum to O(r). Each of the mn entries is therefore charged O(r) work in total, so all updates together cost 
+
+O(mnr ) = O(mn (m + n)) .
+
+Rounding at the leaves adds another O(mn ). Finally, the recursion tree has r leaves, one per anti-diagonal, and r − 1 internal nodes, and each node performs a constant number of ordered batched operations, so BaKron uses O(r) = O(m + n) steps. 
+
+# D Experiments 
+
+For experimental evaluation, we have quantized models up to 8 billion parameters in size from the Llama-3 and Qwen3 families [Grattafiori et al., 2024, Yang et al., 2025]. For calibration, we used 256 sequences of 2048 tokens each, from “The Pile” dataset [Gao et al., 2020]. We use a symmetric quantization alphabet of the form {− ℓ, ..., +ℓ}. All results reported here use ℓ = 3 , that is log 2 7 ≈ 2.81 bits per weight. Scaling factors are chosen per output feature (i.e. per row of W , no groups). Concretely, we first choose the maximal absolute value per row (divided by ℓ), and then optionally shrink it by up to a factor of 2 based on an MSE search. Each Gram matrix is regularized by adding 0.5 times its mean diagonal value to the diagonal, which is more regularization than other papers typically use. The features are processed in their natural order, that is, we apply no activation reordering. For the backpropagated Hessians we sample the labels from the model’s own predictive distribution, so the resulting Gram matrices are based on a Monte Carlo estimate of the model Fisher information matrix rather than on the empirical Fisher. For evaluation, we use LM-Eval [Gao et al., 2024]. We report perplexity on Wikitext2, as well as accuracy on two zero-shot tasks (PIQA, Winogrande). Please note that for Wikitext2 perplexity evaluation we also use LM-Eval, which uses a special normalization. Many other quantization works use a self-implemented perplexity evaluation, which tokenizes the Wikitext2 dataset differently and does not apply normalization, therefore leading to different perplexity results. We also note that we found that quantization results can be significantly influenced by the choice of scaling factors. However, although choosing the scaling factors in different ways can lead to different evaluations, the relative performance of the algorithms is usually preserved. We have used a single NVIDIA RTX PRO 6000 GPU to conduct the experiments. In the tables below, “Time” is the wall-clock time of the whole quantization pipeline, and “Core share” is the fraction of it spent inside the quantization algorithm itself, as opposed to accumulating the Hessians, sending the calibration data through the modules, and computing the Cholesky factorizations. We evaluate three BaKron variants, which differ in the Hessian they use per module; Table 4 gives the details. BaKron-MlpLocal quantizes only two out of seven modules differently from GPTQ, using the MLP-local Hessians we derive in Section A.1. It thereby isolates our contribution from that of BoA [Kim et al., 2024]. BaKron-FullyLocal additionally uses attention-local Hessians in the style of BoA for the query, key and value projections. Unlike BoA, which quantizes one attention head at a time, we assemble the per-head output-side Grams into a single block-diagonal matrix 23 spanning the whole projection, since BaKron places no block-diagonal restriction on the output factor. BaKron-Backprop uses the backpropagated global Hessian of Section 4.1 for every module, computed with the technique of Section 5. Each of the three variants is run with both the K-FAC-style and the Shampoo-style Kronecker factorization of Section 4.2. Table 4: Hessians used per module and algorithm. We denote g = σ(Wgate x), f = σ′(Wgate x)⊙Wup x,
+
+h = ∇yLx,y where y = W x , D = Wdown , and O = Wo_proj . For the attention-local Hessians, Q
+
+and K denote the query and key activations after normalization and rotary embedding, and the output factors are block-diagonal over the attention heads. For the case of BaKron, the final Kronecker-factored approximation is made either K-FAC-style or Shampoo-style, see Section 4.2. 
+
+Module GPTQ BaKron-MlpLocal BaKron-FullyLocal BaKron-Backprop 
+
+self_attn.q_proj E[xx T ] ⊗ Im E[xx T ] ⊗ Im E[xx T ] ⊗ KK T E[xx T ⊗ hh T ]
+
+self_attn.k_proj E[xx T ] ⊗ Im E[xx T ] ⊗ Im E[xx T ] ⊗ QQ T E[xx T ⊗ hh T ]
+
+self_attn.v_proj E[xx T ] ⊗ Im E[xx T ] ⊗ Im E[xx T ] ⊗ OT O E[xx T ⊗ hh T ]
+
+self_attn.o_proj E[xx T ] ⊗ Im E[xx T ] ⊗ Im E[xx T ] ⊗ Im E[xx T ⊗ hh T ]
+
+mlp.up_proj E[xx T ] ⊗ Im E[xx T ⊗ (gg T ⊙ DT D)] E[xx T ⊗ hh T ]
+
+mlp.gate_proj E[xx T ] ⊗ Im E[xx T ⊗ (f f T ⊙ DT D)] E[xx T ⊗ hh T ]
+
+mlp.down_proj E[xx T ] ⊗ Im E[xx T ] ⊗ Im E[xx T ] ⊗ Im E[xx T ⊗ hh T ]
+
+Table 5: Experimental results for the Llama-3.2-1B model, quantized at 2.81 bits per weight. 
+
+Algorithm Wikitext2 (PPL) ↓ PIQA ↑ Winogrande ↑ Time (s) Core share Base (unquantized) 11.98 0.745 ±0.010 0.619 ±0.014 — —RTN 595.82 0.537 ±0.012 0.523 ±0.014 < 1 1.8% GPTQ 25.63 0.652 ±0.011 0.541 ±0.014 64 2.8% BaKron-MlpLocal-KFAC 22.32 0.675 ±0.011 0.556 ±0.014 132 9.0% BaKron-MlpLocal-Shampoo 22.32 0.664 ±0.011 0.577 ±0.014 129 9.2% BaKron-FullyLocal-KFAC 21.54 0.683 ±0.011 0.564 ±0.014 135 9.9% BaKron-FullyLocal-Shampoo 26.59 0.677 ±0.011 0.558 ±0.014 136 9.9% BaKron-Backprop-KFAC 22.04 0.671 ±0.011 0.576 ±0.014 275 6.8% BaKron-Backprop-Shampoo 22.29 0.705 ±0.011 0.554 ±0.014 282 6.7% 
+
+Table 6: Experimental results for the Llama-3.2-3B model, quantized at 2.81 bits per weight. 
+
+Algorithm Wikitext2 (PPL) ↓ PIQA ↑ Winogrande ↑ Time (s) Core share Base (unquantized) 9.53 0.781 ±0.010 0.695 ±0.013 — —RTN 44.96 0.609 ±0.011 0.541 ±0.014 < 1 1.7% GPTQ 13.70 0.733 ±0.010 0.639 ±0.014 168 2.4% BaKron-MlpLocal-KFAC 13.60 0.738 ±0.010 0.667 ±0.013 307 9.8% BaKron-MlpLocal-Shampoo 13.55 0.749 ±0.010 0.668 ±0.013 313 9.8% BaKron-FullyLocal-KFAC 13.41 0.748 ±0.010 0.682 ±0.013 324 11.2% BaKron-FullyLocal-Shampoo 13.28 0.743 ±0.010 0.671 ±0.013 334 11.0% BaKron-Backprop-KFAC 14.55 0.745 ±0.010 0.657 ±0.013 660 7.8% BaKron-Backprop-Shampoo 15.47 0.749 ±0.010 0.656 ±0.013 677 7.7% 
+
+24 Table 7: Experimental results for the Meta-Llama-3-8B model, quantized at 2.81 bits per weight. 
+
+Algorithm Wikitext2 (PPL) ↓ PIQA ↑ Winogrande ↑ Time (s) Core share Base (unquantized) 7.44 0.807 ±0.009 0.736 ±0.012 — —RTN 132.26 0.591 ±0.011 0.548 ±0.014 2 1.9% GPTQ 53.47 0.726 ±0.010 0.676 ±0.013 530 1.4% BaKron-MlpLocal-KFAC 19.20 0.755 ±0.010 0.697 ±0.013 993 11.0% BaKron-MlpLocal-Shampoo 42.03 0.728 ±0.010 0.705 ±0.013 900 12.1% BaKron-FullyLocal-KFAC 17.19 0.733 ±0.010 0.648 ±0.013 1011 11.9% BaKron-FullyLocal-Shampoo 45.31 0.684 ±0.011 0.669 ±0.013 1014 12.0% BaKron-Backprop-KFAC 11.90 0.764 ±0.010 0.695 ±0.013 1939 9.2% BaKron-Backprop-Shampoo 12.24 0.771 ±0.010 0.692 ±0.013 1735 10.4% 
+
+Table 8: Experimental results for the Qwen3-1.7B-Base model, quantized at 2.81 bits per weight. 
+
+Algorithm Wikitext2 (PPL) ↓ PIQA ↑ Winogrande ↑ Time (s) Core share Base (unquantized) 12.42 0.757 ±0.010 0.640 ±0.013 — —RTN 19493.13 0.573 ±0.012 0.484 ±0.014 < 1 1.9% GPTQ 35.97 0.638 ±0.011 0.521 ±0.014 100 2.8% BaKron-MlpLocal-KFAC 36.75 0.650 ±0.011 0.543 ±0.014 176 8.2% BaKron-MlpLocal-Shampoo 37.59 0.639 ±0.011 0.533 ±0.014 177 7.8% BaKron-FullyLocal-KFAC 39.16 0.630 ±0.011 0.519 ±0.014 185 9.7% BaKron-FullyLocal-Shampoo 38.09 0.630 ±0.011 0.514 ±0.014 190 9.4% BaKron-Backprop-KFAC 60.97 0.608 ±0.011 0.513 ±0.014 424 5.6% BaKron-Backprop-Shampoo 20.26 0.702 ±0.011 0.594 ±0.014 432 5.7% 
+
+Table 9: Experimental results for the Qwen3-4B-Base model, quantized at 2.81 bits per weight. 
+
+Algorithm Wikitext2 (PPL) ↓ PIQA ↑ Winogrande ↑ Time (s) Core share Base (unquantized) 10.37 0.779 ±0.010 0.706 ±0.013 — —RTN 185.18 0.601 ±0.011 0.534 ±0.014 1 1.7% GPTQ 14.72 0.741 ±0.010 0.624 ±0.014 231 2.2% BaKron-MlpLocal-KFAC 14.42 0.740 ±0.010 0.633 ±0.014 443 9.3% BaKron-MlpLocal-Shampoo 14.52 0.739 ±0.010 0.646 ±0.013 451 9.1% BaKron-FullyLocal-KFAC 15.05 0.733 ±0.010 0.618 ±0.014 470 10.3% BaKron-FullyLocal-Shampoo 15.17 0.738 ±0.010 0.635 ±0.014 480 10.3% BaKron-Backprop-KFAC 15.49 0.739 ±0.010 0.631 ±0.014 941 7.5% BaKron-Backprop-Shampoo 13.29 0.755 ±0.010 0.667 ±0.013 957 7.3% 
+
+25 Table 10: Experimental results for the Qwen3-8B-Base model, quantized at 2.81 bits per weight. 
+
+Algorithm Wikitext2 (PPL) ↓ PIQA ↑ Winogrande ↑ Time (s) Core share Base (unquantized) 11.12 0.795 ±0.009 0.721 ±0.013 — —RTN 509.29 0.593 ±0.011 0.526 ±0.014 2 1.8% GPTQ 14.58 0.758 ±0.010 0.663 ±0.013 550 1.4% BaKron-MlpLocal-KFAC 21.62 0.760 ±0.010 0.674 ±0.013 946 10.0% BaKron-MlpLocal-Shampoo 13.91 0.754 ±0.010 0.669 ±0.013 952 10.1% BaKron-FullyLocal-KFAC 14.48 0.751 ±0.010 0.666 ±0.013 894 12.2% BaKron-FullyLocal-Shampoo 15.22 0.749 ±0.010 0.680 ±0.013 913 12.1% BaKron-Backprop-KFAC 17.10 0.761 ±0.010 0.660 ±0.013 1817 8.9% BaKron-Backprop-Shampoo 11.94 0.781 ±0.010 0.711 ±0.013 2031 8.0% 
+
+The “Core share” column shows that the core quantization algorithm accounts for at most 
+
+12 .2% of the total pipeline time. This confirms the analysis of Section 3.6: even with a two-sided Kronecker-factored Hessian, the pipeline remains dominated by accumulating the Hessians and by sending the calibration data through the model. It is only the algorithmic improvements of this paper that make this so. Running BaKron-antidiagonal (equivalently YAQA, see Table 1) on Llama-3.2-1B, the core takes 18 times as long as with BaKron and thereby accounts for more than 50% of the whole pipeline. The gap grows with the model size, since the total work of BaKron-antidiagonal grows quartically rather than cubically, see Section 6. BaKron-naive would have been infeasible altogether. Regarding quantization quality, BaKron-Backprop-Shampoo usually attains a lower Wikitext2 perplexity than GPTQ, although not on every model. The local variants stay closer to GPTQ. 26

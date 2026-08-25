@@ -1,0 +1,3778 @@
+Spend Bits Where Queries Look: KV Cache
+Vector Quantization with
+Attention-Preserving Transforms
+Samuel Fernández-Menduiña∗, Amir Ziashahabi∗, Eduardo Pavez, Antonio Ortega, Salman
+Avestimehr
+Department of Electrical and Computer Engineering, University of Southern California
+∗Equal contribution
+Long-context LLM decoding reads the key-value (KV) cache at every step. Loading it takes longer
+than computing attention over it, so throughput is bandwidth-bound. Hence, reducing the cache
+size can raise both decoding speed and serving capacity. The challenge is to reduce cache size while
+preserving the attention products, keeping reconstruction cheap, and using a fixed per-token bit count.
+At two bits per element, the most competitive methods rely on orthogonal transforms. However,
+existing techniques are either data-oblivious or use the query statistics without deriving the transform
+from a distortion criterion. Moreover, they rely on transforms built on top of random or Hadamard
+rotations, which equalize variances across entries rather than compacting energy, and fixed-width scalar
+quantizers, which are suboptimal at low rates. In this paper, we formulate KV cache quantization
+as a transform coding problem in which distortion is the error in the attention products. We derive
+closed-form optimal transforms for keys and values from calibration statistics, under a high-resolution
+model. We show that the optimal key transform is not orthogonal and satisfies a generalized Parseval
+relation: the attention-aware distortion becomes mean-squared error (MSE) in the transform domain.
+Thus, we can use MSE-optimal vector quantizers applied directly to the transformed key coefficients.
+To meet the fixed-width layout requirement, we show that grouping coefficients into equal-volume
+partitions makes equal-size codebooks attain the variable-rate optimum under the same high-resolution
+model. At two bits per element, our method, termed NOVA-KV, recovers most of the long-context
+retrieval accuracy lost by scalar quantization methods at comparable throughput. The margin is widest
+on hybrid-attention mixture-of-experts models, an increasingly common design: on GPT-OSS-20B,
+prior two-bit transforms collapse at every context length, while NOVA-KV remains effective.
+Website: https://amir-zsh.github.io/nova-kv
+Code: https://github.com/Amir-zsh/nova-kv
+Correspondence: {samuelf9, ziashaha}@usc.edu
+1
+Introduction
+The key-value (KV) cache of a large language model (LLM) stores, for each past token and attention head, a
+key vector and a value vector, to avoid recomputation during decoding (Pope et al., 2023). The size of the
+cache is a central bottleneck in inference (Shazeer, 2019): it grows with context length and batch size, yet every
+decoding step reads it from memory in full (Sadhukhan et al., 2025) (Fig. 1). Since kernels compute attention
+products faster than the KV cache can be loaded from memory (Dao et al., 2022), decoding throughput is
+bound by memory bandwidth rather than by compute (Kwon et al., 2023). Thus, KV cache compression can
+reduce both per-step memory traffic and footprint, raising decoding speed and serving capacity.
+Three requirements constrain the design of KV cache compressors. First, task accuracy must be preserved.
+Since capturing the effect of quantization on task accuracy is not straightforward, we can model the problem
+using classical rate-distortion (RD) theory (Berger, 1971), with the mean squared error (MSE) of the quantized
+values as the distortion metric. However, the cache contents are used to compute attention products, so we
+should minimize errors in the products rather than MSE in the factors (Zandieh et al., 2025; Zhou et al.,
+1
+arXiv:2608.04074v1  [cs.LG]  4 Aug 2026
+
+
+Figure 1 Measured per-step decode time for Qwen3-8B (8×H100, BF16, S=16384). At large batch sizes, KV cache
+loading dominates over parameter loading and compute.
+2026). Second, complexity on the read path (Williams et al., 2009) has to be kept low, because the cache is
+read at every decoding step, so any per-element cost is incurred across the whole cache at every step. Third, a
+fixed-width layout must be used, so that tokens occupy a fixed number of bits and can be efficiently retrieved
+by serving engines (Kwon et al., 2023).
+calibration data
+statistics
+Mq, eSk, ¯k, Ms
+transforms RK, RV
+(Thm. 1, Cor. 1)
+codebooks C,
+grouping π (Thm. 2)
+(a) Offline calibration
+kt
+vt
+transform
+(kt −¯k) RK
+transform
+vtRV
+VQ encode
+Q+
+K
+encode
+Q+
+V
+paged cache (fixed-width)
+lookup
+Q−
+K
+lookup
+Q−
+V
+inverse transform
+(qtR−⊤
+K ) bK⊤
+inverse transform
+bVR⊤
+V
+attend
+(softmax)
+ot
+rotation + stretch
+rotation
+inverse
+inverse
+cells in Rg
+pick centroid
+write: once per token
+read: every decoding step
+(b) Online inference
+5
+0
+5
+4
+0
+4
+Distribution of queries and keys
+Keys
+Queries
+1
+0
+1
+1
+0
+1
+Quantization error
+Error, KLT
+Error, ours
+(c) Non-orthogonality
+Figure 2 NOVA-KV. (a) Calibration yields the transforms, the volume-equalized grouping π, and the codebooks.
+(b) Online, each new key and value is transformed and encoded once on the write path; the read path, paid at every
+decoding step, is a table lookup. The dashed line separates the two paths. (c) Top: keys, queries, and query covariance
+(dashed). Bottom: quantization error at equal rate; our transform steers the error away from the high-energy query
+directions, preserving the attention logits.
+Fixed-width quantization meets the last two requirements: decoding is a scaling or table lookup (Gray and
+Neuhoff, 2002), and each token occupies a fixed number of bits. As the context grows, the KV cache dominates
+the memory footprint, so the reduction in inference time approaches the KV compression ratio itself. However,
+to preserve task accuracy, direct quantization of KV entries requires at least 4 bits per element (Liu et al.,
+2024b; Sheng et al., 2023); at 2 bits, accuracy degrades (Zhou et al., 2026). Transform coding (Goyal, 2001)
+has been proposed as an alternative to address this problem (Zandieh et al., 2025; Zhou et al., 2026).
+In classical transform coding, a data-dependent linear operator (the transform) decorrelates the inputs;
+scalar quantization is applied to the outputs, followed by entropy coding. Because these transforms achieve
+2
+
+
+energy compaction, bits can be allocated proportionally to the coefficient variances, achieving lower overall
+distortion for a given average rate compared to directly encoding without a transform (Goyal, 2001). Existing
+transform-based KV cache methods depart from this classical scheme. In some cases, they use transforms, such
+as random or Hadamard rotations (Ashkboos et al., 2024; Zandieh et al., 2025), that are not optimized for the
+data. While data-driven transforms have been proposed, these are assembled heuristically from second-order
+statistics rather than as solutions to a specific rate-distortion optimization problem (Zhou et al., 2026). Finally,
+existing designs use fixed-rate scalar quantization, with transforms that flatten the variances so that the same
+rate can be applied for every vector entry; flattening removes the variance spread (energy compaction) that bit
+allocation exploits, so the fixed-width layout can be achieved but at the expense of reduced coding efficiency.
+Scalar quantization with variable-length entropy coding is effective (even at low rates) (Goyal, 2001), but
+requires sequential decoding, breaking the fixed-width layout and the parallel read path requirements.
+In this paper, we formulate KV cache compression as a transform coding problem (Goyal, 2001) where
+distortion is set to be the attention product error. This error separates into two terms, one for the keys and
+one for the values, recovering the two criteria that prior work adopts separately (Zandieh et al., 2025; Zhou
+et al., 2026). We derive, in closed form, the optimal transform for each distortion term in the high-resolution
+regime. For values, the optimal transform is orthogonal and is obtained from the same covariance that prior
+work introduced as a heuristic (Zhou et al., 2026). For keys, our focus in this work, we show that the optimal
+transform is not orthogonal. All prior designs used orthogonal transforms, which we show are suboptimal in
+practice when the goal is to minimize the key-query inner product.
+The transform we derive for the keys satisfies a generalized Parseval relation: the MSE in the transform
+domain equals the key-query inner-product distortion in the original domain. This relation reduces the
+design of the quantizer to a standard MSE problem, so any MSE-optimal quantizer can act on the transform
+coefficients. Based on this reduction, we propose vector quantization of the key coefficients with an optimized
+grouping of entries into vectors. Transform coding would normally allocate more bits to high-variance entries,
+resulting in codebooks of different sizes, which breaks the fixed-width layout that serving engines require.
+Instead, our grouping approximately equalizes group volumes, allowing equal-size codebooks to approach
+the variable-rate distortion bound (cf. Thm. 2). This combines the advantage of flattening (fixed bits per
+quantized input), while benefiting from energy compaction (fewer bits per input to achieve same distortion).
+We integrate our method, termed NOVA-KV (Non-Orthogonal Vector-quantized Attention for KV cache), into
+a production serving stack (Zheng et al., 2024) with a fused decoding kernel (Tillet et al., 2019) (Fig. 2). At 2
+bits per element, NOVA-KV recovers most of the accuracy lost by scalar methods in long-context retrieval. In
+terms of speed, decoding is on par with the scalar baseline (Zhou et al., 2026) at long contexts.
+Our contributions are: 1) data-driven transforms that minimize a high-resolution bound on the attention
+product distortion (Sec. 3), 2) an analysis of vector quantization for the keys in the KV cache, including the
+optimal fixed-rate grouping of transform coefficients under an independent-Gaussian high-resolution model
+(Sec. 4), and 3) a serving-compatible implementation with a fused decoding kernel, which we test against
+state-of-the-art 2-bit methods (Sec. 5).
+2
+Preliminaries
+Notation. Uppercase and lowercase bold letters, such as A and a, denote matrices and vectors, respectively.
+The nth entry of a is an, and the (i, j)th entry of A is Aij. Regular letters denote scalar values. We use
+row-vector notation and assume the eigenvalues are sorted in decreasing order. We use (·)+ to denote the
+pseudoinverse.
+2.1
+Attention and the KV Cache
+Consider a single attention head (Vaswani et al., 2017) acting on a sequence of hidden states {xt}T
+t=1, xt ∈R1×d,
+with projection weights WQ, WK, WV ∈Rd×d, where d denotes the head dimension. The query, key, and
+value vectors are ˜qt = xtWQ, ˜kt = xtWK, vt = xtWV . We use rotary position embeddings (RoPE) (Su et al.,
+2024): queries and keys are rotated by a position-dependent block-diagonal matrix Φt ∈Rd×d before the inner
+product, qt = ˜qtΦt and kt = ˜ktΦt, while values carry no positional encoding. Symbols without a tilde denote
+3
+
+
+post-RoPE vectors. These are stacked into Q = [q1; . . . ; qT ], K = [k1; . . . ; kT ], V = [v1; . . . ; vT ] ∈RT ×d.
+The scores and outputs are:
+S = softmaxrow
+
+QK⊤/
+√
+d
+
+∈RT ×T ,
+O = SV.
+(1)
+During autoregressive decoding, generating token t + 1 requires the query qt+1 to attend over all previous
+positions. To avoid recomputing past projections, the KV cache stores in memory K1:t = [k1; . . . ; kt] and
+V1:t = [v1; . . . ; vt].
+2.2
+Transform coding
+Classical transform coding (Goyal, 2001) consists of three stages: a transform that produces uncorrelated
+coefficients, scalar quantization of each coefficient, and entropy coding of the indices. Entropy decoding is
+sequential and cannot be easily parallelized, so it is not well-suited for our problem, where the cache is read
+at every decoding step, and parallel decoding is needed to maintain high throughput.
+Transform. By Parseval’s relation, an orthogonal R preserves the MSE, ∥x −bx∥2 = ∥xR −Q(xR)∥2, so
+the quantizer can be designed in the transform domain; for Gaussian sources in the high-resolution regime
+the Karhunen-Loève transform (KLT, the eigenbasis of the covariance), is optimal (Goyal, 2001; Gersho and
+Gray, 1992). A transform achieves energy compaction when only a few coefficients in the transform have high
+variance. The KLT is optimal in the sense that its leading p coefficients capture the most variance. Thus, we
+can find the KLT, R⋆, by optimizing the rank-p reconstruction error: given centered xj, j = 1, . . . , M, let
+R⋆
+p = arg min
+R ∈Rd×p
+M
+X
+j=1
+ xj −xj RR+2
+2.
+(2)
+The KLT can be computed via eigendecomposition of the covariance matrix, and R⋆
+p is the KLT truncated to
+the p eigenvectors corresponding to the dominant eigenvalues of the data covariance. We will show in Sec. 3.1
+that this is not optimal in our setting.
+Quantization. A vector quantizer operates on vectors of dimension g and with an average rate b bits per
+entry, spending gb bits per vector. An encoder Q+ : R1×g →{1, . . . , 2gb} assigns each subvector the index
+of its nearest codeword, and a decoder Q−returns that codeword from a codebook C ⊂R1×g of 2gb entries;
+their composition is Q (Lloyd, 1982; Gersho and Gray, 1992). Scalar quantization (SQ), g = 1, acts on each
+coordinate independently. For a given rate, vector quantization (VQ), g > 1, achieves distortion no larger
+than SQ, since the products of scalar codebooks are valid vector codebooks (Lookabaugh and Gray, 1989).
+Classical transform coding pairs SQ with variable-length entropy coding; however, as discussed earlier, entropy
+coding prevents parallel decoding, reducing the efficiency of the read path and impacting throughput.
+As a summary, given an invertible R ∈Rd×d and a vector x, transform coding encodes it as Q+(xR) and
+reconstructs it as bx = Q(xR) R−1.
+2.3
+Related work
+KV cache reduction can be achieved by combining several complementary approaches: (i) token eviction,
+where cached tokens are dropped based on their estimated importance to future attention (Zhang et al., 2023;
+Li et al., 2024; Xiao et al., 2024; Devoto et al., 2025); (ii) low-rank designs, which shrink the head dimension
+(Liu et al., 2024a); and (iii) quantization (our approach).
+Scalar KV quantization methods quantize entries independently and do not consider the attention products.
+Some designs perform per-channel quantization of keys and per-token quantization of values without accounting
+for input data statistics (Liu et al., 2024b). Others fit the quantizers to the data, typically learning per-channel
+codebooks from the cache statistics (Hooper et al., 2024; Cai et al., 2025), or boosting sensitive channels at
+the cost of per-channel metadata and non-uniform layouts (Xia et al., 2025).
+Transform coding. QuaRot (Ashkboos et al., 2024) uses random or Hadamard rotations, and TurboQuant
+(Zandieh et al., 2025) debiases inner products. SpinQuant (Liu et al., 2025) and RotateKV (Su et al., 2025)
+4
+
+
+Table 1 KV cache compressors. Transform: linear map applied before quantization. Criterion: the objective the
+transform is derived from. Target: the resource reduced; bandwidth-oriented methods (bw) keep the read path to a
+scaling or a lookup, whereas storage-oriented methods (sto) pay a penalty in the read path. Had. stands for Hadamard,
+orth. stands for orthogonal.
+Method
+Transform
+Criterion
+Quant. Target
+KIVI
+None
+Heuristic
+SQ
+sto
+KVQuant
+None
+Heuristic
+SQ
+sto
+Kitty
+None
+Heuristic
+SQ
+sto
+CommVQ
+None
+key MSE
+VQ
+sto
+QuaRot
+rand. Had. orth.
+Heuristic
+SQ
+bw
+TurboQuant
+rand. orth.
+inner-prod
+SQ
+bw
+RotateKV
+Had.+calib. orth.
+Heuristic
+SQ
+bw
+OSCAR
+calib.+Had. orth.
+Heuristic
+SQ
+bw
+NOVA-KV
+calib. non-orth.
+attn. products
+VQ
+bw
+learn the rotation on calibration data. Zhou et al. (2026) reweight the key error by query statistics. All are
+orthogonal and paired with SQ. We derive the transform from the RD problem using the attention-product
+distortion and show that the optimal key transform is non-orthogonal.
+Vector quantization. Unlike model weights (Chee et al., 2023), KV caches are generated online and read at
+every decoding step, which changes the VQ requirements. Zhang et al. (2024) explores joint codebooks across
+channels. CommVQ (Li et al., 2025) targets memory storage using VQ on the keys with large codebooks
+whose reconstruction requires a matrix product paid over the whole cache at every step. We target bandwidth-
+bound serving by applying VQ to small groups of transform-domain entries and restricting reconstruction to
+fixed-width codebook lookups that can be fused into the attention kernel. Thus, our design jointly provides
+an attention-derived transform, fixed-width VQ, and a lookup-based reconstruction. In summary, NOVA-KV
+is the only method that targets attention products and optimizes both the transform and quantization for
+this purpose (see Table 1).
+3
+Attention-preserving transforms
+We aim to design transforms (RK, RV ) and quantizers (QK(·), QV (·)) to compress keys and values
+bK = QK(KRK) R−1
+K ,
+bV = QV (VRV ) R−1
+V ,
+(3)
+while minimizing the attention output error ∥SV −bS bV∥2
+F , where bS is obtained by replacing K by bK in (1).
+In the high-resolution regime, second order terms on the quantization errors vanish, and the target error can
+be upper-bounded by the sum of two terms (Appendix E.3):
+∥SV −bS bV∥F ≲∥S −bS∥F ∥V∥2 + ∥S(V −bV)∥F .
+(4)
+We use the score error ∥S −bS∥F as a criterion to derive RK and the value error weighted by the scores
+∥S(V −bV)∥F as a criterion to derive RV . QK consists of VQs with fixed codebook sizes applied to subvectors
+(Sec. 4), while QV applies SQ to each transformed entry (Zhou et al., 2026).
+3.1
+Key transform
+Since row-wise softmax is 1/2-Lipschitz (Gao and Pavel, 2017), the key-dependent term in (4), ∥S −bS∥F , can
+be replaced by the logit error: ∥S −bS∥F ≤1/(2
+√
+d)∥QK⊤−Q bK⊤∥F . Then, defining Mq = Q⊤Q, our goal
+is to design a transform and a quantizer that minimize:
+QK⊤−Q bK⊤2
+F =
+M
+X
+j=1
+(kj −bkj) Mq (kj −bkj)⊤,
+(5)
+5
+
+
+for a given rate. Denoting ∥a∥2
+M = a M a⊤, the right side of (5) can be rewritten as P
+j ∥kj −ˆkj∥2
+Mq, i.e., an
+input-weighted quadratic distortion with constant sensitivity matrix Mq (Linder et al., 1999).
+To understand how a Mq-based distortion affects the design, consider quantization based on companding.
+In the SQ case, this involves defining an invertible mapping h(x), so that given Qu, a uniform SQ, ˆx =
+h−1(Qu(h(x))). For vectors, this can be generalized by selecting an invertible matrix U, so that hU(x) = h(xU).
+Then, companding can be applied directly by using Qu for each entry (e.g., entry-wise SQ) and defining
+ˆx = h−1
+U (Qu(hU(x))). High-resolution quantization theory shows that we can minimize the Mq distortion
+in (5) via companding and an entry-wise SQ by selecting the optimal hU(·), i.e., the one that minimizes
+(5), satisfying h′
+U(x)h′
+U(x)⊤= c Mq, which, for linear companding characterized by a matrix U implies
+UU⊤= c Mq (Linder et al., 1999). Orthogonal transforms are suboptimal for the high-resolution regime
+unless Mq ∝I.
+The condition UU⊤= c Mq determines the transform only up to an orthogonal factor: if U satisfies it,
+so does UW for any orthogonal W, since UWW⊤U⊤= UU⊤. We fix this factor by optimizing energy
+compaction, as the KLT does in (2), but under the Mq-weighted cost of (5) rather than the Euclidean one.
+Assume M tokens in the calibration set and let ¯k = 1/M P
+j kj; centering the keys has no cost to attention
+(Appendix F.1). We write R† = (R⊤M−1
+q R)−1R⊤M−1
+q
+for the Mq-weighted pseudoinverse.
+Theorem 1. Let ekj = kj −¯k, eSk = P
+j ek⊤
+j ekj, and let
+R⋆
+K,p = arg min
+R ∈Rd×p
+M
+X
+j=1
+ ekj −ekj RR†2
+Mq.
+(6)
+Then R⋆
+K,p = M1/2
+q
+E1:p, where EΛE⊤is the eigendecomposition of M1/2
+q
+eSk M1/2
+q
+.
+Proof: Appendix F.2. We construct RK by computing the eigendecomposition of M1/2
+q
+eSk M1/2
+q
+and then
+multiplying by M1/2
+q
+; R⋆
+K,p corresponds to the matrix truncated by keeping the eigenvectors corresponding
+to the dominant eigenvalues of M1/2
+q
+eSk M1/2
+q
+, i.e., RK = M1/2
+q
+E. The centered key is encoded as rj =
+(kj −¯k) RK and reconstructed as bkj = rj R−1
+K + ¯k. We have RKR⊤
+K = Mq, as demanded by (Linder et al.,
+1999), and the transform satisfies a generalized Parseval relation (Girault et al., 2018):
+Proposition 1. Let r and ˆr be any two vectors, and k = rR−1
+K and ˆk = ˆrR−1
+K . Then,
+r −ˆr
+2
+2 =
+k −ˆk
+2
+Mq.
+Prop. 1 is analogous to the Parseval relation in Sec. 2.2 for the Mq-MSE: the transform converts the weighted
+objective into ordinary MSE. Thus, we can run any off-the-shelf MSE-optimal quantizer on the transform
+coefficients. Since RK satisfies the linear compander condition, it is optimal for the associated high-resolution
+attention-weighted companding problem. Its orthogonal factor is chosen to optimize the weighted low-rank
+approximation in Theorem 1.
+3.2
+Value transform
+We derive the value transform from ∥SV −S bV∥2
+F = P
+j,j′(Ms)jj′ (vj −bvj)(vj′ −bvj′)⊤, and Ms = S⊤S, the
+second moment of the attention scores.
+Corollary 1. Let oi = siV denote the attention outputs on calibration data, and EΛE⊤the eigendecomposition
+of Mo = V⊤MsV. The minimizer of ∥SV −S bV∥2
+F over low-rank approximations is RV = E1:p, with codes
+sj = vjRV and reconstruction bvj = sjR⊤
+V .
+The proof is in Appendix F.4. Unlike RK, the value transform is orthogonal. The term V⊤MsV is the
+covariance used in (Zhou et al., 2026).
+4
+KV cache vector quantization
+Our goal is to design quantizers to minimize distortion at a fixed rate, because serving imposes a fixed-width
+constraint: tokens must occupy a fixed number of bits, and rate cannot be reallocated across entries. We
+6
+
+
+achieve this via VQ, in which groups of entries are jointly quantized. This leaves the choice of partition, i.e.,
+how to group the entries, as the only degree of freedom. We show that under standard information-theoretic
+assumptions, there is a criterion that identifies which groupings are rate-distortion optimal when per-group
+rate is fixed, and we show how to find them.
+Let π denote a partition of {1, . . . , d} into L = d/g groups G1, . . . , GL of equal size g, and let rGℓbe the
+transform coefficients indexed by Gℓ. We first assume that each group has its own codebook Cℓwith bℓbits,
+subject to P
+ℓgbℓ= db. Later, we enforce the constraint that bℓ= b. By Proposition 1, we can work with the
+MSE, which satisfies D(π, {bℓ}) = P
+ℓDℓ(bℓ). We model the coefficients as independent zero-mean Gaussians
+with variances σ2
+1 ≥· · · ≥σ2
+d (independence is assumed for tractability.) Under the high-resolution regime,
+the distortion-rate function of the optimal g-dimensional quantizer for group Gℓis (Zador, 1982):
+Dℓ(bℓ) = Cg 2−2bℓ
+ Y
+i∈Gℓ
+σ2
+i
+1/g 1 + o(1)
+
+,
+(7)
+where Cg is common to all groups. The o(1) term in (7) vanishes for high rates, and we assume continuous
+rates bℓ∈R. The partition enters (7) only through the volume vℓ(π) .= Q
+i∈Gℓσ2
+i . We seek the partition
+and per-group rates minimizing D(π, {bℓ}), assuming: variable rates, where {bℓ} can take any value subject
+to the budget P
+ℓbℓ= Lb, and fixed rates, where bℓ≡b as required by fixed-width packing. Note that
+Q
+ℓvℓ(π) = Qd
+i=1 σ2
+i for every π.
+Theorem 2. Under the model (7), for any partition π the allocation minimizing D(π, {bℓ}) subject to
+P
+ℓbℓ= Lb is
+b∗
+ℓ(π) = b +
+1
+2g log2
+
+vℓ(π)
+Y
+m
+vm(π)1/L
+,
+(8)
+which spends more bits on groups of larger volume. The optimal distortion, D∗(b) = CgL 2−2b Qd
+i=1 σ2
+i
+1/d,
+is the same for every π, assuming that rates can be the arbitrary real values from (8).
+The proof is in Appendix G.1. The allocation (8) depends on the partition only through the volumes, and it is
+uniform, b∗
+ℓ= b for all ℓ, only when v1(π) = · · · = vL(π). Hence, for a volume-equalizing partition, the optimal
+allocation is already fixed-width. Instead, if the volumes are not equal and we apply the same number of bits,
+bℓ≡b, the distortion will be suboptimal, 2−2b P
+ℓvℓ(π)1/g ≥D∗(b), with equality iff v1(π) = · · · = vL(π). We
+therefore group entries into equal-volume groups and spend the same number of bits per group; within each
+group, the codebook places more resolution on the entries of higher variance in the query-weighted transform
+domain.
+The distortion of a partition is proportional to the average of the vℓ(π)1/g, while D∗(b) is proportional to
+their geometric mean, so the penalty grows with the spread of the group volumes. Sorting the entries and
+grouping them consecutively maximizes spread, while a random partition averages log-variances per group
+(closer to balanced). Balancing P
+i∈Gℓlog σ2
+i across groups is NP-hard (reduces to 3-Partition (Garey and
+Johnson, 2002)); we use a heuristic. Since each vector has g entries, we will have L = d/g vectors to quantize.
+Then, we sort the entries by decreasing order of log σ2
+i and, to approximately equalize their volume, group Gℓ
+contains entries with index i ≡ℓ−1 mod L. The partition is folded into the transform, so it costs nothing at
+inference.
+We apply VQ to the keys and keep SQ for the values since they are well approximated at this rate: replacing
+the value quantizer with VQ leaves accuracy almost unchanged (Appendix B). Complexity. Write, once per
+token: centering, and a nearest-neighbor search over centroids per group. Read: a lookup into a codebook of
+2gbg scalars per group, and one multiply to restore per-token scale.
+5
+Experiments
+We use 12 A100 GPUs (40GB); for throughput, we use a single H100 (details in Appendix B). The high-
+resolution model might not hold at 2 bits, we use the theory to guide our design rather than as a guarantee. As
+models, we use Llama-3.1-8B (Grattafiori et al., 2024), Qwen3, both 8B and 4B-Thinking (Yang et al., 2025a),
+7
+
+
+2
+3
+4
+rate (bits/coord.)
+10 2
+(a) MSE
+2
+3
+4
+rate (bits/coord.)
+10 3
+10 2
+(b) Mq-MSE
+2
+3
+4
+rate (bits/coord.)
+0.5
+0.6
+0.7
+(c) top-1 agreement
+Ours
+KLT
+OSCAR-rot
+OSCAR-full
+Figure 3 Bases under a fixed quantizer. The KLT minimizes MSE (a) but not top-1 agreement (c); the Mq-MSE (b)
+orders the bases like (c); our transform is best in (b-c).
+and GPT-OSS (Agarwal et al., 2025). For GPT-OSS, we quantize the KV cache only in its full-attention
+layers, leaving sliding-window layers (128-token window) unchanged.
+Transform analysis.
+We fix the quantizer: uniform SQ per coordinate with per-coordinate entropy coding, fit
+on the calibration split and evaluated on held-out data. Entropy coding removes rate allocation as a confound,
+so the comparison reflects the basis alone; OSCAR’s transforms target fixed-rate SQ and gain no compaction
+here. We compare four bases: the KLT of the keys (MSE-optimal), the eigenbasis of the query second
+moment used by OSCAR, the full OSCAR transform, and ours. Fig. 3 shows the MSE, the query-weighted
+distortion (5), and the top-1 attention agreement, i.e., the fraction of queries whose highest-scoring key
+survives quantization. MSE does not determine attention fidelity: the KLT attains the lowest MSE at every
+rate (a), yet ours, with a higher MSE, preserves the top-1 key more often (c).
+Table 2 RULER NIAH mean accuracy (%) across context lengths, mean ± 95% CI over 3 evaluation rollouts. BPE is
+the effective bits per KV element at 128K context. Best compressed method per column in bold.
+Model
+Method
+BPE
+8K
+16K
+32K
+64K
+128K
+Qwen3-4B
+-Thinking-2507
+BF16
+16
+99.5 ±0.4
+98.4 ±0.4
+98.7 ±0.2
+93.1 ±0.8
+89.9 ±2.1
+QuaRot
+2.25
+0.0 ±0.0
+0.0 ±0.0
+13.4 ±0.8
+0.0 ±0.0
+0.0 ±0.0
+OSCAR
+2.28
+99.7 ±0.0
+94.0 ±0.7
+81.6 ±0.8
+63.0 ±0.8
+34.7 ±0.5
+NOVA-KV (ours)
+2.22
+99.2 ±0.4
+97.1 ±0.0
+97.8 ±0.1
+82.9 ±0.8
+79.2 ±0.5
+Qwen3-8B
+BF16
+16
+99.9 ±0.0
+99.4 ±0.0
+98.5 ±0.1
+84.3 ±0.6
+83.4 ±0.6
+QuaRot
+2.25
+54.8 ±0.2
+31.3 ±0.2
+23.5 ±0.5
+0.0 ±0.0
+0.0 ±0.0
+OSCAR
+2.28
+96.7 ±0.3
+94.6 ±0.2
+86.9 ±0.2
+60.6 ±0.6
+25.3 ±0.8
+NOVA-KV (ours)
+2.22
+99.4 ±0.1
+98.7 ±0.0
+96.0 ±0.2
+76.4 ±0.4
+75.4 ±0.1
+Llama-3.1-8B
+BF16
+16
+97.9 ±3.0
+98.3 ±1.8
+97.3 ±3.3
+97.3 ±2.4
+84.2 ±10.7
+QuaRot
+2.25
+37.2 ±25.2
+33.8 ±26.5
+35.2 ±26.6
+34.7 ±27.1
+4.8 ±5.5
+OSCAR
+2.28
+86.1 ±12.2
+81.6 ±17.7
+82.4 ±19.4
+76.9 ±21.9
+36.7 ±25.2
+NOVA-KV (ours)
+2.22
+94.5 ±3.4
+91.9 ±5.9
+92.1 ±7.2
+92.4 ±5.6
+63.3 ±24.6
+GPT-OSS-20B
+BF16
+16
+95.8 ±4.4
+95.7 ±3.4
+94.6 ±3.2
+92.2 ±5.5
+80.4 ±2.2
+QuaRot
+2.50
+0.0 ±0.0
+0.0 ±0.0
+0.0 ±0.0
+0.0 ±0.0
+0.0 ±0.0
+OSCAR
+2.53
+0.5 ±0.2
+0.0 ±0.0
+0.0 ±0.0
+0.0 ±0.0
+0.0 ±0.0
+NOVA-KV (ours)
+2.41
+89.6 ±1.1
+81.0 ±2.6
+79.2 ±3.8
+70.6 ±4.1
+54.0 ±4.4
+Calibration.
+As in (Zhou et al., 2026), the key transform and codebooks are fit offline from 198 GPQA-
+Diamond prompts, run in prefill only, with per-(layer, KV-head) statistics. For GQA (Ainslie et al., 2023), we
+calibrate across heads sharing the same KV cache. For the keys, we fit codebooks with 256 centroids (vector
+size 4, average 2 bits/coordinate) by k-means. We concatenate these prompts into long-context sequences
+of 128K so the data spans the RoPE positions at which the transform and codebooks are evaluated. No
+label, gold answer, model generation, or task metric enters the fit. For values, we use the SQ from (Zhou
+et al., 2026). Refitting the transform, grouping, and codebooks on MMLU instead, a disjoint domain, leaves
+8
+
+
+Table 3 KV-cache quantization compared across models and benchmarks. Entries are mean ± 95% CI with 5 samples
+per prompt. BPE denotes effective bits per KV element at 128K context. “Drop” is the gap in the Mean column to the
+BF16 reference; less negative is better. Best compressed method per column in bold. Naive INT2 yields 0.0 for all
+models and tasks.
+Model
+Method
+BPE
+GPQA
+HumanE
+LCB v6
+AIME25
+MATH500 Mean
+Drop
+Qwen3-4B
+-Thinking-2507
+BF16
+16.00 64.9 ±0.8
+84.8 ±0.5
+59.2 ±0.9 70.0 ±1.5
+97.5 ±0.2
+75.3
+–
+TurboQuant
+3.25
+44.3 ±1.5
+31.2 ±0.4
+1.3 ±1.5
+2.2 ±3.8
+56.6 ±0.7
+27.1 −48.2
+QuaRot
+2.25
+12.6 ±1.7
+6.1 ±1.3
+3.0 ±1.2
+0.0 ±0.0
+32.5 ±1.3
+10.8 −64.5
+OSCAR
+2.28
+62.4 ±0.9
+83.8 ±0.2 57.4 ±0.8 63.3 ±2.1
+96.8 ±0.2
+72.7
+−2.6
+NOVA-KV (ours)
+2.22
+62.9 ±1.3 84.3 ±0.4 56.6 ±0.6 67.3 ±1.2
+97.4 ±0.2
+73.7
+−1.6
+Qwen3-8B
+BF16
+16.00 57.2 ±0.9
+91.7 ±0.5
+57.6 ±0.7 70.0 ±1.7
+97.0 ±0.1
+74.7
+–
+TurboQuant
+3.25
+45.6 ±6.2
+76.0 ±1.9
+32.7 ±2.5 45.6 ±5.1
+94.3 ±0.1
+58.8 −16.9
+QuaRot
+2.25
+44.2 ±1.3
+39.0 ±3.7
+9.0 ±2.0
+20.0 ±3.3
+75.2 ±0.4
+37.5 −37.2
+OSCAR
+2.28
+53.5 ±1.2
+90.9 ±0.7
+53.6 ±0.2 66.2 ±1.7
+96.7 ±0.2
+72.2
+−2.5
+NOVA-KV (ours)
+2.22
+55.1 ±1.5 92.1 ±0.2 55.6 ±0.6 64.6 ±2.5
+96.9 ±0.2
+72.9
+−1.8
+Llama-3.1-8B
+BF16
+16.00 25.5 ±2.7
+63.5 ±2.3
+10.5 ±1.7
+0.0 ±0.0
+44.2 ±1.9
+28.7
+–
+TurboQuant
+3.25
+22.7 ±2.3
+56.7 ±2.8 11.2 ±1.7
+0.0 ±0.0
+37.3 ±1.2
+25.6
+−3.2
+QuaRot
+2.25
+2.8 ±1.0
+6.7 ±1.4
+0.7 ±0.5
+0.7 ±1.3
+6.0 ±0.8
+3.4 −25.4
+OSCAR
+2.28
+23.1 ±2.6 64.4 ±2.5
+9.4 ±1.4
+3.3 ±4.1
+44.8 ±1.1
+29.0
++0.3
+NOVA-KV (ours)
+2.22
+21.3 ±2.6 64.5 ±1.6 10.2 ±1.7
+3.3 ±2.9
+45.8 ±1.3
+29.0
++0.3
+GPT-OSS-20B
+BF16
+16.00 50.4 ±3.1
+90.2 ±2.9
+76.2 ±2.3 74.0 ±7.0
+91.8 ±1.1
+76.5
+–
+TurboQuant
+3.50
+35.2 ±3.0
+33.4 ±3.8
+30.2 ±4.1 17.3 ±3.5
+70.9 ±1.8
+37.4 −39.1
+QuaRot
+2.50
+0.0 ±0.0
+0.0 ±0.0
+0.0 ±0.0
+0.0 ±0.0
+0.0 ±0.0
+0.0 −76.5
+OSCAR
+2.53
+25.1 ±2.7
+5.4 ±1.6
+0.0 ±0.0
+0.0 ±0.0
+39.0 ±1.9
+13.9 −62.6
+NOVA-KV (ours)
+2.41
+46.5 ±3.1 84.6 ±3.6 71.9 ±2.5 67.3 ±7.5
+91.8 ±1.1
+72.4
+−4.1
+RULER NIAH within 2.0 points and does not lower GPQA, so calibrating on the evaluation domain confers
+no advantage (Appendix C).
+Baselines.
+As in (Xiao et al., 2024; Zhou et al., 2026), we keep the first 64 tokens and the most recent 256 in
+BF16 and quantize the rest. We run QuaRot, TurboQuant, and OSCAR under the configuration of (Zhou
+et al., 2026): matching group sizes, per-channel/per-token axes, and BF16 sink-plus-recent band. For OSCAR
+we evaluated both the released transform and one refit on our calibration split; the two are within 1.5 points
+on RULER-NIAH, and we report the better of the two. TurboQuant is included at 3.25 BPE, following (Zhou
+et al., 2026); Zandieh et al. (2025) report quality neutrality at 3.5 bits per channel and marginal quality
+degradation at 2.5.
+Long context.
+We use RULER NIAH (Hsieh et al., 2024), a benchmark for long context robustness, and
+sweep the context from 8K to 128K. We run under chunked prefill, as serving engines do to bound iteration
+latency: the prompt is processed in fixed-size chunks and each chunk is quantized on write, so every subsequent
+chunk attends to an already quantized history. Deferring quantization until the whole prompt is prefilled
+avoids this accumulation, but holds the cache in BF16 at its peak. All methods run in the same harness
+with the same chunk size. Numbers for prior methods might be lower than those reported in the original
+papers, which do not specify a chunked prefill. Yet, our implementations remain comparable to their reported
+behavior on the reasoning and coding benchmarks (cf. Table 3). We report the mean over 3 rollouts with
+a 95% CI in Table 2. The baselines degrade with context while NOVA-KV tracks BF16 more closely: on
+Qwen3-8B at 128K, QuaRot and OSCAR reach 0.0 and 25.3 against 83.4 for BF16, where NOVA-KV reaches
+75.4. At 128K, NOVA-KV exceeds OSCAR by 50.1 points (McNemar p < 10−37). The same ordering holds
+on Llama-3.1-8B, where NOVA-KV reaches 92.4 at 64K and 63.3 at 128K against 76.9 and 36.7 for OSCAR.
+The separation is starkest on GPT-OSS-20B, where both baselines fail rather than degrading with context:
+QuaRot scores 0.0 at every length, and OSCAR reaches 0.5 at 8K and 0.0 from 16K on, so neither retrieves
+anything at any context we test. NOVA-KV instead retains 89.6 at 8K and 54.0 at 128K, against 95.8 and
+80.4 for BF16. This is the only model on which the orthogonal-transform baselines lose the task entirely, and
+it is also the one whose architecture is closest to current practice: GPT-OSS-20B interleaves sliding-window
+and full-attention layers and routes its feed-forward blocks through a mixture of experts, a combination that
+recent open-weight models have increasingly adopted.
+9
+
+
+Accuracy comparisons.
+We test on GPQA-Diamond (Rein et al., 2023), HumanEval (Chen et al., 2021),
+LiveCodeBench v6 (Jain et al., 2025), AIME25 (Mathematical Association of America, 2025), and MATH500
+(Lightman et al., 2024; Hendrycks et al., 2021). We draw 5 samples per prompt (Table 3). Against BF16,
+NOVA-KV shows no detectable degradation on either Qwen model (McNemar p = 0.17, 0.24), while OSCAR
+is significantly below BF16 on Qwen3-4B (p = 0.002). The two compressed methods are not separable there
+(p = 0.46), and on these two models the significant separation appears only on long-context retrieval. The
+remaining two models separate them directly. On Llama-3.1-8B every arm tracks BF16 within the confidence
+intervals, so the methods are hard to tell apart: the uncompressed model already scores low on these tasks.
+On GPT-OSS-20B, by contrast, NOVA-KV preserves most of the BF16 accuracy on every benchmark (mean
+72.4 against 76.5), whereas OSCAR collapses, scoring 5.4 on HumanEval and 0.0 on both LiveCodeBench
+v6 and AIME25 for a mean of 13.9, and TurboQuant falls to 37.4. NOVA-KV therefore stays close to BF16
+on all four models, while the robustness of the orthogonal-transform baselines varies considerably across
+architectures.
+Bit rate.
+At 128K context, the K cache stores one 8 bit index per group of g = 4 entries (2 BPE, as |C|=256)
+together with a per-token BF16 scale (16/128 = 0.125). The V cache is INT2 with a BF16 scale and offset
+(zero-point), giving 2.000 + 32/128 = 2.250. Averaging over the 256 elements gives 2.1875, and the BF16
+sink-plus-recent band (64, 256) adds 0.034, for 2.22 BPE. OSCAR stores a zero-point on both caches, giving
+2.28 BPE; the 0.06 gap is the K-side zero-point. Transforms and codebooks are stored per model.
+Throughput.
+We measure decode throughput in SGLang (Zheng et al., 2024) at input lengths of 30K, 60K
+and 90K (Fig. 4). We include a warm-up request, and throughput is computed over the decode window
+alone, excluding time to first token. Cross-request prefix sharing is disabled. We report aggregate tokens
+per second across the batch. At batch 1 and batch 4 the comparison is bandwidth-dominated: NOVA-KV
+reaches 1.6–3.1× BF16 on Qwen3-8B and 1.7–3.4× on Qwen3-4B, with the larger factors at the longer inputs.
+The factor is smaller on GPT-OSS-20B, 1.1–1.5×, since sliding-window reduces the share of the cache being
+compressed. Against OSCAR at the same rate, the two arms are within a few percent of each other throughout.
+At 90K the BF16 KV pool admits at most b4 on either Qwen model, so it has no batch-16 configuration,
+whereas both 2-bit arms serve one.
+30K
+60K
+90K
+Input length
+0
+100
+200
+Decode tok/s
+(a) GPT-OSS-20B
+30K
+60K
+90K
+Input length
+0
+50
+100
+(b) Qwen3-8B
+30K
+60K
+90K
+Input length
+0
+100
+(c) Qwen3-4B-Thinking
+1
+4
+8
+Batch size
+0
+500
+Decode tok/s
+(d) GPT-OSS-20B
+1
+4
+16
+Batch size
+0
+200
+n/a
+(e) Qwen3-8B
+1
+4
+16
+Batch size
+0
+200
+n/a
+(f) Qwen3-4B-Thinking
+BF16
+OSCAR
+NOVA-KV (ours)
+Figure 4 Decode throughput, prefill excluded. Top row: batch 1 against input length. Bottom row: batch scaling at
+90K input. BF16+Qwen does not admit the largest batch at 90K.
+Transform-quantizer.
+Table 4 crosses transform (OSCAR, NOVA-KV) and quantizer. Under SQ (same
+number of bits to each coordinate), our transform collapses: it compacts energy rather than flattening it, so a
+single rate cannot serve every coordinate. Replacing SQ by VQ is worth 7.5 and 37.4 points under OSCAR’s
+basis; replacing OSCAR’s basis by ours, under VQ, is worth a further 8.3 and 12.7. Neither substitution alone
+reaches the full result.
+10
+
+
+Table 4 Transform-quantizer ablation on RULER NIAH, Qwen3-8B. Mean accuracy (%) ± 95% CI over 3 rollouts.
+Transform
+Quantizer
+BPE
+64K
+128K
+OSCAR
+SQ
+2.28
+60.6 ±0.6
+25.3 ±0.8
+OSCAR
+VQ
+2.22
+68.1 ±0.6
+62.7 ±0.4
+NOVA-KV
+SQ
+2.28
+0.0 ±0.0
+0.0 ±0.0
+NOVA-KV
+VQ
+2.22
+76.4 ±0.4
+75.4 ±0.1
+Volume equalization.
+We fix the transform, the codebook size, and the rate (2.22 BPE), varying only the
+partition: variance-sorted groups consecutive entries in decreasing variance, the configuration with the most
+unbalanced volumes; random draws one fixed partition at random; and equalizing is the partition of Sec. 4.
+Over 3 evaluation rollouts for Qwen3-8B, variance-sorted is the worst (53.2 ±0.7 at 64K, 37.2 ±0.1 at 128K),
+random recovers most of the gap (74.2 ±0.5, 74.4 ±0.2), and the equalizing partition is the highest (76.4 ±0.4,
+75.4 ±0.1), matching Theorem 2.
+6
+Conclusion
+We formulated KV cache quantization as a transform coding problem whose distortion is the attention
+product error. Under a high-resolution model, the optimal key transform is not orthogonal, and satisfies
+a generalized Parseval relation, turning the attention-aware criterion into MSE in the transform domain.
+Under the independent-Gaussian high-resolution model, equal-volume grouping makes fixed-rate VQ attain
+the variable-rate optimum, allowing a fixed-width cache without an asymptotic distortion penalty. At two bits
+per element, NOVA-KV reduces the gap to BF16 relative to the 2-bit state-of-the-art at comparable decoding
+speed. Joint quantization of keys and values is left for future work.
+11
+
+
+Appendix
+A Notation and Definitions
+14
+A.1 Conventions . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+A.2 Attention and the cache . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+A.3 Calibration statistics . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+A.4 Transforms, quantization, and grouping
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+A.5 Symbol table
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+A.6 High-level algorithm . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+15
+B Experimental Details
+16
+B.1
+Reported quantities
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+16
+B.2
+Decode-time breakdown (Fig. 1)
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+16
+B.3
+Calibration
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+17
+B.4
+Serving and evaluation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+17
+B.5
+Decoding kernel and read path
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+18
+B.6
+Sampling and statistical testing . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+20
+B.7
+Datasets and licenses . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+21
+B.8 Throughput protocol and tuning
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+21
+B.9
+Configuration summary
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+21
+C Calibration ablation
+23
+D Partition statistics
+23
+E Analytical tools
+24
+E.1
+Companding for non-difference distortions . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+24
+E.2
+Softmax Perturbation Bound
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+25
+E.3
+Decoupling of the Output Error . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+26
+F Optimal transforms
+26
+F.1
+Lemma S1: Softmax Offset Invariance . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+26
+F.2
+Theorem 1: Key Transform . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+26
+F.3
+Proposition 1: Generalized Parseval Relation
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+28
+F.4
+Corollary 1: Value Transform . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+28
+F.5
+Query Statistics under Grouped-Query Attention . . . . . . . . . . . . . . . . . . . . . . . . .
+29
+12
+
+
+G Quantizer design: grouping and rate allocation
+29
+G.1 Theorem 2: Grouping
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+29
+G.2 Low-Rate Version of the Grouping Bound . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+30
+H High-Resolution Model: Empirical Test
+30
+H.1 Setup
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+31
+H.2 Agreement across groups . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+31
+H.3 Rate dependence . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+31
+H.4 Partition comparison . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+32
+I
+Further evaluations
+33
+I.1
+LongBench
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+33
+I.2
+LooGLE . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+35
+J
+GPT-OSS-20B: Quantizing a Hybrid-Attention Cache
+35
+J.1
+Attention sinks in the quantized serving path . . . . . . . . . . . . . . . . . . . . . . . . . . .
+36
+J.2
+On the OSCAR and QuaRot failures . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+36
+J.3
+Scalar quantization recovers at higher rates . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+37
+K A Chunked-Prefill Dequantization Leak
+38
+13
+
+
+A
+Notation and Definitions
+This appendix collects the notation and definitions used throughout the paper.
+A.1
+Conventions
+Uppercase bold letters (A) denote matrices, lowercase bold letters (a) denote row vectors, and regular letters
+denote scalars. The nth entry of a is an and the (i, j)th entry of A is Aij. All vectors are row vectors, so a
+linear map R acts on the right: xR. Eigenvalues are indexed in decreasing order, λ1 ≥· · · ≥λd, and E1:p
+collects the eigenvectors associated with the p largest eigenvalues. For a symmetric positive definite (p.d.) M
+we let ∥a∥2
+M = aMa⊤, and M1/2 denotes the symmetric square root, i.e., the unique symmetric p.d. B with
+BB = M. We write ∥· ∥F for the Frobenius norm and ∥· ∥2 for the spectral norm of a matrix and the ℓ2
+norm of a vector.
+A.2
+Attention and the cache
+Notation for attention, RoPE, and the cache follows Sec. 2.1 of the main text. We let ˆK, ˆV be the reconstructed
+keys and values after quantization, and ˆS be the scores computed from ˆK. Under grouped-query attention
+(GQA) (Ainslie et al., 2023), the query heads are partitioned into groups, and each group shares a single
+key-value projection pair (WK, WV ); we call the shared projection pair, together with the cache entries it
+produces, a KV head. Quantities are then formed per (layer, KV head); the query statistic Mq is accumulated
+over the query heads sharing the KV head (Appendix F.5), and the transform, grouping, and codebooks are
+fit per KV head.
+A.3
+Calibration statistics
+Let M be the number of cached keys collected on calibration. The calibration statistics are the key mean
+¯k = 1/M P
+j kj, the key covariance eSk = P
+j(kj −¯k)⊤(kj −¯k), the query second moment Mq = Q⊤Q, the
+score second moment Ms = S⊤S, and the output second moment Mo = V⊤MsV. Mq is positive semidefinite
+by construction; we assume it is positive definite for the analysis. Numerically, M1/2
+q
+and M−1/2
+q
+are formed
+from its symmetric eigendecomposition after flooring the eigenvalues at 10−30; no additive ridge is applied.
+For values, we use the default rotation matrix provided in (Zhou et al., 2026).
+A.4
+Transforms, quantization, and grouping
+For the keys, the transform is RK = M1/2
+q
+E, with E the eigenvectors of M1/2
+q
+eSkM1/2
+q
+(Theorem 1); the
+transform coefficients of key j are rj = (kj −¯k)RK, and σ2
+1 ≥· · · ≥σ2
+d denote their per-coordinate variances.
+The query-weighted distortion, or Mq-MSE, of a reconstruction is ∥k −ˆk∥2
+Mq; summed over cached keys it
+equals the key-query inner-product error (cf. Eq. (10)).
+A quantizer of group size g maps subvectors of g entries jointly; a partition π of {1, . . . , d} into L = d/g groups
+G1, . . . , GL of size g has group volume vℓ(π) = Q
+i∈Gℓσ2
+i , and is volume-equalizing when v1(π) = · · · = vL(π).
+Under fixed rates every group gets the same rate bℓ≡b; under variable rates {bℓ} is free subject to P
+ℓbℓ= Lb.
+In (7), we let Cg = g Zg γg, with Zg the normalized moment of inertia of the optimal g-dimensional cell
+shape and γg the source-density functional of Zador’s theorem; under the independent-Gaussian model Cg is
+common to all groups (Zador, 1982) (no effect on the choice of partition).
+The groupings compared in this paper are: variance-sorted, Gℓ= {(ℓ−1)g + 1, . . . , ℓg} after sorting entries
+by decreasing σ2
+i ; random, one partition drawn uniformly at random and then held fixed; and equalizing, the
+partition of Sec. 4, Gℓ= { i ∈{1, . . . , d} : i −1 ≡ℓ−1 (mod L) } after the same sort. Fig. 5 illustrates the
+three rules.
+A.5
+Symbol table
+We summarize important notations in Table 5.
+14
+
+
+(a)
+(a)
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10 11
+(b)
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10 11
+(c)
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10 11
+Figure 5 The three partitions in a zero-indexed toy example (d = 12, g = 4, L = 3); color denotes group membership,
+entries ordered by decreasing variance σ2
+i from left to right. (a) Variance-sorted groups consecutive spectrum entries.
+(b) Random mixes levels by chance. (c) Equalizing deals coordinate i to group i mod L, so each group receives one
+coordinate per level (Theorem 2).
+Table 5 Summary of notations used in this work.
+Symbol
+Meaning
+d
+head dimension
+T
+sequence length
+M
+number of calibration keys
+qt, kt
+post-RoPE query and key at position t
+vt
+value at position t
+S, ˆS
+attention scores from K, from ˆK
+¯k
+calibration key mean
+Mq, eSk, Ms, Mo
+calibration second-order statistics
+RK, RV
+key and value transforms
+rj
+transform coefficients of key j
+σ2
+i
+variance of transform coordinate i
+Q+, Q−, Q
+encoder, decoder, their composition
+Cℓ
+codebook of group ℓ
+g, L
+group size, number of groups
+b, bℓ
+rate, per-group rate
+π, Gℓ, vℓ(π)
+partition, group, group volume
+nsink, nrec
+sink and recent band sizes
+SQ, VQ
+scalar quantization, vector quantization
+Algorithm 1 Query-aware key transform and quantizer
+Calibration (offline):
+1: Collect queries Q and keys K on calibration data
+2: ¯k ←PM
+j=1 kj/M;
+Mq ←Q⊤Q;
+eSk ←PM
+j=1(kj −¯k)⊤(kj −¯k)
+3: Eigendecompose M1/2
+q
+eSkM1/2
+q
+= EΛE⊤
+4: RK ←M1/2
+q
+E;
+R−⊤
+K
+= M−1/2
+q
+E
+5: Find volume-equalized groups π (Thm. 2), fold into RK
+6: Train per-group codebooks {Cℓ} on (K −1¯k)RK
+Inference (online):
+7: Write: cache ˆK = Q+ (kj −¯k)RK
+
+8: Attention: S = softmax
+ Q R−⊤
+K Q−( ˆK)⊤/
+√
+d
+
+A.6
+High-level algorithm
+In Algorithm 1, we detail our pipeline both during calibration and inference.
+15
+
+
+B
+Experimental Details
+In this section, we detail our experimental setup, including metrics, decoding configuration, calibration, serving
+setup, benchmarks, and datasets. We also ablate the VQ and SQ in the value arm to justify our deployed
+method.
+B.1
+Reported quantities
+Bits per element (BPE).
+The average number of stored bits per cached scalar entry, over keys and values
+and accounting for the full context, including per-token scales, zero-points, and the BF16 sink-plus-recent
+band, and excluding the per-model transforms and codebooks, whose contribution is reported separately. The
+cache-rate accounting (2.22 for ours, 2.28 for OSCAR) is given in the main text.
+The per-model transforms and codebooks are stored once and are independent of context and batch. Per
+(layer, KV head) we store the three d × d transforms RK, R−⊤
+K , RV , the mean ¯k (d scalars), and L = d/g key
+codebooks of 2gb centroids in Rg, that is 3d2 + d + L 2gbg scalars. For instance, with Qwen3-8B, for d = 128,
+g = 4, 2gb = 256, L = 32 this is 49152 + 128 + 32768 ≈8.2 × 104 scalars per (layer, KV head); at 16-bit
+transforms and 8-bit codebooks it totals ≈0.30 Gbit for the full 36-layer, 8-KV-head model. Divided by the
+2 nlayer nkv d Lctx B quantized cache scalars, a Lctx = 128K sequence carries ≈0.03 bits per KV element; since
+the same transforms and codebooks serve the entire batch and all requests, the amortized contribution falls
+below 0.01 bits per KV element at the batch sizes we serve, negligible against the ≈2.2 cache rate.
+Top-1 attention agreement.
+The fraction of queries whose highest-scoring key under ˆK is the same as under
+K. It measures whether quantization preserves the argmax of the logits, which the MSE does not constrain
+directly.
+Sink-plus-recent band.
+The first nsink and the most recent nrec tokens are held in BF16 and excluded from
+quantization; nsink and nrec are fixed constants, so the band’s share of the cache decreases as the context
+grows (see Fig. 6).
+BF16
+quantized (NOVA-KV)
+BF16
+1
+nsink
+t −nrec
+t
+sink
+history (grows with t)
+recent
+Figure 6 Cache layout at decoding position t. The first nsink tokens (attention sinks) and the most recent nrec tokens
+are held in BF16 and excluded from quantization; the tokens in between are stored in the NOVA-KV format. nsink
+and nrec are fixed (nsink=64, nrec=256), so the BF16 band’s share of the cache vanishes as the context grows.
+Benchmarks and scoring.
+Table 10 lists, for each benchmark, the number of items scored (# items), the
+number of samples drawn per prompt (Smp.), the generation cap in tokens (Gen), and the per-item metric.
+In the main paper, the five generation benchmarks draw 5 samples per prompt under a 32K cap, while
+RULER NIAH uses 3 samples with a 128-token answer cap. The per-item metrics are as follows. RULER
+NIAH : case-insensitive substring match, with partial credit equal to the fraction of gold needles found.
+GPQA-Diamond: the answer letter is extracted with the simple-evals multiple-choice template and scored
+by exact match against the gold option (A–D). HumanEval and LiveCodeBench v6: pass@1, i.e., a sample
+is accepted only if it passes all reference unit tests under sandboxed execution. AIME25 and MATH500:
+symbolic-equivalence checking of the final answer with the math-verify library. Benchmark accuracy is the
+mean of this per-item score over samples, reported with a bootstrap 95% confidence interval.
+B.2
+Decode-time breakdown (Fig. 1)
+Figure 1 reports measured GPU kernel time per decoding step for Qwen3-8B served with SGLang on 8×H100
+80 GB SXM GPUs using tensor parallelism of degree 8. We use a fixed context length of 16384 and a BF16
+16
+
+
+KV cache. Profiling covers decode steps 6–8, after the complete 16384-token prompt has been written to the
+cache, so every profiled step reads the full cache. Decode runs under CUDA graphs. Each bar is the median
+over the three steps of the summed CUDA-profiler kernel durations; CPU launch overhead and gaps between
+kernels are excluded.
+We assign kernels to the five categories shown in Fig. 1 according to their names. Parameter load contains
+the linear and MLP GEMM kernels, whose time is dominated by accessing the model parameters in this
+regime. Activations contains the remaining normalization, elementwise, and activation-processing kernels.
+KV load contains the fused decode-attention kernels, which read the cached keys and values and compute
+the query-key products, softmax, and score-value products. KV store contains the cache-write kernels, and
+all-reduce contains the NCCL collectives.
+The model parameter footprint is independent of batch size: the model has 15.1 GB of parameters in aggregate,
+and the same parameters are accessed once per decoding step regardless of the number of sequences in flight.
+Hence, the parameter-load bar remains nearly constant across batch sizes. KV-cache traffic, in contrast, scales
+with both batch size and context length. Each token contributes 512 bytes per KV head in BF16, including
+its key and value. Under tensor parallelism of degree 8, the per-GPU cache footprint therefore grows from
+0.30 GB at batch 1 to 19.33 GB at batch 64. Correspondingly, the KV-load bar in Fig. 1 increases from 2.2 to
+9.4 ms, or from 51% to 76% of the kernel time.
+The KV-load category measures the duration of the fused attention kernels rather than memory traffic in
+isolation. These kernels stream the KV cache while performing the attention arithmetic. Accounting for reuse
+across grouped-query heads, decode attention has an arithmetic intensity of approximately 4.0 FLOP/byte,
+far below the H100 BF16 roofline ridge point of approximately 295 FLOP/byte. The fused attention kernel
+is therefore bandwidth-bound once sufficient parallelism is available. At batch 1, its measured KV traffic
+corresponds to only approximately 4% of the 3.35 TB/s peak HBM bandwidth because a single 16K-token
+sequence provides insufficient parallelism to occupy all 132 SMs. At batch 64, the achieved bandwidth rises to
+approximately 61% of peak. Thus, at large batch sizes, streaming the KV cache dominates the measured
+GPU kernel time.
+B.3
+Calibration
+Statistics are accumulated over the calibration prompts, per (layer, KV head), in prefill only. The matrices
+M±1/2
+q
+are formed from the symmetric eigendecomposition of Mq with eigenvalues floored at 10−30 before
+the ±1/2 power; no additive ridge is applied. The bases RK, R−⊤
+K , RV are stored in float64 (the mean ¯k in
+float32) and cast to bfloat16 when loaded into the serving engine.
+Key codebooks are trained by k-means with random initialization, for at most 25 iterations, on the 131072
+transformed key subvectors per (layer, KV head) (8 calibration sequences × 16384 averaged positions) after
+centering, transformation, and grouping; empty clusters are reseeded each iteration from the points farthest
+from their centroid. There is one codebook per group per (layer, KV head), 256 centroids at g = 4, stored in
+float16 and snapped to fp8 offline; each cached subvector is an 8-bit index. Encoding is an exact nearest-
+neighbor search in the Euclidean metric of the transform domain. The grouping sorts entries by log σ2
+i , taking
+σ2
+i from the calibration spectrum, and deals them to the L groups in turn; the procedure is deterministic. We
+detail the algorithmic training steps in Algorithms 2 and 3.
+The per-token scale ρj in Algorithm 3 normalizes each transformed key before the codebooks are trained. It
+is not part of the model of Theorem 2, which treats the entries as independent Gaussians with fixed variances
+σ2
+i .
+B.4
+Serving and evaluation
+We run in a research fork based on SGLang v0.5.10 with custom decoding kernels. Software versions for
+the two hardware setups are listed in Table 9. The accuracy evaluations use the Triton attention backend
+for both prefill and decode. Chunked prefill uses 4096-token chunks on the dense models and 8192 on
+GPT-OSS. RULER NIAH uses 8 subtasks (niah_single_1/2/3, niah_multikey_1/2/3, niah_multivalue,
+niah_multiquery); item counts, samples per prompt, generation caps, and per-item metrics are collected in
+17
+
+
+Algorithm 2 Query-aware transform and grouping
+Input: M token positions; at each position j, the post-RoPE key kj of this KV head and the post-RoPE
+queries, shared across H heads, q(1)
+j , . . . , q(H)
+j
+Output: RK, R−⊤
+K , ¯k
+1: Mq ←PM
+j=1
+PH
+h=1 q(h)⊤
+j
+q(h)
+j
+▷summed over the H shared query heads (Appendix F.5)
+2: ¯k ←1/M P
+j kj;
+eSk ←P
+j(kj −¯k)⊤(kj −¯k)
+3: EΛE⊤←eig(M1/2
+q
+eSkM1/2
+q
+), λ1 ≥· · · ≥λd
+4: RK ←M1/2
+q
+E;
+R−⊤
+K
+←M−1/2
+q
+E
+5: π(r) ←r mod L, r = 0, . . . , d −1 by decreasing λ
+6: RK ←RK[:, π];
+R−⊤
+K
+←R−⊤
+K [:, π]
+▷folded in
+Algorithm 3 Codebook training (per layer, KV head)
+Input: keys {kj}, RK, ¯k; rate b
+Output: codebooks {Cℓ}L
+ℓ=1
+1: for j = 1, . . . , M do
+2:
+rj ←(kj −¯k)RK
+3:
+ρj ←∥rj∥2/
+√
+d;
+rj ←ρ−1
+j rj
+▷Normalize
+4: end for
+5: for ℓ= 1, . . . , L do
+6:
+Cℓ←k-means
+ {rj[Gℓ]}j, 2gb
+▷equal size for every group
+7: end for
+Table 10. Baselines use their own reference calibration procedure, under the same sink-plus-recent band and
+the same chunk size as ours. Naive INT2 denotes per-token INT2 applied directly to keys and values with no
+transform and no sink/recent band; it collapses to 0.0 on every model and task (main-text Table 3). For the
+OSCAR-basis rows of the transform–quantizer ablation (main-text Table 4), codebooks are refit on that basis
+with the same group size, codebook size, and training budget as ours; the KLT comparison (main-text Fig. 3)
+instead uses entropy-coded scalar quantization.
+B.5
+Decoding kernel and read path
+The read path is a fused Triton kernel that never multiplies by the transform. The synthesis R−⊤
+K
+is folded into
+the query once per step: the engine forms the modified query ˜q = q R−⊤
+K
+(a single d × d product, amortized
+over the whole cache), so scoring a cached key reduces to the inner product of ˜q with the dequantized code
+Q−(ˆk). For each of the L groups the stored 8-bit index selects a g-dimensional centroid from that group’s
+codebook; the kernel accumulates the partial logit across groups and applies the per-token scale ρj recovered
+from metadata (one multiply). Because a shared mean shifts every logit of a query by a constant, ¯k cancels in
+the softmax (Sec. F.1) and is not re-added on the read path. On the value side the INT2 code is dequantized
+in the OSCAR rotation basis, whose inverse is absorbed into the output projection, so it adds no online
+matmul either. Thus the per-element read cost is a table lookup and a scale, matching scalar dequantization.
+We implement the read path as a two-stage split-KV decode kernel, with gather and dequantize fused with the
+attention math in stage 1 and stage-2 split-combine; the split count follows the engine’s occupancy heuristic.
+Value quantizer.
+We keep SQ for the values: replacing the value SQ with VQ barely changes downstream
+accuracy. We compared two configurations, the decorrelating transform US alone (as suggested by Cor. 1)
+and US followed by a Hadamard transform (closest to the deployed SQ value path). Both stay within 2 points
+of the deployed SQ (Table 6). While VQ is slightly more accurate at a slightly lower rate (2.16 vs. 2.22 BPE),
+we keep SQ for read-path simplicity.
+Implementation
+We consider two implementations of the read path of Sec. B.5. Both realize the same
+two-stage split-KV decode attention, in which stage 1 fuses the codebook lookup, the per-token scale, and the
+18
+
+
+Table 6 VQ on the values under two transforms, on RULER NIAH with Qwen3-8B, at fixed group size, codebook size,
+and rate. Mean accuracy (%) with CIs drawn from 3 evaluation rollouts. SQ corresponds to our deployed method.
+BPE=2.22 for the SQ method, 2.16 for the VQ method.
+Configuration
+64K
+128K
+SQ (deployed)
+76.4 ±0.4
+75.4 ±0.1
+VQ+US
+77.8 ±0.2
+76.1 ±0.5
+VQ+US+Hadamard
+76.4 ±0.3
+76.7 ±0.7
+attention arithmetic, and stage 2 combines the splits; they share the cache layout and the fp8 codebooks.
+The Triton kernel is the reference implementation, with launch configurations selected offline per batch size
+and geometry. The CUDA kernel is a hand-written stage 1 with a warp-tiled codebook gather and fp32
+accumulation; it reduces the instruction count of the gather-and-dequantize loop, which lowers the attention
+read at batch 128 on Qwen3-8B from 48.9 to 36.4 ms per step (Table 7). The CUDA kernel is the one measured
+in the main-text throughput comparison (main-text Fig. 4).
+Table 7 Per-decoding-step kernel time on Qwen3-8B, one H100, 8192-token contexts. Entries are ms per step with the
+share of the step in parentheses (%). The BF16 pool admits at most 38 concurrent requests at this length.
+Method
+B
+GEMM
+Attn
+Quant
+Other
+Total
+BF16
+1 5.8 (57.1)
+3.8 (37.6)
+–
+0.5 (5.2)
+10.1
+8 5.8 (54.0)
+4.4 (40.8)
+–
+0.6 (5.2)
+10.8
+16 5.9 (37.9)
+9.0 (58.3)
+–
+0.6 (3.8)
+15.4
+32 5.9 (24.5) 17.5 (73.1)
+–
+0.6 (2.4)
+24.0
+64
+capacity limited
+128
+capacity limited
+OSCAR
+1 6.0 (72.7)
+1.3 (16.4)
+0.0 (0.5)
+0.9 (10.4)
+8.2
+8 6.1 (62.3)
+2.6 (26.9)
+0.0 (0.5)
+1.0 (10.3)
+9.8
+16 6.2 (52.8)
+4.5 (38.2)
+0.1 (0.5)
+1.0 (8.5)
+11.7
+32 6.2 (39.9)
+8.3 (53.2)
+0.1 (0.4)
+1.0 (6.5)
+15.5
+64 6.2 (27.1) 15.7 (68.1)
+0.1 (0.4)
+1.0 (4.4)
+23.1
+128 6.4 (16.2) 31.6 (80.5)
+0.1 (0.4)
+1.1 (2.9)
+39.3
+NOVA-KV
+(Triton)
+1 5.8 (67.0)
+1.7 (19.5)
+0.3 (3.4)
+0.9 (10.2)
+8.7
+8 5.9 (50.5)
+4.1 (35.3)
+0.5 (4.5)
+1.1 (9.7)
+11.7
+16 6.0 (40.6)
+6.8 (45.8)
+0.8 (5.8)
+1.2 (7.9)
+14.8
+32 6.0 (28.1) 12.6 (59.5)
+1.4 (6.8)
+1.2 (5.6)
+21.2
+64 6.1 (17.4) 24.7 (70.7)
+2.8 (8.0)
+1.4 (4.0)
+35.0
+128
+6.1 (9.9)
+48.9 (78.7)
+5.3 (8.6)
+1.7 (2.8)
+62.1
+NOVA-KV
+(CUDA)
+1 5.9 (64.8)
+2.0 (21.7)
+0.3 (3.4)
+0.9 (10.0)
+9.0
+8 5.9 (55.6)
+3.0 (28.1)
+0.6 (5.2)
+1.2 (11.1)
+10.7
+16 6.0 (45.2)
+5.2 (39.3)
+0.9 (6.6)
+1.2 (8.9)
+13.3
+32 6.0 (32.8)
+9.5 (52.1)
+1.5 (8.2)
+1.3 (6.9)
+18.3
+64 6.1 (21.1) 18.6 (64.4)
+2.8 (9.7)
+1.4 (4.9)
+28.8
+128 6.1 (12.4) 36.4 (73.3) 5.3 (10.8)
+1.8 (3.6)
+49.7
+Per-step kernel profiling
+We adopt the per-step profiling protocol of Zhou et al. (2026): one server per arm
+on a single H100, 8192-token contexts, batches 1 to 128, and GPU kernel time per decoding step split by
+kernel name into GEMM (projections, MLP, and MoE experts), Attn (the fused attention read, including
+dequantization and the split combine), Quant (the write path: codebook encoder, per-step query preparation,
+OSCAR pack), and Other (norms, activations, rotary, sampling, BF16-band writes). Profiling starts in steady
+state, after every warmed request is decoding, and stops after exactly 64 forward steps; per-step figures divide
+device time by the step count recovered from the trace. Tables 7 and 8 report the breakdown. The kernel
+sum matches the wall clock per step within 1% in every cell, and unassigned kernels are below 0.2%. New
+tokens enter the BF16 recent band and are quantized in blocks of eight steps in every quantized arm, so the
+scalar arm’s Quant column is smaller than a per-step fused quantizer would show. The BF16 and OSCAR
+columns reproduce the profile reported by Zhou et al. (2026) within about 2% at every batch size, which puts
+19
+
+
+Table 8 Per-decoding-step kernel time on GPT-OSS-20B, same protocol as Table 7.
+Method
+B
+GEMM
+Attn
+Quant
+Other
+Total
+BF16
+1 2.6 (65.5)
+0.7 (17.8)
+–
+0.7 (16.7)
+4.0
+8 4.5 (73.2)
+0.9 (14.8)
+–
+0.7 (12.0)
+6.2
+16 4.9 (70.1)
+1.3 (19.1)
+–
+0.8 (10.8)
+7.1
+32 5.8 (63.7)
+2.5 (27.4)
+–
+0.8 (8.9)
+9.1
+64 6.5 (53.8)
+4.8 (39.2)
+–
+0.8 (7.0)
+12.1
+128
+capacity limited
+OSCAR
+1 2.8 (66.0)
+0.5 (12.4)
+0.0 (0.9) 0.9 (20.8)
+4.2
+8 4.2 (68.5)
+0.9 (14.8)
+0.0 (0.7) 1.0 (15.9)
+6.1
+16 4.6 (67.4)
+1.2 (17.6)
+0.0 (0.6) 1.0 (14.4)
+6.9
+32 5.3 (60.5)
+2.4 (27.1)
+0.0 (0.6) 1.0 (11.8)
+8.7
+64 6.2 (52.7)
+4.4 (37.6)
+0.1 (0.6)
+1.1 (9.1)
+11.8
+128 7.6 (43.5)
+8.6 (49.2)
+0.1 (0.4)
+1.2 (6.9)
+17.5
+NOVA-KV
+(Triton)
+1 2.7 (63.4)
+0.5 (12.7)
+0.1 (2.4) 0.9 (21.5)
+4.3
+8 3.3 (56.8)
+1.3 (22.5)
+0.2 (2.6) 1.1 (18.1)
+5.9
+16 3.6 (54.0)
+1.7 (25.9)
+0.2 (3.4) 1.1 (16.7)
+6.6
+32 4.2 (48.6)
+3.0 (34.8)
+0.3 (3.6) 1.1 (13.0)
+8.7
+64 5.2 (40.9)
+5.8 (45.2)
+0.6 (4.4)
+1.2 (9.5)
+12.8
+128 6.6 (33.7) 10.5 (53.7) 1.0 (5.1)
+1.5 (7.5)
+19.6
+NOVA-KV
+(CUDA)
+1 2.7 (62.2)
+0.6 (14.3)
+0.1 (2.4) 0.9 (21.0)
+4.4
+8 3.3 (59.8)
+1.0 (18.1)
+0.2 (2.8) 1.1 (19.4)
+5.6
+16 3.5 (54.0)
+1.7 (25.6)
+0.2 (3.3) 1.1 (17.1)
+6.5
+32 4.2 (48.8)
+2.9 (34.1)
+0.3 (3.8) 1.2 (13.4)
+8.6
+64 5.4 (42.1)
+5.6 (44.0)
+0.5 (4.2)
+1.2 (9.7)
+12.7
+128 6.5 (32.6) 11.0 (55.2) 1.0 (4.8)
+1.5 (7.3)
+20.0
+the NOVA-KV columns on a verified scale.
+Qwen3-8B (Table 7).
+GEMM is flat at about 6 ms for every arm: parameter load is unaffected by quantization,
+so the step is a fixed GEMM cost plus an attention read that grows with batch (the regime of main-text Fig. 1).
+From batch 16 on, every 2-bit arm is faster wherever BF16 runs (at batch 8 the Triton arm’s write-path
+cost still outweighs the small read saving), and only the 2-bit arms serve batches 64 and 128. At batch 128,
+NOVA-KV (CUDA) pays 1.15× OSCAR’s attention read (36.4 against 31.6 ms) plus 5.3 ms of write-path cost,
+for a 1.26× step (49.7 against 39.3 ms); the write-path term grows from 0.3 ms at batch 1 and is the larger
+contribution beyond batch 64. This is the kernel-level form of the main-text statement that decoding is on
+par with the scalar baseline: the difference is confined to the read and the write path.
+GPT-OSS-20B (Table 8).
+At this context no 2-bit arm beats BF16 per step: only 12 of 24 layers are
+quantized, the global-layer cache at 8192 tokens is small, and at d=64 the dequantizing read is bound by
+instruction issue rather than bandwidth, so the write-path cost is not repaid. The MoE GEMMs dominate
+the step and vary across arms by more than the totals differ (routing depends on the token streams). What
+quantization buys here is the batch itself: the 2-bit arms serve batch 128, which the BF16 pool cannot hold.
+The main-text gains for this model come from longer contexts and larger admitted batches, not from per-step
+speed at 8192 tokens.
+B.6
+Sampling and statistical testing
+Generation is stochastic. For each prompt, we draw five samples on the generation benchmarks and three
+samples on RULER NIAH. The compression parameters (transforms, groupings, codebooks, the k-means
+initialization, and the random comparison partition of Sec. 4) are fitted once, with fixed seeds, and held
+fixed across these samples; the repetitions therefore characterize generation and evaluation variability, not
+variability from refitting the compression method. Confidence intervals are computed by bootstrap over
+samples (10000 resamples).
+McNemar’s test compares two methods evaluated on the same items when each item’s outcome is binary
+20
+
+
+(correct/incorrect). For each item, the pair of outcomes falls into one of four cells: both methods correct,
+both incorrect, only method A correct, or only method B correct. Items where the two methods agree carry
+no information about their difference, so the test uses only the discordant items: with n01 items that only A
+solves and n10 that only B solves, it tests the null hypothesis that a discordant item is equally likely to fall
+either way, i.e., that the two methods have the same per-item error rate. We use the exact binomial form:
+under the null, n01 ∼Binomial(n01+n10, 1/2).
+We form binary outcomes by majority voting over the samples drawn for a given item (5 on the generation
+benchmarks, 3 on RULER NIAH), and run the test over the items that both compared methods evaluate
+on. For the generation benchmarks the five task sets are combined into a single test of 992 paired items per
+model; on RULER NIAH the test is run at 128K on Qwen3-8B over 200 paired items. Tests are two-sided
+and reported without any further correction.
+B.7
+Datasets and licenses
+We evaluate on six public benchmarks. RULER NIAH (Hsieh et al., 2024) is a synthetic needle-in-a-haystack
+retrieval suite (Apache-2.0). GPQA-Diamond (Rein et al., 2023) is graduate-level multiple-choice science (CC
+BY 4.0). HumanEval (Chen et al., 2021) is Python code synthesis graded by execution (MIT). LiveCodeBench
+v6 (Jain et al., 2025) is contamination-controlled competitive programming (benchmark released under MIT;
+problem statements originate from competition platforms). AIME25 consists of the 2025 AIME competition
+problems, copyright © Mathematical Association of America, used here for research evaluation (Mathematical
+Association of America, 2025). MATH500 (Lightman et al., 2024; Hendrycks et al., 2021) is a 500-problem
+subset of the MATH dataset (MIT). The models are Llama-3.1-8B (Llama 3.1 Community License) (Grattafiori
+et al., 2024), Qwen3-8B / Qwen3-4B-Thinking-2507 (Apache-2.0) (Yang et al., 2025a), and GPT-OSS-20B
+(Apache-2.0) (Agarwal et al., 2025). All datasets and models are used for research evaluation consistent with
+their licenses.
+B.8
+Throughput protocol and tuning
+The decode-throughput comparison (main-text Fig. 4) runs one server per arm on a single H100. Prompts
+are distinct random token streams with no shared prefix. Before the measured pass, a warm-up pass prefills
+every request’s own prompt into the cache; the measured pass then reuses these prefixes, so all requests
+enter decoding together and throughput is computed over the decode window alone. Every arm runs its best
+configuration: OSCAR takes the best of eight decode-kernel tile configurations swept per cell, NOVA-KV (the
+CUDA kernel, Sec. B.5) takes the best of its compiled variants per cell, and BF16 runs the engine’s dense
+read with an uncapped memory-fraction pool. All arms share the same chunk size, split-KV budget, and fp32
+accumulation in the attention read.
+B.9
+Configuration summary
+Tables 9 and 10 collect the infrastructure, serving, method, and per-benchmark settings described above.
+21
+
+
+Table 9 Infrastructure, serving, and hyperparameters.
+Setting
+Value
+Software & hardware
+SGLang
+research fork based on v0.5.10
+GPUs (accuracy)
+12×A100 (40GB)
+Triton / PyTorch / CUDA (A100) 3.5.1 / 2.9.1 / 12.8
+GPUs (throughput, profiling)
+1×H100 (80GB)
+GPUs (decode-time breakdown)
+8×H100 (80GB)
+Triton / PyTorch / CUDA (H100) 3.6.0 / 2.11.0 / 13.0
+Serving
+Decode attention backend
+Triton
+Chunked-prefill size
+4096 tokens (8192 on GPT-OSS)
+Sink / recent band nsink, nrec
+64 / 256 (BF16)
+KV cache dtype
+INT2, quant group 128
+(GPT-OSS: per-row scale, d=64)
+Transform & quantizer
+Head dim d / group g
+128 / 4
+Codebook size / rate
+256 / 2 bits per coord
+Groups L / grouping
+32 / volume-equalizing
+K / V quantizer
+VQ / per-token affine INT2
+k-means init / iters
+random-distinct / 25
+Train. vectors / (layer, head)
+131072 (8×16384)
+Transform / codebook storage
+float64→bf16 / fp16→fp8
+NOVA-KV regularizer
+eig. floor 10−30 (no ridge)
+Calibration & decoding
+Calibration
+198 GPQA-Diamond, prefill-only
+Statistics dtype
+float64
+Sampling (SGLang serving; each model’s released defaults)
+Qwen3-8B, Qwen3-4B-Think.
+T=0.6, top-p 0.95, top-k 20
+Llama-3.1-8B-Instruct
+T=0.6, top-p 0.9, top-k disabled
+GPT-OSS
+T=1.0, top-p 1.0, top-k disabled
+Samples per prompt
+5 (3 for NIAH)
+Confidence intervals
+paired bootstrap 95% (10000 resamples)
+Table 10 Per-benchmark evaluation settings. Samples = samples per prompt; Gen = max generated tokens.
+Dataset
+# items Smp.
+Gen Metric
+RULER NIAH
+800 / 200
+3
+128 substring
+GPQA-Diamond
+198
+5 32768 letter (A–D)
+HumanEval
+164
+5 32768 pass@1 exec.
+LiveCodeBench v6
+100
+5 32768 pass@1 exec.
+AIME25
+30
+5 32768 math-verify
+MATH500
+500
+5 32768 math-verify
+22
+
+
+C
+Calibration ablation
+We vary the calibration set and refit the transform, grouping, and codebooks (Table 11). Reducing from 198
+to 32 GPQA-Diamond prompts (40K to 8.9K tokens) changes RULER NIAH by 1.1 points at 64K and 1.1 at
+128K, both upward. Calibrating on MMLU instead, a disjoint domain with 116K tokens, gives 74.4 and 75.4,
+within 2.0 and 0.0 points of the default. GPQA accuracy under MMLU calibration is 59.3, against 57.2 for
+BF16 (Table 3).
+Table 12 extends this comparison to the five reasoning and coding benchmarks. The effect of the calibration
+domain is small and model-dependent. Relative to the deployed GPQA-Diamond calibration, MMLU raises
+the Qwen3-8B mean by 2.0 points but lowers the Qwen3-4B-Thinking mean by 0.7. Both stay within two
+points of the deployed calibration and within 2.3 points of BF16. For consistency with (Zhou et al., 2026), we
+use GPQA-Diamond in our main evaluations.
+Table 11 Calibration data ablation, Qwen3-8B. We vary the calibration set and token count; GPQA accuracy does
+not benefit from calibrating on GPQA. Mean accuracy (%) ± 95% CI over 3 rollouts.
+Calibration
+Tokens
+GPQA
+64K
+128K
+GPQA-198
+40000
+55.1 ±1.5
+76.4 ±0.4
+75.4 ±0.1
+GPQA-32
+8945
+56.2 ±1.4
+77.5 ±0.6
+76.5 ±0.1
+MMLU
+116340
+59.3 ±0.4
+74.4 ±0.3
+75.4 ±0.6
+Table 12 Calibration domain ablation on NOVA-KV, for Qwen3-4B-Thinking-2507 and Qwen3-8B. Compressed rows
+are NOVA-KV at 2.22 BPE; GPQA-198 is the deployed calibration, and MMLU a disjoint domain (116K tokens).
+Entries are mean ± 95% CI with 5 samples per prompt; “Drop” is the gap in the Mean column to the BF16 reference.
+Model
+Calibration
+BPE
+GPQA
+HumanE
+LCB v6
+AIME25 MATH500 Mean Drop
+Qwen3-4B
+-Thinking-2507
+BF16
+16.00 64.9 ±0.8 84.8 ±0.5 59.2 ±0.9 70.0 ±1.5
+97.5 ±0.2
+75.3
+–
+GPQA-198
+2.22
+62.9 ±1.3 84.3 ±0.4 56.6 ±0.6 67.3 ±1.2
+97.4 ±0.2
+73.7
+−1.6
+MMLU
+2.22
+64.7 ±1.2 83.7 ±1.6 53.0 ±3.8 66.7 ±8.3
+97.0 ±0.5
+73.0
+−2.3
+Qwen3-8B
+BF16
+16.00 57.2 ±0.9 91.7 ±0.5 57.6 ±0.7 70.0 ±1.7
+97.0 ±0.1
+74.7
+–
+GPQA-198
+2.22
+55.1 ±1.5 92.1 ±0.2 55.6 ±0.6 64.6 ±2.5
+96.9 ±0.2
+72.9
+−1.8
+MMLU
+2.22
+57.5 ±3.3 91.5 ±1.4 60.0 ±2.3 68.7 ±6.3
+96.7 ±0.5
+74.9
++0.2
+D
+Partition statistics
+10 10
+10 4
+102
+108
+vℓ/vequal
+0
+250
+500
+750
+Group count
+(a) Eigenvalue order
+10 10
+10 4
+102
+108
+vℓ/vequal
+0
+500
+1000
+Group count
+(b) Random
+10 10
+10 4
+102
+108
+vℓ/vequal
+0
+2500
+5000
+7500
+Group count
+(c) Volume-aware
+Figure 7 Distribution of group volumes under the three partitions, averaged over all (layer, KV head) pairs of
+Qwen3-8B at g = 4. Each count is one group; volumes are normalized by vequal, the common value they would take
+under a perfectly volume-equalizing partition (dashed line). The horizontal axis is logarithmic.
+The fixed-rate case of Theorem 2 bounds the distortion of a partition π by Cg 2−2b P
+ℓvℓ(π)1/g ≥D∗(b), with
+equality iff all group volumes coincide. In theory, the gap is a property of the volume distribution (cf. Sec. H).
+Fig. 7 shows that distribution for the three partitions compared in Sec. 5. Volumes are normalized by:
+vequal =
+ d
+Y
+i=1
+σ2
+i
+!g/d
+,
+(9)
+23
+
+
+the group volume under an exactly equalizing partition; hence, a partition that equalizes exactly places all
+mass on 1.
+The three panels differ by orders of magnitude in spread. Grouping consecutive entries in eigenvalue order
+(a) produces volumes spanning roughly 20 decades, since the leading group collects the largest σ2
+i and the
+trailing group the smallest. A random partition (b) is narrower, as each group draws entries from across the
+spectrum, but the spread remains close to 3 decades. The volume-aware partition (c) concentrates almost all
+groups with a small tail attributable to the greedy dealing rule.
+The ordering of the three spreads matches the ordering of the corresponding accuracies reported in Sec. 5,
+which is consistent with Theorem 2. We note that the theorem is derived under the high-resolution model
+with independent Gaussian coefficients, so the agreement is evidence that the predicted ordering survives
+outside the regime of the derivation rather than a verification of the bound (cf. Sec. H).
+E
+Analytical tools
+E.1
+Companding for non-difference distortions
+This subsection states the high-resolution theory for distortion measures ρ(·, ·) other than the MSE, following
+the companding framework of Linder et al. (1999), which covers locally quadratic measures whose weight may
+be input-dependent. The criterion in (5), that is,
+QK⊤−Q bK⊤2
+F =
+M
+X
+j=1
+(kj −bkj) Mq (kj −bkj)⊤,
+(10)
+is a special case of this theory, as we will show next.
+Locally quadratic distortions.
+Suppose ρ(·, ·) is three times continuously differentiable in its second argument,
+vanishes exactly when its second argument equals the first argument, and has positive definite second derivative
+at that point. Define the sensitivity matrix
+
+M(x)
+
+ij = 1
+2
+∂2ρ(x, ˆx)
+∂ˆxi ∂ˆxj
+
+ˆx=x.
+(11)
+Because the gradient vanishes at ˆx = x, a second-order expansion gives
+ρ(x, ˆx) = (x −ˆx) M(x) (x −ˆx)⊤+ O
+ ∥x −ˆx∥3
+,
+(12)
+so at high resolution the distortion is a quadratic form with a possibly input-dependent weight. An input-
+weighted quadratic measure
+ρ(x, ˆx) = ∥(x −ˆx)W(x)∥2
+2,
+(13)
+is of this type, with M(x) = W(x)W(x)⊤. In our criterion (5), the weight does not depend on the input,
+M(x) ≡Mq, and the expansion (12) is exact.
+Companding quantizers.
+A compander applies an invertible map h to the source, quantizes with a lattice
+quantizer QL, and inverts:
+x −→h(x) −→QL
+ h(x)
+
+−→h−1 −→ˆx.
+(14)
+Write J(x) for the Jacobian of h, so that dh = dx J(x). The compander is a structured vector quantizer: all
+adaptation to the source and to the distortion is carried by h, while the cells in the companded domain are
+congruent, i.e., translates of the basic lattice cell, identical in shape and volume. Mapped back through h−1,
+these identical cells become the non-uniform cells of the effective quantizer in the source domain. A linear
+h(x) = xR, with J ≡R a typical transform coder. In this case, dh = dx R.
+24
+
+
+Asymptotic rate.
+Let Zg denote the normalized second moment of the basic cell of the lattice. Linder et al.
+(1999) show that, for a source with finite differential entropy H(x), the rate of the compander, defined as the
+entropy H(D) of the quantizer indices when the lattice is scaled to operate at distortion D, satisfies
+lim
+D→0
+
+H(D) + g/2 log2 D
+
+= H(x) + E
+
+log2 | det J(x)|
+
++ g/2 log2
+
+g Zg E
+
+tr Γ(x)
+
+,
+(15)
+where
+Γ(x) = J(x)−1 M(x) J(x)−⊤,
+(16)
+measures the sensitivity as seen in the companded domain.
+The optimal compressor.
+Minimizing (15) over h uses two inequalities. Since Γ(x) ≻0, the arithmetic–
+geometric mean inequality gives tr Γ ≥g (det Γ)1/g, with equality iff the eigenvalues of Γ are all equal; Jensen’s
+inequality then moves the expectation inside the logarithm. Together (Linder et al., 1999, Thm. 2):
+lim
+D→0
+
+H(D) + g/2 log2 D
+
+≥H(x) + g/2 log2
+ g Zg
+
++ 1/2 E
+
+log2 det M(x)
+
+,
+(17)
+with equality if and only if
+J(x) J(x)⊤= c M(x)
+a.e., for some c > 0.
+(18)
+Three consequences:
+(C1) The optimal compressor does not depend on the source distribution, only on the distortion measure. This
+is the analogue, for locally quadratic distortions, of the fact that the optimal entropy-coded quantizer
+for MSE is uniform regardless of the source.
+(C2) Condition (18) fixes h only up to an orthogonal factor on the right, since replacing J by JO with O
+orthogonal leaves JJ⊤unchanged. The condition therefore constrains the stretch but not the rotation.
+(C3) An orthogonal h satisfies (18) only when M ∝I, since JJ⊤= I then forces M = c−1I.
+For the key transform.
+Take M(x) ≡Mq, constant. The compressor is then linear, h(x) = xR, and (18)
+reads RR⊤= c Mq. By (C3), orthogonal transforms are suboptimal for the attention-aware criterion unless
+the queries are isotropic; by (C2), Theorem 1 must resolve the remaining orthogonal factor, which we do by
+minimizing the rank-p reconstruction error.
+E.2
+Softmax Perturbation Bound
+We prove that the logit error controls the attention weights (beginning of Sec. 3).
+Proposition S1. Let Z, bZ ∈RT ×T , S = softmaxrow(Z/
+√
+d), and bS = softmaxrow(bZ/
+√
+d). Then, ∥S −bS∥F ≤
+1/(2
+√
+d) ∥Z −bZ∥F .
+Proof. Consider one row. The Jacobian of softmax at z is J(z) = diag(s) −s⊤s, s = softmax(z), symmetric
+positive semidefinite with ∥J(z)∥2 ≤1/2 (Gao and Pavel, 2017). Along the segment z(t) = (1 −t)ˆz + tz,
+∥softmax(z) −softmax(ˆz)∥2 ≤sup
+t∈[0,1]
+∥J(z(t))∥2 ∥z −ˆz∥2 ≤1/2 ∥z −ˆz∥2.
+(19)
+Applying this to each row of Z/
+√
+d, bZ/
+√
+d and summing squares over rows gives the claim.
+With Z = QK⊤and bZ = Q bK⊤, the attention-weight error is bounded by 1/(2
+√
+d) ∥QK⊤−Q bK⊤∥F .
+25
+
+
+E.3
+Decoupling of the Output Error
+We justify the decomposition of Sec. 3.
+Let bS = softmaxrow(Q bK⊤/
+√
+d) be the scores computed from
+reconstructed keys and bO = bS bV the output under joint key and value quantization.
+Proposition S2.
+∥O −bO∥F ≤∥V∥2/(2
+√
+d)
+QK⊤−Q bK⊤
+F +
+S(V −bV)
+
+F +
+(S −bS)(V −bV)
+
+F .
+(20)
+Proof. Adding and subtracting S bV gives the exact identity
+O −bO = (S −bS)V + S(V −bV) −(S −bS)(V −bV).
+(21)
+The triangle inequality, ∥(S −bS)V∥F ≤∥S −bS∥F ∥V∥2, and Proposition S1 give the claim.
+The first term is controlled by the key objective (5); the second is the value objective of Corollary 1 (Sec. F.4);
+the third is a product of the two quantization errors, hence second order. We do not claim joint optimality of
+the two-step design for the combined objective. Consistently with this decomposition, the value objective
+below treats the scores as computed from full-precision keys; the discrepancy from using bS instead is absorbed
+by the second-order term.
+F
+Optimal transforms
+F.1
+Lemma S1: Softmax Offset Invariance
+We prove in this section that adding a constant to all keys leaves the attention scores unaltered.
+Lemma S1. For any c ∈R1×d and any query q, softmaxj
+ q(kj −c)⊤
+= softmaxj
+ qk⊤
+j
+
+.
+Proof. Replacing each key by kj −c shifts every logit of the query q by the same amount qc⊤, which cancels:
+exp
+ q (kj −c)⊤
+P
+j′ exp
+ q (kj′ −c)⊤ =
+exp
+ q k⊤
+j
+
+P
+j′ exp
+ q k⊤
+j′
+.
+(22)
+By Lemma S1, replacing every key kj by kj −c leaves the attention unchanged, so we may quantize the
+shifted keys instead and minimize
+min
+c, D, {rj}
+M
+X
+j=1
+kj −c −rjD
+2
+Mq,
+(23)
+which coincides with the original objective at c = 0; optimizing over c therefore never increases the error, and
+we choose c to make the keys cheaper to compress.
+F.2
+Theorem 1: Key Transform
+We find the transform that minimizes the low-rank reconstruction Mq-MSE given training examples. We
+write R† = (R⊤M−1
+q R)−1R⊤M−1
+q
+for the Mq-weighted pseudoinverse, so that RR† is the projector onto the
+column space of R that is orthogonal in the Mq inner product.
+Theorem 1 (restated). Let ekj = kj −¯k, eSk = P
+j ek⊤
+j ekj, and let
+R⋆
+K,p = arg min
+R ∈Rd×p
+M
+X
+j=1
+ ekj −ekj RR†2
+Mq.
+Then R⋆
+K,p = M1/2
+q
+E1:p, where EΛE⊤is the eigendecomposition of M1/2
+q
+eSk M1/2
+q
+.
+26
+
+
+We prove a slightly more general statement. Rather than fixing the reconstruction to the Mq-orthogonal
+projection ekjRR†, we leave the codes, the synthesis matrix, and a shared offset free, and minimize the logit
+error (5) directly. In particular, we parameterize a rank-p linear reconstruction with codes rj ∈R1×p, a shared
+synthesis matrix D ∈Rp×d of full row rank, and a shared offset c ∈R1×d:
+bkj = rjD + c,
+(24)
+and minimize
+L(D, c, {rj}) =
+N
+X
+i=1
+M
+X
+j=1
+ qik⊤
+j −qibk⊤
+j
+2.
+(25)
+We show our result in 5 steps.
+Step 1: reorder to expose the query second moment.
+With δj = kj −c −rjD,
+X
+i,j
+ qiδ⊤
+j
+2 =
+M
+X
+j=1
+δj
+ N
+X
+i=1
+q⊤
+i qi
+
+δ⊤
+j =
+M
+X
+j=1
+∥δj∥2
+Mq,
+(26)
+with Mq = Q⊤Q, which is (5). Invertibility of Mq requires the calibration queries to span Rd (in particular
+N ≥d), which holds for typical calibration sets; in practice we enforce positive-definiteness as in Appendix A.3.
+Step 2: optimal codes for fixed D, c.
+The loss decouples across j. Setting the gradient of ∥δj∥2
+Mq in rj to
+zero,
+rj DMqD⊤= (kj −c) MqD⊤=⇒r∗
+j = (kj −c) MqD⊤ DMqD⊤−1,
+(27)
+a generalized least-squares projection onto the row space of D, measured in the Mq inner product.
+Step 3: optimal offset.
+For fixed D and codes, ∇cL = −2 P
+j δjMq = 0. Since Mq ≻0, the condition
+reduces to P
+j δj = 0, i.e., c∗= ¯k −¯rD with ¯r = 1/M P
+j rj. Any choice satisfying this equation is optimal;
+we pick the one that centers the codes, ¯r = 0, so that no rate is spent encoding the code mean c∗= ¯k. We
+write ˜kj = kj −¯k.
+Step 4: optimal synthesis.
+Substituting (27), r∗
+jD = ˜kjP with P = MqD⊤(DMqD⊤)−1D, the oblique
+projector onto the row space of D that is orthogonal in the Mq inner product (P2 = P, and PMq is
+symmetric). Using these two identities, (I −P)Mq(I −P)⊤= Mq −PMq, and with eSk = P
+j ˜k⊤
+j ˜kj,
+L∗(D) = tr
+
+MqeSk
+
+−tr
+
+PMqeSk
+
+.
+(28)
+The first term is constant, so we maximize T(D) = tr
+
+MqD⊤(DMqD⊤)−1D MqeSk
+
+.
+Step 5: change of variables and Ky Fan.
+Let B = DM1/2
+q
+∈Rp×d, so DMqD⊤= BB⊤and MqD⊤=
+M1/2
+q
+B⊤.
+Then T = tr
+
+ΠB A
+
+,
+A = M1/2
+q
+eSkM1/2
+q
+,
+ΠB = B⊤(BB⊤)−1B, where ΠB is a rank-p
+orthogonal projector and A ⪰0. Maximizing tr[ΠA] over rank-p orthogonal projectors is the classical PCA
+problem, solved by the projector onto the top-p eigenvectors of A with maximum P
+i≤p λi(A) (Fan, 1949).
+With A = EΛE⊤and E1:p the top-p eigenvectors, take B∗= E⊤
+1:p, i.e.,
+D∗= E⊤
+1:pM−1/2
+q
+= R†.
+(29)
+Then D∗MqD∗⊤= Ip, and (27) simplifies to
+r∗
+j = ˜kj MqD∗⊤= ˜kj M1/2
+q
+E1:p = ˜kj R,
+(30)
+with R = M1/2
+q
+E1:p = R⋆
+K,p. The reconstruction is therefore bkj = ekjRR† + ¯k, the projected form of the
+theorem, and the optimal cost is P
+i>p λi(A). For p = d, E is orthogonal and RR† = I.
+■
+27
+
+
+Remark S1. If Mq ∝I, the procedure reduces to ordinary mean-centered PCA on the keys.
+Remark S2. For p = d, the columns of R are not orthonormal in general; they satisfy RR⊤= Mq̸ = I
+whenever Mq̸ ∝I. For p < d, RR⊤= M1/2
+q
+E1:pE⊤
+1:pM1/2
+q̸
+= Mq.
+F.3
+Proposition 1: Generalized Parseval Relation
+Throughout, RK = R⋆
+K,d denotes the full-rank (p = d) transform of Theorem 1, which is invertible.
+Proposition 1 (restated). Let r and ˆr be any two vectors, and k = rR−1
+K
+and ˆk = ˆrR−1
+K .
+Then,
+r −ˆr
+2
+2 =
+k −ˆk
+2
+Mq.
+Proof. With r −ˆr = (k −ˆk)R,
+∥r −ˆr∥2
+2 = (k −ˆk) RR⊤(k −ˆk)⊤,
+(31)
+and RR⊤= M1/2
+q
+EE⊤M1/2
+q
+= Mq, since E is orthogonal for p = d.
+F.4
+Corollary 1: Value Transform
+Corollary 1 (restated). Let oi = siV denote the attention outputs on calibration data, and EΛE⊤the
+eigendecomposition of Mo = V⊤MsV. The minimizer of ∥SV −S bV∥2
+F over low-rank approximations is
+RV = E1:p, with codes sj = vjRV and reconstruction bvj = sjR⊤
+V .
+Let αi ∈R1×M denote the ith row of S, so the attention output for calibration query i is oi = αiV ∈R1×d.
+We parameterize a rank-p linear reconstruction with codes sj ∈R1×p and synthesis DV ∈Rp×d of full row
+rank, bvj = sjDV , and minimize the output distortion
+L(DV , {sj}) =
+N
+X
+i=1
+αiV −αi bV
+2
+2.
+(32)
+Step 1: reorder to expose the score second moment.
+With δj = vj −sjDV and ∆∈RM×d stacking the δj as
+rows,
+X
+i
+
+X
+j
+αij δj
+
+2
+2 =
+X
+j,j′
+(Ms)jj′ δjδ⊤
+j′ = tr
+
+∆⊤Ms∆
+
+,
+(33)
+with Ms = S⊤S = P
+i α⊤
+i αi. Attention reads values through score-weighted sums (mixing tokens).
+Step 2: optimal codes for fixed DV .
+Writing ∆= V −ScDV with Sc ∈RM×p stacking the codes gives
+Ms Sc DV D⊤
+V = Ms VD⊤
+V .
+(34)
+A solution independent of Ms is
+S∗
+c = VD⊤
+V
+ DV D⊤
+V
+−1,
+(35)
+the ordinary Euclidean projection of each vj onto the row space of DV : the weight lives on the token axis,
+orthogonal to the head-space axis along which the projection acts, so the projection geometry is standard.1
+Step 3: optimal synthesis.
+Substituting, S∗
+cDV = VP with P = D⊤
+V (DV D⊤
+V )−1DV , a standard rank-p
+orthogonal projector. Then
+tr
+
+(I −P) V⊤MsV (I −P)
+
+= tr[Mo] −tr[PMo],
+(36)
+with Mo = V⊤MsV. Maximizing tr[PMo] over rank-p orthogonal projectors is again the PCA problem
+of Sec. F.2, Step 5: with Mo = EΛE⊤, the maximizer is P∗= E1:pE⊤
+1:p, i.e., D∗
+V = E⊤
+1:p and, by (35),
+s∗
+j = vjE1:p. This is Corollary 1 with RV = E1:p; since E1:p has orthonormal columns, the synthesis is the
+transpose and no normalization is needed.
+1If Ms is invertible, (35) is the unique solution. Invertibility is not required for what follows: the optimal basis depends on
+Ms only through the d × d matrix Mo = V⊤MsV, which has rank min(d, N) regardless of the cache length M.
+28
+
+
+Second moment of the attention outputs.
+Although Mo was defined through the M × M matrix Ms, it is
+the empirical second moment of the attention outputs:
+V⊤X
+i
+α⊤
+i αi
+
+V =
+N
+X
+i=1
+(αiV)⊤(αiV) =
+N
+X
+i=1
+o⊤
+i oi.
+(37)
+We never form Ms on the token axis, which grows with context length; we accumulate outer products of
+attention-output vectors in head space, a d × d matrix.
+■
+Remark S3. No offset appears in Corollary 1, but centering the values is also free: since S1 = 1, a shared
+value offset satisfies S(V −1cV ) = SV −1cV , so it can be subtracted before quantization and added back to
+the output exactly.
+F.5
+Query Statistics under Grouped-Query Attention
+In grouped-query attention (GQA) (Ainslie et al., 2023), one KV head is shared by H query heads with
+queries Q(1), . . . , Q(H). The logit error for the shared keys is
+H
+X
+h=1
+Q(h)K⊤−Q(h) bK⊤2
+F =
+M
+X
+j=1
+(kj −bkj)
+ H
+X
+h=1
+M(h)
+q
+
+(kj −bkj)⊤,
+(38)
+with M(h)
+q
+= Q(h)⊤Q(h). This has the same form as (5) with Mq = P
+h M(h)
+q , so we accumulate the query
+second moment over the heads sharing each KV head.
+G
+Quantizer design: grouping and rate allocation
+G.1
+Theorem 2: Grouping
+Theorem 2 (restated). Under the model (7), for any partition π the allocation minimizing D(π, {bℓ})
+subject to P
+ℓbℓ= Lb is
+b∗
+ℓ(π) = b +
+1
+2g log2
+
+vℓ(π)
+Y
+m
+vm(π)1/L
+,
+which spends more bits on groups of larger volume. The resulting optimal distortion, D∗(b) = CgL 2−2b Qd
+i=1 σ2
+i
+1/d,
+is the same for every π, assuming that rates can be the arbitrary real values from (8).
+We prove this statement together with the fixed-rate claim that follows Theorem 2 in the main text: under
+bℓ≡b, the distortion of a partition π is Cg 2−2b P
+ℓvℓ(π)1/g ≥D∗(b), with equality iff v1(π) = · · · = vL(π).
+By the model (7) the total distortion is D(π, {bℓ}) = Cg
+P
+ℓ2−2bℓvℓ(π)1/g; the constant Cg > 0 is common
+to all groups, so it leaves the minimizing π and {bℓ} unchanged and only rescales the optimal value. We
+therefore solve
+min
+π
+min
+{bℓ}: P
+ℓbℓ=Lb
+L
+X
+ℓ=1
+2−2bℓvℓ(π)1/g,
+(39)
+and restore Cg in the optimal distortion at the end.
+Optimal allocation and distortion.
+For fixed π, each term 2−2bℓv1/g
+ℓ
+is convex in bℓand the constraint is affine,
+so first-order conditions are sufficient. Stationarity of the Lagrangian L = P
+ℓ2−2bℓv1/g
+ℓ
++ µ(P
+ℓbℓ−Lb) gives
+2 ln 2 · 2−2bℓv1/g
+ℓ
+= µ for all ℓ: the optimal allocation equalizes per-group distortions. Solving and enforcing
+the constraint,
+b∗
+ℓ= b + 1
+2g log2
+
+vℓ(π)
+ Y
+m
+v1/L
+m (π)
+
+,
+(40)
+29
+
+
+which is (8). Substituting back, every term equals 2−2b Q
+m vm(π)
+1/(Lg), so the inner minimum is
+L 2−2bY
+ℓ
+vℓ(π)
+1/(Lg)
+= L 2−2b d
+Y
+i=1
+σ2
+i
+1/d
+,
+(41)
+where the last equality uses Q
+ℓvℓ(π) = Qd
+i=1 σ2
+i for every partition and Lg = d. The value is independent of
+π; restoring the common factor, the optimal distortion is D∗= Cg L 2−2b Qd
+i=1 σ2
+i
+1/d, proving the theorem.
+Fixed rates.
+Under bℓ≡b, the distortion is Cg 2−2b P
+ℓvℓ(π)1/g. By the arithmetic–geometric mean inequality
+applied to the nonnegative numbers v1/g
+ℓ
+,
+L
+X
+ℓ=1
+v1/g
+ℓ
+≥L
+Y
+ℓ
+v1/g
+ℓ
+1/L
+= L
+ d
+Y
+i=1
+σ2
+i
+1/d
+,
+(42)
+with equality iff all vℓcoincide, so the fixed-rate distortion is at least Cg L 2−2b(Q
+i σ2
+i )1/d = D∗. The equal-rate
+distortion attains the unconstrained optimum on volume-equalizing partitions.
+■
+G.2
+Low-Rate Version of the Grouping Bound
+The remark in Sec. 4 removes the high-resolution assumption for independent Gaussian groups. Let rGℓ∈R1×g
+have independent Gaussian entries with variances {σ2
+i }i∈Gℓ, and let Qℓbe any quantizer with gbℓbits. The
+rate of a fixed-rate quantizer upper-bounds the mutual information between source and reconstruction, so
+the distortion is bounded below by the distortion-rate function of the source. For an independent Gaussian
+vector, reverse water-filling (Berger, 1971) gives, when the entry-level distortion D/g is below mini∈Gℓσ2
+i ,
+R(D) =
+X
+i∈Gℓ
+1/2 log2
+g σ2
+i
+D
+= g
+2 log2
+g v1/g
+ℓ
+D
+.
+(43)
+Setting R(D) ≤gbℓand solving for D,
+E
+rGℓ−Qℓ(rGℓ)
+2
+2 ≥g v1/g
+ℓ
+2−2bℓ.
+(44)
+The dependence on the partition is only through v1/g
+ℓ
+, so the fixed-rate argument of Sec. G.1 applies to this
+lower bound.
+H
+High-Resolution Model: Empirical Test
+High-resolution quantization theory is often used as a design principle for compressors deployed at finite rates
+(Sullivan and Wiegand, 1998). The accuracy of the approximation depends on whether the quantization cells
+are small relative to variations in the source density and distortion measure, which can hold even at modest
+nominal rates. We emphasize, in any case, that our results are asymptotic rather than finite-rate guarantees.
+We test, at and around the deployed rate, the specific predictions that determine our design.
+We focus on Theorem 2, which rests on the high-resolution distortion model (7),
+Dℓ(b) = Cg 2−2b vℓ(π)1/g,
+(45)
+while the method operates at b = 2, where the asymptotics are not guaranteed to hold. For a group Gℓof g
+transform entries, a partition π, and a rate b, we define the empirical distortion as
+bDℓ(b) = Etest
+h
+∥rGℓ−Qℓ(rGℓ)∥2
+2
+i
+.
+(46)
+We estimate this quantity using a 2gb-entry k-means codebook trained on training-split coefficients and
+evaluated on held-out coefficients. We vary b unless otherwise stated and set g = 4 (matching the deployed
+30
+
+
+method). Here Etest denotes the empirical mean over held-out coefficients, and bDℓ,train denotes the same
+estimate on the training split.
+We evaluate (45) using parameters estimated from the training data. The group volume is
+vℓ(π) =
+Y
+i∈Gℓ
+σ2
+i ,
+(47)
+where the coordinate variances σ2
+i are estimated on the training split. Let b0 = 2.5. We estimate the common
+constant once as
+bCg = 22b0 median
+ℓ
+
+bDℓ,train(b0)/vℓ(π)1/g
+,
+(48)
+where the median is taken over the groups of the equalizing partition and all tested (layer, KV head) pairs.
+We hold bCg fixed across all held-out rates, groups, and partitions. In the empirical comparison, we therefore
+evaluate
+Dℓ(b) = bCg 2−2b vℓ(π)1/g.
+(49)
+We also report the volume-normalized empirical distortion bDℓ(b)/vℓ(π)1/g, which the model predicts to be
+approximately common across groups at a given rate:
+Dℓ(b)/vℓ(π)1/g = bCg 2−2b.
+(50)
+Here the hat denotes an empirical estimate and is unrelated to the reconstruction notation of Appendix A.
+We test three predictions. First, at each rate, the volume-normalized distortions bDℓ(b)/vℓ(π)1/g should
+approximately agree across groups. Second, across rates, the volume-normalized distortion should follow the
+scaling 2−2b. Third, at the deployed rate b = 2, the measured total distortion PL
+ℓ=1 bDℓ(b) and the theoretical
+partition criterion PL
+ℓ=1 vℓ(π)1/g should order partitions in the same way.
+H.1
+Setup
+We used Qwen3-8B, Qwen3-4B-Thinking-2507, and Llama-3.1-8B post-RoPE keys at three (layer, KV head)
+pairs across the model depth (layer 1, head 0; layer 17, head 3; layer 35, head 7 for the Qwen3 models, and
+layer 1, head 0; layer 15, head 3; layer 31, head 7 for the 32-layer Llama-3.1-8B), giving 3 × L = 96 groups per
+partition per rate at d = 128, g = 4. Coefficients are r = (k −¯k)RK with the deployed transform. Per-token
+RMS normalization was off for this study; it isolates the unnormalized transform coefficients analyzed in
+Theorem 2. Throughout, b denotes the rate for the key branch in bits per entry. For Qwen3 we pooled three
+model captures (GPQA-198, MMLU, GPQA-32), each 8 sequences of 16384 tokens; examples 0-5 of each
+capture formed the training pool, from which we retained 218 −1 = 262143 coefficient vectors, and examples
+6-7 formed the held-out set (98304 tokens); the training and held-out sets contain disjoint sequences from
+each capture. For Llama-3.1-8B, we used a single LongBench capture of 80 variable-length prompts split 0-23
+/ 24-47 (262144 training, 98304 held-out vectors). Codebooks were initialized by sampling 2gb codewords
+uniformly without replacement from the training vectors, followed by 25 Lloyd iterations; empty cells were
+reseeded to the training points worst served by the current codebook. We consider rates b ∈{1.0, 1.5, 2.0, 2.5},
+i.e. 2gb ∈{16, 64, 256, 1024} codewords. In testing the partitions, we consider the three methods in Appendix A:
+equalizing (deployed), random, and variance-sorted.
+H.2
+Agreement across groups
+At each rate, dividing each group’s distortion by v1/g
+ℓ
+removes most of the variation across the 96 groups
+(Fig. 8a–b). The volume term accounts for the bulk of the per-group differences, which is the component of
+the model that the partition argument of Theorem 2 relies on.
+H.3
+Rate dependence
+We fit the generalized rate law 2−αb to the volume-normalized held-out distortions at b ∈{1, 1.5, 2, 2.5} and
+obtain α = 1.816 for Qwen3-8B, α = 1.828 for Qwen3-4B-Thinking-2507, and α = 1.878 for Llama-3.1-8B,
+31
+
+
+compared with the high-resolution value α = 2. If we compute the exponent between adjacent rates, which is
+more relevant for an asymptotic law, we obtain 1.796, 1.813, and 1.840 on held-out data for the intervals 1→1.5,
+1.5→2, and 2→2.5 on Qwen3-8B, increasing monotonically over the tested range, a trend consistent with
+approaching the asymptotic value 2. The fitted constants agree closely across the three models, bCg = 1.518,
+1.507, and 1.489 respectively, as expected for a quantity that should depend only on g and the source shape.
+As we observe in Fig. 8a, 8d, and 8g, with bCg estimated from training data at the top rate (b = 2.5), the
+measured and predicted curves are closest at that rate and separate toward lower rates.
+Because these distortions are measured on held-out coefficients, the reported deviation includes both finite-rate
+effects and any residual suboptimality of the trained vector quantizers; we do not attempt to separate these
+effects.
+H.4
+Partition comparison
+At b = 2, Table 13 shows the measured and predicted per-group distortion over the 96 groups for each
+partition. The predicted criterion ranks the three partitions in the same order as the held-out distortion, with
+the deployed equalizing partition performing best. The model is quantitatively accurate for the equalizing
+and random partitions, but overestimates the distortion of the variance-sorted partition by 81.5%.
+Table 13 Partition comparison at b = 2 for Qwen3-8B. Measured and predicted mean per-group distortion over 96
+groups. Predictions use (7) with bCg = 1.518.
+Partition
+Measured
+Predicted
+Pred./meas.
+Equalizing
+0.739
+0.803
+1.087
+Random
+0.941
+1.060
+1.125
+Variance-sorted
+2.610
+4.740
+1.815
+Residual dependence.
+We observe that our model provides worse predictions for the variance-sorted partition.
+Beyond existing finite-rate approximation errors, we argue that this effect is consistent with a stronger
+violation of the independent-Gaussian assumption. The transform decorrelates the entry at second order but
+does not make them independent; the sorted partition places adjacent entries together, and those groups
+exhibit substantially greater dependence as measured by Shannon total correlation TC = P
+j hj −hjoint
+(Table 14, Kozachenko–Leonenko k-NN joint-entropy estimates and m-spacing marginal estimates on training
+coefficients). We remark that total correlation indicates a violation of the independence assumption but does
+not quantify its effect on distortion. Finite-sample entropy estimates may yield slightly negative estimated
+total correlations, explaining why a reported mean can be below the corresponding median.
+Table 14 Total correlation per 4-coordinate group for Qwen3-8B on training coefficients.
+Grouping
+Mean
+Median
+q90
+Equalizing
+0.0290
+0.0647
+0.1077
+Random
+0.0419
+0.0643
+0.1488
+Sorted
+0.2284
+0.0906
+0.4488
+32
+
+
+1.0
+1.5
+2.0
+2.5
+Rate (BPE)
+0.1
+Ratio c
+Dℓ/v1/g
+ℓ
+Qwen3-8B
+(a) Rate scaling
+Model
+Median ± SE
+10 1
+100
+101
+Predicted Cg2−2bv1/g
+ℓ
+10 1
+100
+101
+Measured c
+Dℓ
+(b) Measured vs predicted
+±25%
+b = 1.5
+b = 2
+b = 2.5
+Equalizing
+Random
+Sorted
+0
+2
+4
+Distortion
+(c) Grouping
+Measured
+Predicted
+1.0
+1.5
+2.0
+2.5
+Rate (BPE)
+0.1
+Ratio c
+Dℓ/v1/g
+ℓ
+Qwen3-4B
+(d) Rate scaling
+Model
+Median ± SE
+10 1
+100
+101
+Predicted Cg2−2bv1/g
+ℓ
+10 1
+100
+101
+Measured c
+Dℓ
+(e) Measured vs predicted
+±25%
+b = 1.5
+b = 2
+b = 2.5
+Equalizing
+Random
+Sorted
+0
+2
+4
+6
+Distortion
+(f) Grouping
+Measured
+Predicted
+1.0
+1.5
+2.0
+2.5
+Rate (BPE)
+0.1
+Ratio c
+Dℓ/v1/g
+ℓ
+Llama-3.1-8B
+(g) Rate scaling
+Model
+Median ± SE
+10 1
+100
+101
+Predicted Cg2−2bv1/g
+ℓ
+10 1
+100
+101
+Measured c
+Dℓ
+(h) Measured vs predicted
+±25%
+b = 1.5
+b = 2
+b = 2.5
+Equalizing
+Random
+Sorted
+0.0
+0.5
+1.0
+1.5
+Distortion
+(i) Grouping
+Measured
+Predicted
+Figure 8 High-resolution model test, 96 groups pooled over three (layer, KV head) pairs of Qwen3-8B (a-c), Qwen3-4B-
+Thinking-2507 (d-f), and Llama-3.1-8B (g-i). (a, d) Median volume-normalized distortion bDℓ/v1/g
+ℓ
+against rate, with
+the model curve bCg2−2b tied to the median at b = 2.5; the curves are closest at the anchor and separate at low rate,
+where the local exponent is below 2. (b, e) Per-group measured distortion bDℓagainst the model Dℓat b ∈{1.5, 2, 2.5};
+the band is ±25% around the identity. (c, f) Measured and predicted per-group distortion for the three partitions at
+b = 2; the ordering is preserved.
+I
+Further evaluations
+RULER NIAH measures exact-match retrieval. To test whether the comparison transfers beyond that setting,
+we evaluate on two suites: LongBench (Sec. I.1), a multitask suite of QA, summarization, and code completion,
+and LooGLE (Sec. I.2), long-document QA and summarization with longer inputs and a larger item count.
+I.1
+LongBench
+We evaluate on LongBench (Bai et al., 2023) tasks (Qasper, QMSum, MultiNews, TREC, TriviaQA, SAMSum,
+LCC, RepoBench-P) using the full test sets (200 examples per task; 500 for LCC and RepoBench-P) and
+greedy decoding (default for this benchmark), so runs are deterministic. Prompt KV entries are quantized
+during prefill at 2.28 BPE for OSCAR and 2.22 BPE for NOVA-KV, while KV entries generated during
+decoding remain in BF16; layer 0 is kept in full precision for every arm. OSCAR and NOVA-KV differ only on
+the key quantizer: both share the same SQ value path. NOVA-KV transforms and codebooks are calibrated
+on the same GPQA-Diamond subset we used in the main paper.
+Qwen3-8B
+We let both OSCAR and NOVA-KV use the sink-plus-recent band (nsink=64, nrec=256). We
+also ablate the effect of this band: the half-band rows reduce it to nsink=32, nrec=128 for both methods.
+Since decoding is deterministic, we assess separability with a paired bootstrap over items (10000 resamples,
+33
+
+
+percentile 95% CIs); CIs on the mean row are computed by resampling items within each task and averaging
+the eight per-task means with equal weight, so each task counts 1/8 regardless of test-set size. Per-task
+intervals are uncorrected for multiple comparisons and are provided as descriptive analyses; the equal-weight
+average is the primary comparison.
+Table 15 LongBench scores per task for Qwen3-8B. Full band is (nsink, nrec) = (64, 256); half band is (32, 128). BF16
+is band-independent. Best compressed method per task and band setting in bold.
+Full band
+Half band
+Task
+BF16
+OSCAR
+NOVA-KV
+OSCAR
+NOVA-KV
+Qasper
+44.27
+43.72
+39.65
+41.63
+39.96
+QMSum
+24.67
+23.28
+23.72
+22.87
+23.58
+MultiNews
+24.92
+24.40
+23.70
+24.29
+23.34
+TREC
+41.50
+49.50
+46.00
+36.50
+50.00
+TriviaQA
+90.53
+87.85
+89.74
+88.35
+89.74
+SAMSum
+40.00
+39.75
+37.73
+39.78
+37.66
+LCC
+64.90
+60.79
+63.52
+60.83
+62.85
+RepoBench-P
+60.05
+50.93
+61.75
+49.87
+61.38
+Mean
+48.86
+47.53
+48.23
+45.52
+48.56
+Table 16 Paired bootstrap comparison, gap between NOVA-KV and OSCAR, per task and averaged. Entries are ∆
+with 95% CI; ∗marks CIs excluding zero.
+Task
+Full band
+Half band
+Qasper
+−4.07 [−7.63, −0.61]∗
+−1.67 [−5.73, 2.30]
+QMSum
++0.44 [−0.31, 1.17]
++0.71 [0.04, 1.40]∗
+MultiNews
+−0.70 [−1.12, −0.28]∗
+−0.95 [−1.39, −0.50]∗
+TREC
+−3.50 [−10.50, 3.50]
++13.50 [7.00, 20.50]∗
+TriviaQA
++1.90 [−0.77, 4.83]
++1.40 [−1.90, 4.75]
+SAMSum
+−2.02 [−3.36, −0.70]∗
+−2.12 [−3.57, −0.71]∗
+LCC
++2.73 [1.05, 4.41]∗
++2.02 [0.25, 3.80]∗
+RepoBench-P
++10.82 [8.51, 13.19]∗
++11.51 [9.13, 13.86]∗
+Average
++0.70 [−0.40, 1.79]
++3.05 [1.90, 4.20]∗
+Table 17 Paired bootstrap comparison against the BF16 reference, using equal-weight average over the eight tasks. ∗
+marks CIs excluding zero.
+Arm
+Average ∆
+95% CI
+OSCAR, full band
+−1.33
+[−2.33, −0.29]∗
+NOVA-KV, full band
+−0.63
+[−1.47, 0.26]
+OSCAR, half band
+−3.34
+[−4.40, −2.24]∗
+NOVA-KV, half band
+−0.29
+[−1.26, 0.65]
+LongBench contexts are shorter than the regime where the methods separate on RULER NIAH, so the
+differences in average score are small. First, against BF16 (Table 17), we detect no significant difference
+between NOVA-KV and the uncompressed reference at both band settings, while OSCAR is significantly
+below it at both. Second, at the full band, NOVA-KV’s +0.70 advantage over OSCAR in average score
+is not separable from zero (Table 16). Third, at the half band the average-score gap becomes separable
+(+3.05): halving the BF16 band costs OSCAR 2.0 points on average but leaves NOVA-KV almost unchanged,
+indicating that NOVA-KV is less dependent on protecting sink and recent tokens.
+GPT-OSS-20B.
+To check whether the OSCAR failure on GPT-OSS (cf. Sec. J.2) is specific to RULER NIAH’s
+exact-match retrieval, we separately evaluate the same eight LongBench tasks on GPT-OSS-20B using the
+34
+
+
+same configuration we used for Qwen3-8B (in this case, we use the full protection band, nsink = 64, nrec = 256).
+Table 18 reports every task. OSCAR collapses on every task (question answering, summarization, classification,
+and code completion alike) for a mean of 7.51 against BF16’s 36.76, an 80% relative drop. NOVA-KV stays
+within 7% of BF16 (34.24), consistent with the Qwen3-8B result in Table 15.
+Table 18 LongBench (Bai et al., 2023) scores per task for GPT-OSS-20B. Best compressed method per task in bold.
+Task
+BF16
+OSCAR
+NOVA-KV
+Qasper
+36.92
+4.84
+31.58
+QMSum
+19.62
+6.37
+19.32
+MultiNews
+20.64
+10.04
+18.89
+TREC
+17.00
+2.50
+11.00
+TriviaQA
+76.58
+2.67
+72.07
+SAMSum
+28.18
+3.22
+25.75
+LCC
+50.82
+17.57
+51.69
+RepoBench-P
+44.29
+12.84
+43.63
+Mean
+36.76
+7.51
+34.24
+I.2
+LooGLE
+We evaluate on LooGLE (Li et al., 2023) with Qwen3-8B (1101 items), scored by ROUGE-L, under the
+same serving configuration and band as the LongBench evaluation (Sec. I.1); decoding is greedy, so runs are
+deterministic. Separability is assessed with the same paired bootstrap over items (10000 resamples, percentile
+95% CIs).
+Table 19 LooGLE ROUGE-L for Qwen3-8B over n=1101 items, with paired bootstrap differences (95% CIs; ∗marks
+CIs excluding zero).
+Arm
+ROUGE-L
+BF16
+31.50
+OSCAR
+26.38
+NOVA-KV
+28.81
+Paired differences
+NOVA-KV −OSCAR
++2.43 [1.07, 3.78]∗
+NOVA-KV −BF16
+−2.69 [−3.79, −1.62]∗
+OSCAR −BF16
+−5.12 [−6.60, −3.69]∗
+Discussion.
+NOVA-KV scores 2.43 ROUGE-L above OSCAR, separable from zero, and 2.69 below the
+BF16 reference, roughly half of OSCAR’s 5.12-point degradation. Unlike on LongBench, where NOVA-
+KV was statistically indistinguishable from BF16, the larger item count in this dataset resolves all pairs.
+LooGLE complements RULER NIAH by measuring graded long-document QA and summarization rather
+than exact-match retrieval.
+J
+GPT-OSS-20B: Quantizing a Hybrid-Attention Cache
+As attention computation and KV-cache size become the dominant cost of long-context generation, recent
+architectures increasingly adopt hybrid designs in which only a fraction of the layers attend globally over
+the full context, and the remaining layers use a cheaper mechanism. The mechanism varies across models:
+sliding-window attention (Team et al., 2025; Agarwal et al., 2025), gated delta networks (Yang et al., 2025b),
+or state-space layers (Lieber et al., 2024). The consequence for KV quantization is the same in each case:
+only the global layers’ cache grows with context, so the cache that a quantizer sees is smaller, the information
+it holds is denser, and there is less redundancy, limiting potential compression gains. GPT-OSS-20B (Agarwal
+et al., 2025) is such a model and differs from Llama-3.1-8B and Qwen3-8B in every property relevant to KV
+35
+
+
+quantization (Table 20): only 12 of its 24 layers attend globally (the other 12 see a 128-token window), heads
+are half as wide, keys are not bounded by QK-norm, every head carries a learned sink logit that competes
+with tokens in the softmax, and the feed-forward blocks route each token to 4 of 32 experts. Its growing
+per-token cache is 5–6× smaller than the dense models’. We quantize only the 12 global-attention layers;
+the sliding-window layers stay BF16, since their cache is bounded by the window and does not grow with
+context. In this setting, NOVA-KV is the only 2-bit method (among the methods we tested) that remains
+effective (Table 2). This section describes the serving changes the architecture requires, analyzes why the
+scalar baselines fail, and measures the rate at which scalar quantization recovers.
+Table 20 Architecture properties relevant to KV quantization. “KV bytes/token” counts the BF16 cache that grows
+with context (global-attention layers).
+Llama-3.1 Qwen3-8B
+GPT-OSS
+layers (global / total)
+32 / 32
+36 / 36
+12 / 24
+sliding window
+–
+–
+128 (12 layers)
+head dim.
+128
+128
+64
+heads (Q / KV)
+32 / 8
+32 / 8
+64 / 8
+QK-norm
+no
+yes
+no
+attention sink
+no
+no
+learned
+feed-forward
+dense
+dense
+MoE (4 of 32)
+KV bytes/token
+131072
+147456
+24576
+J.1
+Attention sinks in the quantized serving path
+The learned sink enters the softmax as an extra logit per head that contributes to the normalizer but has no
+value vector. Three changes are required in the quantized read path.
+Split-KV normalization.
+In the two-stage decode kernel (Sec. B.5), each KV split reduces independently.
+The sink term exp(sh −m) is added to the normalizer exactly once, after the cross-split combine in stage 2,
+not per split.
+Mean centering and offset invariance.
+NOVA-KV stores centered keys and drops the constant q⊤¯k from
+the logits, which is harmless under a softmax (Lemma S1, Sec. F.1). With a sink the invariance fails: token
+logits carry the offset but the learned sink logit does not, so the sink’s softmax share would be rescaled by
+exp(q⊤¯k). The kernel therefore shifts the sink logit by the same per-query constant (one d-dimensional dot
+product per KV head per step), which restores exact equivalence.
+Chunked prefill.
+New chunks are scored against the dequantized prefix by a flash-attention kernel (Dao et al.,
+2022) with no sink support; its output and log-sum-exp are rescaled afterwards to fold the sink into the
+normalizer.
+J.2
+On the OSCAR and QuaRot failures
+On GPT-OSS-20B, OSCAR collapses on retrieval (Table 2) and QuaRot collapses on every task, while
+NOVA-KV stays within a few points of BF16 at the same rate. We test whether this is an integration artifact
+or a property of the model.
+Serving stack.
+We run the model under plain HuggingFace and overwrite the cache with the same codec the
+pool applies. On a 10-needle greedy retrieval probe at 1K context, GPT-OSS drops from 4 needles (its BF16
+control on this harness) to 1 with keys and values quantized, and to 0 with only keys quantized; Llama-3.1-8B
+retrieves 10 of 10 both in BF16 and with OSCAR under the identical procedure. Since the value-side OSCAR
+codec is shared with NOVA-KV, which is unaffected, the failure is specific to SQ of the keys.
+36
+
+
+Reconstruction fidelity.
+We measure the OSCAR codec on real captured keys and queries in four bases
+(Table 21). GPT-OSS keys reconstruct better than Llama’s in the served bases (9.1 vs. 8.2 dB in the Hadamard
+basis, 8.8 vs. 8.1 dB in the calibrated one), and the rows are not outlier-dominated there: the mean excess
+kurtosis of a key row is −0.3 on GPT-OSS and −0.1 on Llama in the calibrated basis (versus 20.8 and 7.2
+in the identity basis, where both models are heavy-tailed and both SNRs collapse). The same key error
+nevertheless produces 3.5–3.9× the relative attention-logit error on GPT-OSS, and the ratio persists across
+all four bases. The architecture concentrates all long-range information in 12 narrow-head layers, so each
+cached element carries more task information and the logits tolerate less noise: one scale per (token, head) at
+2 bits sits above GPT-OSS’s noise tolerance and below Llama’s. The MoE feed-forward adds an amplification
+path: the perturbed attention output enters the router, whose top-k selection is a discrete function of the
+hidden state. In a teacher-forced probe (24 decode steps at 1K context, production codec), KV quantization
+changed the top-4 expert set at 70% of (token, layer) router decisions, an error mode a dense feed-forward
+does not exhibit.
+Table 21 OSCAR key quantization on GPT-OSS-20B (G) and Llama-3.1-8B (L): reconstruction SNR of the keys
+and relative attention-logit error ∥q⊤(K −ˆK)∥/∥q⊤K∥, per basis. Post-RoPE keys and queries captured from GPQA
+prompts (4 prompts for the SNR statistics, 8 for the logit error), averaged over all quantized layers and KV heads;
+per-(token, head) scale with the production percentile clip (0.96). “Calibrated” is each model’s served rotation.
+Key SNR (dB)
+Logit error
+Basis
+G
+L
+G
+L
+calibrated
+8.8
+8.1
+0.64
+0.17
+Hadamard
+9.1
+8.2
+0.59
+0.16
+random
+–
+–
+0.69
+0.17
+identity
+3.0
+5.8
+0.89
+0.44
+QuaRot.
+The QuaRot rows in Table 2 already include the protective BF16 sink-plus-recent band and
+still sit at 0.0. Without the band, i.e. unclipped min–max QuaRot-INT2 on every token from position 0,
+GPT-OSS produces degenerate output at every prompt length we probed, from 90 to 8000 tokens (greedy
+completions; served and reproduced in the HuggingFace simulation), while Llama only degrades under the
+identical procedure. On this model the unclipped scalar codec has no usable operating point, with or without
+the band.
+J.3
+Scalar quantization recovers at higher rates
+If information density is the correct explanation, a modest amount of additional rate should restore the scalar
+codec. We simulate the OSCAR codec bit-exactly on the write path of a BF16 server (values are dequantized
+before storage; no memory is saved, and every token is quantized) and vary the rate (Table 22). One additional
+bit takes the codec from collapse to functional, and 4 bits matches BF16 on retrieval. Finer scale granularity
+at 2 bits does not substitute, despite a higher rate than INT3: the deficit is resolution per coordinate, not
+outlier range. NOVA-KV reaches the required fidelity at 2.22 BPE through vector quantization (NIAH-8K
+89.6, Table 2), consistent with the main-text result that, among the techniques we tested, it is the only 2-bit
+method that remains effective on this model.
+37
+
+
+Table 22 Scalar (OSCAR-codec) rate ladder on GPT-OSS-20B, simulated bit-exactly in serving. “Bits” is the payload
+width of every stored key and value coordinate; “groups” is the number of min–max scale/zero-point pairs per (token,
+head) row of d=64 coordinates (1 is the served configuration). Single greedy rollout; NIAH-8K on the 200-prompt
+balanced subset (25 per subtask), MATH-500 on 100 prompts. BPE charges BF16 scale and zero-point per group
+(b + 0.5g).
+Bits
+Groups
+BPE
+NIAH-8K
+MATH-500
+2
+1
+2.5
+0.8
+4
+2
+4
+4.0
+27.0
+15
+3
+1
+3.5
+82.8
+73
+4
+1
+4.5
+98.3
+85
+BF16
+16
+99.0
+92
+K
+A Chunked-Prefill Dequantization Leak
+Long prompts are prefilled in chunks rather than in one pass, bounding peak prefill memory and letting the
+scheduler interleave a long prompt’s prefill with other requests’ decoding. In a mixed-precision KV pool, each
+chunk’s keys and values are quantized as they are written, so a later chunk of the same prompt attends over
+earlier chunks’ dequantized rows instead of their original values – a leak that single-pass prefill does not have.
+The leak can be closed by keeping an exact copy of a request’s own in-flight rows until its final chunk completes,
+after which cached content matches the quantized-on-write baseline exactly. This is not free: while a request’s
+own prefill is in progress, its in-flight rows occupy close to BF16-sized cache rather than the compressed
+footprint, trading part of the memory saving for correctness during that window.
+Table 23 reports RULER NIAH with the leak present and closed. It is real and grows with context (Llama
+OSCAR: +4.5 at 8K, +16.6 at 128K), and closing it recovers most of the gap for NOVA-KV and for Llama’s
+OSCAR. GPT-OSS’s OSCAR does not recover: 2–11 across all five lengths versus a floor of 0 with the leak
+present. The leak is real but does not explain the collapse (Sec. J.2).
+Table 23 RULER NIAH accuracy with the chunked-prefill leak present →closed. One seed, 25 prompts per NIAH
+subtask (200 total). OSCAR and NOVA-KV on GPT-OSS-20B, and, as a control, Llama-3.1-8B.
+GPT-OSS-20B
+Llama-3.1-8B
+Length
+OSCAR
+NOVA-KV
+OSCAR
+NOVA-KV
+8K
+0.50 →11.38
+89.75 →92.75
+82.25 →86.75
+92.88 →95.00
+16K
+0.00 →4.50
+79.62 →92.75
+78.62 →86.12
+91.75 →94.50
+32K
+0.00 →2.38
+80.00 →90.62
+80.50 →86.38
+88.62 →93.25
+64K
+0.00 →4.25
+69.25 →85.00
+74.38 →85.12
+87.25 →93.38
+128K
+0.00 →2.00
+54.50 →67.88
+31.12 →47.75
+54.25 →65.75
+References
+Sandhini Agarwal, Lama Ahmad, Jason Ai, Sam Altman, Andy Applebaum, Edwin Arbus, Rahul K Arora, Yu Bai,
+Bowen Baker, Haiming Bao, et al. gpt-oss-120b & gpt-oss-20b model card. arXiv preprint arXiv:2508.10925, 2025.
+Joshua Ainslie, James Lee-Thorp, Michiel De Jong, Yury Zemlyanskiy, Federico Lebrón, and Sumit Sanghai. Gqa:
+Training generalized multi-query transformer models from multi-head checkpoints. In Proceedings of the 2023
+Conference on Empirical Methods in Natural Language Processing, pages 4895–4901, 2023.
+Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alistarh,
+Torsten Hoefler, and James Hensman. Quarot: Outlier-free 4-bit inference in rotated llms. Advances in Neural
+Information Processing Systems, 37:100213–100240, 2024.
+Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan
+Zeng, Lei Hou, et al. Longbench: A bilingual, multitask benchmark for long context understanding. arXiv preprint
+arXiv:2308.14508, 2023.
+38
+
+
+Toby Berger. Rate Distortion Theory: A Mathematical Basis for Data Compression. Prentice-Hall, Englewood Cliffs,
+NJ, 1971.
+Zhihang Cai, Xingjun Zhang, Zhendong Tan, and Zheng Wei. Nqkv: A kv cache quantization scheme based on normal
+distribution characteristics. arXiv preprint arXiv:2505.16210, 2025.
+Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and Christopher M De Sa. Quip: 2-bit quantization of large language
+models with guarantees. Advances in neural information processing systems, 36:4396–4429, 2023.
+Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde De Oliveira Pinto, Jared Kaplan, Harri
+Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, et al. Evaluating large language models trained on code.
+arXiv preprint arXiv:2107.03374, 2021.
+Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: Fast and memory-efficient exact
+attention with io-awareness. Advances in neural information processing systems, 35:16344–16359, 2022.
+Alessio Devoto, Maximilian Jeblick, and Simon Jégou. Expected attention: Kv cache compression by estimating
+attention from future queries distribution. arXiv preprint arXiv:2510.00636, 2025.
+Ky Fan. On a theorem of weyl concerning eigenvalues of linear transformations i. Proceedings of the National Academy
+of Sciences, 35(11):652–655, 1949.
+Bolin Gao and Lacra Pavel. On the properties of the softmax function with application in game theory and reinforcement
+learning. arXiv preprint arXiv:1704.00805, 2017.
+Michael R Garey and David S Johnson. Computers and intractability, volume 29. wh freeman New York, 2002.
+Allen Gersho and Robert M. Gray.
+Vector Quantization and Signal Compression, volume 159 of The Springer
+International Series in Engineering and Computer Science. Springer New York, New York, NY, 1992. ISBN
+978-0-7923-9181-4. doi: 10.1007/978-1-4615-3626-0.
+Benjamin Girault, Antonio Ortega, and Shrikanth S Narayanan. Irregularity-aware graph fourier transforms. IEEE
+Transactions on Signal Processing, 66(21):5746–5761, 2018.
+Vivek K Goyal. Theoretical foundations of transform coding. IEEE Signal Processing Magazine, 18(5):9–21, 2001.
+Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha
+Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, et al.
+The llama 3 herd of models.
+arXiv preprint
+arXiv:2407.21783, 2024.
+Robert Gray and DL Neuhoff. Quantization. IEEE transactions on information theory, 44(6):2325–2383, 2002.
+Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob
+Steinhardt. Measuring mathematical problem solving with the math dataset. arXiv preprint arXiv:2103.03874, 2021.
+Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W Mahoney, Yakun S Shao, Kurt Keutzer, and Amir
+Gholami. Kvquant: Towards 10 million context length llm inference with kv cache quantization. Advances in Neural
+Information Processing Systems, 37:1270–1303, 2024.
+Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shantanu Acharya, Dima Rekesh, Fei Jia, Yang Zhang, and Boris
+Ginsburg. Ruler: What’s the real context size of your long-context language models? arXiv preprint arXiv:2404.06654,
+2024.
+Naman Jain, Alex Gu, Wen-Ding Li, Fanjia Yan, Tianjun Zhang, Sida Wang, Armando Solar-Lezama, Koushik Sen,
+and Ion Stoica. Livecodebench: Holistic and contamination free evaluation of large language models for code. In
+International Conference on Learning Representations, volume 2025, pages 58791–58831, 2025.
+Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang,
+and Ion Stoica. Efficient memory management for large language model serving with pagedattention. In Proceedings
+of the 29th symposium on operating systems principles, pages 611–626, 2023.
+Jiaqi Li, Mengmeng Wang, Zilong Zheng, and Muhan Zhang. Loogle: Can long-context language models understand
+long contexts? arXiv preprint arXiv:2311.04939, 2023.
+Junyan Li, Yang Zhang, Muhammad Yusuf Hassan, Talha Chafekar, Tianle Cai, Zhile Ren, Pengsheng Guo, Foroozan
+Karimzadeh, Chong Wang, and Chuang Gan. Commvq: Commutative vector quantization for kv cache compression.
+arXiv preprint arXiv:2506.18879, 2025.
+39
+
+
+Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis,
+and Deming Chen. Snapkv: Llm knows what you are looking for before generation. Advances in Neural Information
+Processing Systems, 37:22947–22970, 2024.
+Opher Lieber, Barak Lenz, Hofit Bata, Gal Cohen, Jhonathan Osin, Itay Dalmedigos, Erez Safahi, Shaked Meirom,
+Yonatan Belinkov, Shai Shalev-Shwartz, et al. Jamba: A hybrid transformer-mamba language model. arXiv preprint
+arXiv:2403.19887, 2024.
+Hunter Lightman, Vineet Kosaraju, Yuri Burda, Harrison Edwards, Bowen Baker, Teddy Lee, Jan Leike, John
+Schulman, Ilya Sutskever, and Karl Cobbe. Let’s verify step by step. In International Conference on Learning
+Representations, volume 2024, pages 39578–39601, 2024.
+Tamás Linder, Ram Zamir, and Kenneth Zeger. High-resolution source coding for non-difference distortion measures:
+Multidimensional companding. IEEE Transactions on Information Theory, 45(2):548–561, 1999.
+Aixin Liu, Bei Feng, Bin Wang, Bingxuan Wang, Bo Liu, Chenggang Zhao, Chengqi Dengr, Chong Ruan, Damai
+Dai, Daya Guo, et al. Deepseek-v2: A strong, economical, and efficient mixture-of-experts language model. arXiv
+preprint arXiv:2405.04434, 2024a.
+Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghuraman Krishnamoorthi, Vikas
+Chandra, Yuandong Tian, and Tijmen Blankevoort. Spinquant: Llm quantization with learned rotations. In
+International Conference on Learning Representations, volume 2025, pages 92009–92032, 2025.
+Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu.
+Kivi: A tuning-free asymmetric 2bit quantization for kv cache. arXiv preprint arXiv:2402.02750, 2024b.
+Stuart Lloyd. Least squares quantization in pcm. IEEE transactions on information theory, 28(2):129–137, 1982.
+Tom D Lookabaugh and Robert M Gray. High-resolution quantization theory and the vector quantizer advantage.
+IEEE Transactions on Information Theory, 35(5):1020–1033, 1989.
+Mathematical Association of America. AIME 2025: American invitational mathematics examination. https://maa.
+org/math-competitions/aime, 2025.
+Reiner Pope, Sholto Douglas, Aakanksha Chowdhery, Jacob Devlin, James Bradbury, Jonathan Heek, Kefan Xiao,
+Shivani Agrawal, and Jeff Dean. Efficiently scaling transformer inference. Proceedings of machine learning and
+systems, 5:606–624, 2023.
+David Rein, Betty Li Hou, Asa Cooper Stickland, Jackson Petty, Richard Yuanzhe Pang, Julien Dirani, Julian Michael,
+and Samuel R Bowman. Gpqa: A graduate-level google-proof q&a benchmark. arXiv preprint arXiv:2311.12022,
+2023.
+Ranajoy Sadhukhan, Jian Chen, Zhuoming Chen, Vashisth Tiwari, Ruihang Lai, Jinyuan Shi, Ian Yen, Avner May,
+Tianqi Chen, and Beidi Chen. Magicdec: Breaking the latency-throughput tradeoff for long context generation with
+speculative decoding. In International Conference on Learning Representations, volume 2025, pages 6835–6850,
+2025.
+Noam Shazeer. Fast transformer decoding: One write-head is all you need. arXiv preprint arXiv:1911.02150, 2019.
+Ying Sheng, Lianmin Zheng, Binhang Yuan, Zhuohan Li, Max Ryabinin, Beidi Chen, Percy Liang, Christopher Ré,
+Ion Stoica, and Ce Zhang. Flexgen: High-throughput generative inference of large language models with a single
+gpu. In International Conference on Machine Learning, pages 31094–31116. PMLR, 2023.
+Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan, Wen Bo, and Yunfeng Liu. Roformer: Enhanced transformer
+with rotary position embedding. Neurocomputing, 568:127063, 2024.
+Zunhai Su, Zhe Chen, Wang Shen, Hanyu Wei, Linge Li, Huangqi Yu, and Kehong Yuan. Rotatekv: Accurate and
+robust 2-bit kv cache quantization for llms via outlier-aware adaptive rotations. arXiv preprint arXiv:2501.16383,
+2025.
+Gary J Sullivan and Thomas Wiegand. Rate-distortion optimization for video compression. IEEE signal processing
+magazine, 15(6):74–90, 1998.
+Gemma Team, Aishwarya Kamath, Johan Ferret, Shreya Pathak, Nino Vieillard, Ramona Merhej, Sarah Perrin,
+Tatiana Matejovicova, Alexandre Ramé, Morgane Rivière, Louis Rouillard, Thomas Mesnard, Geoffrey Cideron,
+Jean bastien Grill, Sabela Ramos, Edouard Yvinec, Michelle Casbon, Etienne Pot, Ivo Penchev, Gaël Liu, Francesco
+Visin, Kathleen Kenealy, Lucas Beyer, Xiaohai Zhai, Anton Tsitsulin, Robert Busa-Fekete, Alex Feng, Noveen
+Sachdeva, Benjamin Coleman, Yi Gao, Basil Mustafa, Iain Barr, Emilio Parisotto, David Tian, Matan Eyal, Colin
+40
+
+
+Cherry, Jan-Thorsten Peter, Danila Sinopalnikov, Surya Bhupatiraju, Rishabh Agarwal, Mehran Kazemi, Dan
+Malkin, Ravin Kumar, David Vilar, Idan Brusilovsky, Jiaming Luo, Andreas Steiner, Abe Friesen, Abhanshu Sharma,
+Abheesht Sharma, Adi Mayrav Gilady, Adrian Goedeckemeyer, Alaa Saade, Alex Feng, Alexander Kolesnikov, Alexei
+Bendebury, Alvin Abdagic, Amit Vadi, András György, André Susano Pinto, Anil Das, Ankur Bapna, Antoine Miech,
+Antoine Yang, Antonia Paterson, Ashish Shenoy, Ayan Chakrabarti, Bilal Piot, Bo Wu, Bobak Shahriari, Bryce
+Petrini, Charlie Chen, Charline Le Lan, Christopher A. Choquette-Choo, CJ Carey, Cormac Brick, Daniel Deutsch,
+Danielle Eisenbud, Dee Cattle, Derek Cheng, Dimitris Paparas, Divyashree Shivakumar Sreepathihalli, Doug Reid,
+Dustin Tran, Dustin Zelle, Eric Noland, Erwin Huizenga, Eugene Kharitonov, Frederick Liu, Gagik Amirkhanyan,
+Glenn Cameron, Hadi Hashemi, Hanna Klimczak-Plucińska, Harman Singh, Harsh Mehta, Harshal Tushar Lehri,
+Hussein Hazimeh, Ian Ballantyne, Idan Szpektor, Ivan Nardini, Jean Pouget-Abadie, Jetha Chan, Joe Stanton, John
+Wieting, Jonathan Lai, Jordi Orbay, Joseph Fernandez, Josh Newlan, Ju yeong Ji, Jyotinder Singh, Kat Black,
+Kathy Yu, Kevin Hui, Kiran Vodrahalli, Klaus Greff, Linhai Qiu, Marcella Valentine, Marina Coelho, Marvin Ritter,
+Matt Hoffman, Matthew Watson, Mayank Chaturvedi, Michael Moynihan, Min Ma, Nabila Babar, Natasha Noy,
+Nathan Byrd, Nick Roy, Nikola Momchev, Nilay Chauhan, Noveen Sachdeva, Oskar Bunyan, Pankil Botarda, Paul
+Caron, Paul Kishan Rubenstein, Phil Culliton, Philipp Schmid, Pier Giuseppe Sessa, Pingmei Xu, Piotr Stanczyk,
+Pouya Tafti, Rakesh Shivanna, Renjie Wu, Renke Pan, Reza Rokni, Rob Willoughby, Rohith Vallu, Ryan Mullins,
+Sammy Jerome, Sara Smoot, Sertan Girgin, Shariq Iqbal, Shashir Reddy, Shruti Sheth, Siim Põder, Sijal Bhatnagar,
+Sindhu Raghuram Panyam, Sivan Eiger, Susan Zhang, Tianqi Liu, Trevor Yacovone, Tyler Liechty, Uday Kalra,
+Utku Evci, Vedant Misra, Vincent Roseberry, Vlad Feinberg, Vlad Kolesnikov, Woohyun Han, Woosuk Kwon,
+Xi Chen, Yinlam Chow, Yuvein Zhu, Zichuan Wei, Zoltan Egyed, Victor Cotruta, Minh Giang, Phoebe Kirk, Anand
+Rao, Kat Black, Nabila Babar, Jessica Lo, Erica Moreira, Luiz Gustavo Martins, Omar Sanseviero, Lucas Gonzalez,
+Zach Gleicher, Tris Warkentin, Vahab Mirrokni, Evan Senter, Eli Collins, Joelle Barral, Zoubin Ghahramani, Raia
+Hadsell, Yossi Matias, D. Sculley, Slav Petrov, Noah Fiedel, Noam Shazeer, Oriol Vinyals, Jeff Dean, Demis Hassabis,
+Koray Kavukcuoglu, Clement Farabet, Elena Buchatskaya, Jean-Baptiste Alayrac, Rohan Anil, Dmitry, Lepikhin,
+Sebastian Borgeaud, Olivier Bachem, Armand Joulin, Alek Andreev, Cassidy Hardin, Robert Dadashi, and Léonard
+Hussenot. Gemma 3 technical report, 2025. https://arxiv.org/abs/2503.19786.
+Philippe Tillet, Hsiang-Tsung Kung, and David Cox. Triton: an intermediate language and compiler for tiled neural
+network computations. In Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and
+Programming Languages, pages 10–19, 2019.
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia
+Polosukhin. Attention is all you need. Advances in neural information processing systems, 30, 2017.
+Samuel Williams, Andrew Waterman, and David Patterson. Roofline: an insightful visual performance model for
+multicore architectures. Communications of the ACM, 52(4):65–76, 2009.
+Haojun Xia, Xiaoxia Wu, Jisen Li, Robert Wu, Junxiong Wang, Jue Wang, Chenxi Li, Aman Singhal, Alay Dilipbhai
+Shah, Alpay Ariyak, et al. Kitty: Accurate and efficient 2-bit kv cache quantization with dynamic channel-wise
+precision boost. arXiv preprint arXiv:2511.18643, 2025.
+Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. Efficient streaming language models with
+attention sinks. In International Conference on Learning Representations, volume 2024, pages 21875–21895, 2024.
+An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang,
+Chenxu Lv, et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388, 2025a.
+Songlin Yang, Jan Kautz, and Ali Hatamizadeh. Gated delta networks: Improving mamba2 with delta rule. In
+International Conference on Learning Representations, volume 2025, pages 29687–29707, 2025b.
+Paul Zador. Asymptotic quantization error of continuous signals and the quantization dimension. IEEE Transactions
+on Information Theory, 28(2):139–149, 1982.
+Amir Zandieh, Majid Daliri, Majid Hadian, and Vahab Mirrokni. Turboquant: Online vector quantization with
+near-optimal distortion rate. arXiv preprint arXiv:2504.19874, 2025.
+Tianyi Zhang, Jonah Yi, Zhaozhuo Xu, and Anshumali Shrivastava. Kv cache is 1 bit per channel: Efficient large
+language model inference with coupled quantization. Advances in Neural Information Processing Systems, 37:
+3304–3331, 2024.
+Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian,
+Christopher Ré, Clark Barrett, et al. H2o: Heavy-hitter oracle for efficient generative inference of large language
+models. Advances in Neural Information Processing Systems, 36:34661–34710, 2023.
+41
+
+
+Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody H Yu, Shiyi Cao, Christos Kozyrakis,
+Ion Stoica, Joseph E Gonzalez, et al. Sglang: Efficient execution of structured language model programs. Advances
+in neural information processing systems, 37:62557–62583, 2024.
+Zhongzhu Zhou, Donglin Zhuang, Jisen Li, Ziyan Chen, Shuaiwen Leon Song, Ben Athiwaratkun, and Xiaoxia Wu.
+Oscar: Offline spectral covariance-aware rotation for 2-bit kv cache quantization. arXiv preprint arXiv:2605.17757,
+2026.
+42

@@ -1,0 +1,1841 @@
+Title: FluxBin: Flexible LUT-based Ultra-low-bit LLM Inference by Algorithm-Kernel Synergy
+
+URL Source: https://arxiv.org/pdf/2608.15602v1
+
+Published Time: Tue, 18 Aug 2026 01:18:36 GMT
+
+Number of Pages: 24
+
+Markdown Content:
+## FluxBin: Flexible LUT-based Ultra-low-bit LLM Inference by Algorithm-Kernel Synergy 
+
+Qingyao Yang 1, Runming Yang 1, He Xiao 1, Wendong Xu 1,Junyu Chen 1, Haobo Liu 1, Chenchen Ding 1, Ruihan Hu 2, Yik-Chung Wu 1, Ngai Wong 1
+
+> 1
+
+The University of Hong Kong, 2Harbin Institute of Technology  
+
+> Correspondence: nwong@eee.hku.hk
+
+Abstract 
+
+While binary quantization theoretically promises extreme compression and acceler-ation for Large Language Models (LLMs), existing research often overlooks the necessity of specialized hardware kernels, thus failing to unleash the full acceleration potential due to persistent reliance on expensive floating-point arithmetic or runtime dequantization over-heads. To bridge this gap, we propose FluxBin (Flexible LUT-based Ultra-low-bit e Xecution with Bin ary bases), an algorithm-kernel co-design that synergizes post-training quanti-zation with a highly optimized CUDA kernel. Algorithmically, we introduce Decoupled Row-Column Binary Decomposition to enhance representational capacity while maintaining hardware efficiency, complemented by aHessian-guided saliency-aware hybrid bases that preserve critical information. At the kernel level, we implement a Lookup Table Building Approach with Scale Fusion to reduce floating-point arithmetic, featuring a Virtual Columnar Mapping that transforms irregular, sparse, and salient matrices into dense execution. Extensive evaluations demon-strate FluxBin achieves up to 5.92 × speedup and 10 .19 × energy savings across diverse model architectures, delivering comparable accuracy to heavily fine-tuned methods. This effectively enables the deployment of 70B-scale models on one single A100 GPU with a 4× memory reduction. Code is available at https://github.com/nicyyyy/FluxBin .
+
+1 Introduction 
+
+While Large Language Models (LLMs) demon-strate unprecedented capabilities (Brown et al., 2020; Touvron et al., 2023), their massive scale imposes severe storage and bandwidth con-straints (Yang et al., 2025). Post-Training Quan-tization (PTQ) (Frantar et al., 2022a; Lin et al., 2025; Xiao et al., 2025) has thus emerged as a standard solution for reducing bit-width without retraining. Among these strategies, binary quanti-zation ( ?Rastegari et al.) pushes compression to the limit, offering maximal theoretical efficiency. To mitigate the inherent accuracy degradation of 1-bit representations, recent works like QBB (Bulat et al., 2024), PTQTP (Xiao et al., 2026), and DB-LLM (Chen et al., 2024) adopt multi-binary base quantization, which approximates weights as com-binations of binary matrices to recover representa-tional capacity. However, despite this theoretical promise and improved fidelity, existing approaches still struggle to translate binary representations into practical end-to-end inference speedups. 
+
+Limitation 1: Failure to exploit multiplica-tion free hardware potential. While binary rep-resentations theoretically allow replacing expen-sive floating-point operations with efficient bitwise logic, most current binary quantization methods fail to translate this into practical end-to-end accelera-tion. Methods such as BiLLM (Huang et al., 2024), ARB-LLM (Li et al., 2024) and HB-LLM (Ningn-ing Chen, 2025) etc. often prioritize algorithmic fidelity (e.g., simulated quantization) and rely on dequantization to FP16 during inference, leaving the hardware advantages of bitwise computation largely untapped. 
+
+Limitation 2: Trade-off between saliency granularity and hardware efficiency. Current strategies fail to balance fine-grained preserva-tion with execution efficiency. Unstructured meth-ods (Shang et al., 2023; Dettmers et al., 2024; Li et al., 2023) suffer from irregular memory access and metadata overhead due to element-wise spar-sity. Conversely, coarse-grained approaches like SLiM-LLM (Huang et al., 2025) promote entire groups to maintain structure, causing bit redun-dancy by unnecessarily preserving non-salient el-ements at high precision. Thus, a strategy that achieves fine-grained saliency adaptation and hard-ware efficiency remains absent. 
+
+Limitation 3: Implementation inefficiencies arXiv:2608.15602v1 [cs.LG] 16 Aug 2026 in low-bit kernels. The autoregressive generation phase of LLMs is intrinsically memory-bound, re-stricting hardware throughput even with INT8 pre-cision (Markidis et al., 2018). Although recent W4A16 quantization methods (Zeng et al., 2023; Frantar et al., 2022a) mitigate memory bottlenecks by compressing weights, they introduce significant runtime overhead due to dynamic dequantization, as weights must be converted to FP16 before ma-trix multiplication, which does not truly exploit the addition operation properties during inference. Look-Up Tables (LUT) (Park et al., 2024; Tang et al., 2023; Jeon et al., 2020; Lee et al., 2019; Maleki, 2023) theoretically offer a multiplication-free alternative by replacing arithmetic with mem-ory lookups. Existing LUT kernels fail to handle the irregular memory access introduced by mixed-precision, and struggle to achieve high performance and low latency in ultra-low bit PTQ settings. To address the aforementioned limitations simultaneously and bridge the gap between ideal model compression schemes and real-world hardware inference efficiency. We propose FluxBin, an algorithm-kernel co-designed frame-work that works in tandem with flexible and high-performance PTQ method and CUDA kernels. At the algorithm level , to reconcile binary efficiency with capacity, we propose Decoupled Row-Column Binary Decomposition for fine-grained distribution capture. Then, our Hessian-guided Salient-Aware Hybrid Bases (mixed precision) preserve fidelity by selectively allocating additional bases to crit-ical features. Besides, the proposed method is pure PTQ without any fine-tuning (Dettmers et al., 2023) or distillation (Polino et al., 2018; Jacob et al., 2018). At the kernel level , our LUT Build-ing with Scale Fusion (LUT-BSF) reduces floating-point overhead in LUT building. Complementing this, Virtual Columnar Mapping (VCM) converts sparse salient columns into dense storage, enabling unified execution for hybrid branches. Our contri-butions are: • FluxBin entails a pure PTQ framework, with decoupled row-column binary base and Hessian-guided hybrid base. This maintains the hardware efficiency and competitive accu-racy. • FluxBin designs a highly optimized LUT-based CUDA kernel with LUT-BSF and VCM strategy. This synergy enables high-fidelity hybrid precision and turns binary based PTQ into real inference advantage. • FluxBin bridges the algorithm-kernel gap through a custom LUT-based kernel that by-passes de-quantization overhead, converting multiplication-free logic into practical accel-eration. It achieves up to 5.92 × speedup and 
+
+10 .19 × energy saving. 
+
+2 Related Work 
+
+Binary Quantization. Standard binary quantiza-tion aims to approximate a full-precision weight matrix W ∈ RM ×N using a binary matrix B ∈{− 1, +1 }M ×N scaled by a floating-point factor 
+
+α ∈ R (Qin et al., 2023). The optimization objec-tive is to minimize the reconstruction error under the Frobenius norm:     
+
+> min
+> α,B∥W−αB∥2
+> F(1)
+
+The optimal solution to Eq. (1) typically yields 
+
+B = sign (W) and α = 1 
+
+> M N
+
+∥W∥1, as derived in prior works like XNOR-Net (Rastegari et al.). Re-garding the representative works, ARB-LLM (Li et al., 2024) introduces column-wise grouping and alternating refined binarization. HB-LLM (Ningn-ing Chen, 2025) applies distinct binarization strate-gies to frequency components separated by wavelet decomposition. 
+
+Binary Base Approximation. Since a single binary basis (1-bit) has limited representation ca-pacity, high order binary base quantization methods approximate W using K binary bases:    
+
+> W≈
+> KX
+> k=1
+> αkB(k)(2)
+
+To minimize this quantization error, LQ-Nets (Zhang et al., 2018) proposes to jointly train the quantization basis and the binary encodings. This allows for an arbitrary basis that better fits the data distribution. Approaches such as QBB (Bulat et al., 2024) solve this via a greedy residual strategy. Let R(0) = W. At the k-th step, parameters are optimized to approximate the current residual, up-dating R(k) = R(k−1) − αkB(k). DB-LLM (Chen et al., 2024) approximates weights by primary and secondary residual binary base to refine the quanti-zation errors. 
+
+LUT-based Multiplication. Standard matrix-vector multiplication (MVM) with binary weights 
+
+B ∈ {− 1, +1 }M ×N often incurs significant com-putational redundancy. As illustrated in Figure 1(a), (a) Redundant Partial Computations                                         
+
+> 𝑿 = 𝒙 𝟏 𝒙 𝟐 𝒙 𝟑 𝒙 𝟒 𝒙 𝟓 𝒙 𝟔
+> +𝟏 +𝟏 −𝟏 −𝟏 −𝟏 +𝟏 +𝟏 +𝟏 −𝟏 +𝟏 +𝟏 −𝟏 +𝟏 +𝟏 −𝟏 −𝟏 −𝟏 −𝟏 −𝟏 −𝟏 +𝟏 −𝟏 −𝟏 +𝟏 (𝒙 𝟏 + 𝒙 𝟐 − 𝒙 𝟑 )3 x 2 x (−𝒙 𝟒 − 𝒙 𝟓 + 𝒙 𝟔 )𝑿𝑩 𝑻
+> (𝒙 𝟏 + 𝒙 𝟐 + 𝒙 𝟑 )(𝒙 𝟏 + 𝒙 𝟐 − 𝒙 𝟑 )(𝒙 𝟏 − 𝒙 𝟐 + 𝒙 𝟑 )(𝒙 𝟏 − 𝒙 𝟐 − 𝒙 𝟑 )
+
+(b) Binary Weight as Read Address           
+
+> 0x0 0x1 0x2 0x3 0x4 0x5 0x6 0x7
+> (−𝒙 𝟏 + 𝒙 𝟐 + 𝒙 𝟑 )(−𝒙 𝟏 + 𝒙 𝟐 − 𝒙 𝟑 )(−𝒙 𝟏 − 𝒙 𝟐 + 𝒙 𝟑 )(−𝒙 𝟏 − 𝒙 𝟐 − 𝒙 𝟑 )
+> ADDR
+> 0x0
+> Value ADDR Value
+> 𝑩 :,*:+
+> 𝑿𝑩 :,*:+ 𝑻
+> 𝑩 =
+
+LUT Figure 1: Illustration of LUT-based Multiplication. 
+
+identical weight sub-patterns (e.g., [+1 , +1 , −1] )frequently repeat across different rows. Conse-quently, the dot product for the same input sub-vector is calculated multiple times redundantly. To address this, LUT-GEMM (Park et al., 2024) proposes replacing arithmetic operations with ef-ficient memory lookups. The input dimension is partitioned into sub-vectors of size μ (e.g., μ = 3 in the figure). For each input sub-vector Xsub , all 2μ
+
+possible linear combinations are pre-computed and stored in a LUT. As shown in Figure 1(b), during inference, the μ-bit binary weight pattern serves directly as the memory address to fetch the pre-computed partial sum, which is much faster than carrying out the original calculations (Xu et al., 2022; Jeon et al., 2020). Furthermore, recent work LUT Tensor Core (Mo et al., 2025) introduced an instruction set, with an elaborated precompute and tiling strategy, to build LUT-based accelerators. While LUT-GEMM provides an efficient kernel for uniform quantization, it does not provide PTQ algo-rithm adaptation, mixed-precision configurations, or end-to-end inference pipelines. 
+
+3 Methodology 
+
+3.1 FluxBin Quantization 
+
+We present the mathematical formulation of FluxBin quantization, visualized in Figure 2, and the pseudo-code of this quantization method is de-scribed in Sec. B. 
+
+Decoupled Row-Column Binary Bases. We approximate dense weights W ∈ RM ×N via lin-ear combinations of binary bases. Distinct from prior row-scaling-only methods, we incorporate column-wise scaling to capture anisotropic weight distributions. 
+
+Definition 3.1 (Row-Column Binary Decomposi-tion) . For decomposition order k, the approxima-tion ˆW(k) is defined as the Hadamard product of scaling vectors and a binary base: 
+
+ˆW(k) = ( α(k) 
+
+> r
+
+α(k)⊤ 
+
+> c
+
+) ⊙ B(k) (3) 
+
+where B(k) ∈ {− 1, +1 }M ×N is the binary base, and α(k) 
+
+> r
+
+∈ RM , α(k) 
+
+> c
+
+∈ RN denote the row and column scaling vectors. The final quantized matrix sums over all orders: 
+
+ˆW = PKb 
+
+> k=1
+
+ˆW(k). Consistent with (Frantar et al., 2022a; ?), we assign one row scale α(k) 
+
+> r
+
+per weight group. 
+
+Parameter Optimization. We optimize parame-ters {αr, αc, B} by minimizing the reconstruction error: 
+
+L = W −
+
+
+
+αr α⊤
+
+> c
+
+
+
+⊙ B 2
+
+> F
+
+(4) 
+
+Employing alternating minimization, fixing B and one scaling vector reduces the problem to weighted least squares. 
+
+Proposition 3.2 (Optimal Scaling Factors) . Given fixed B and one scaling vector, the closed-form solutions minimizing L are: 
+
+α(k) 
+
+> r,i
+
+=
+
+P
+
+> j
+
+
+
+α(k) 
+
+> c,j
+
+B(k)
+
+> ij
+
+
+
+Wij 
+
+P
+
+> j
+
+
+
+α(k) 
+
+> c,j
+
+B(k)
+
+> ij
+
+2
+
++ ϵ,
+
+α(k) 
+
+> c,j
+
+=
+
+P
+
+> i
+
+
+
+α(k) 
+
+> r,i
+
+B(k)
+
+> ij
+
+
+
+Wij 
+
+P
+
+> i
+
+
+
+α(k) 
+
+> r,i
+
+B(k)
+
+> ij
+
+2
+
++ ϵ
+
+(5) 
+
+where ϵ is a stability constant. 
+
+For Kb ≥ 2, we perform joint optimization rather than greedy sequential extraction. Defin-ing the magnitude tensor M(k) = α(k) 
+
+> r
+
+α(k)⊤ 
+
+> c
+
+, we solve for the optimal binary signs: 
+
+Proposition 3.3 (Optimal Binary Base As-signment) . The binary combination b =[b1, . . . , b Kb ]⊤ minimizing the local error at (i, j )
+
+is: 
+
+B(1: Kb) 
+
+> ij
+
+= argmin 
+
+> b∈{− 1,+1 }Kb
+
+Wij −
+
+> Kb
+
+X
+
+> k=1
+
+M(k) 
+
+> ij
+
+· bk (6) 
+
+Implementation-wise, we exhaustively evaluate all 2Kb sign combinations to ensure optimality. 
+
+Structural Saliency Search. Recognizing that weight elements contribute unequally to perfor-mance, we adopt a hybrid base strategy guided by structural saliency. Leveraging the Optimal Brain FP16 Weights   
+
+> 𝑾 ∈ ℝ 𝑴×𝑵
+> −𝟏 𝟎 𝟏
+> 𝑀 𝑁
+> ( 𝛼 $(&) 𝛼 ((&) 𝐵 (&)
+
+## …  
+
+> Step ⓵Global Base
+> ( 𝛼 )$ (&) 𝛼 )( (&) 𝐵 )(&)
+
+## …      
+
+> Step ⓷Salient Refinement
+> 𝒞 !𝒞 "
+> Step ⓶Structural Saliency Search
+> Mask 𝓜
+> Hybrid Base
+> FP16
+> Residual Decoupled Row-Column Binary Bases Decoupled Row-Column Binary Bases
+
+Figure 2: The framework of FluxBin Binary Bases Quantization. 
+
+Quantization (OBQ) framework (Frantar et al., 2022b), we approximate weight sensitivity via the inverse Hessian H−1, and this can be efficiently calculated through Cholesky decomposition (Krish-namoorthy and Menon, 2013). Given the column-wise clustering of sensitive weights in LLMs ( ?), we aggregate element-wise errors into a cumulative column score, following previous works (Huang et al., 2025; Frantar and Alistarh, 2023). 
+
+Definition 3.4 (Hessian-based Column Saliency) .
+
+Following SLiM-LLM (Huang et al., 2025), the column-wise saliency score Sj is defined as: 
+
+Sj =
+
+> M
+
+X
+
+> i=1
+
+W2
+
+> ij
+
+[H−1]2
+
+> jj
+
+(7) 
+
+Columns with higher Sj usually contain outliers. To ensure load balancing, we partition columns into groups of size g. Within each group Cb, we select a subset I(b) 
+
+> sal
+
+of size s (the number of salient columns per group) maximizing total saliency: 
+
+I(b) 
+
+> sal
+
+= arg max 
+
+> I⊂C b,|I| =s
+
+X
+
+> j∈I
+
+Sj (8) 
+
+The aggregated set Isal = S 
+
+> b
+
+I(b) 
+
+> sal
+
+(with |I sal | =
+
+Nsal = ( N/g ) s salient columns in total) defines the binary mask M (Mj = 1 if j ∈ I sal , else 0). 
+
+Salient-Aware Hybrid Bases. The final quan-tized weight ˆW combines a Global Base Approxi-mation and a Salient Refinement (Figure 2(b)): 
+
+ˆW =
+
+> Kb
+
+X
+
+> k=1
+
+Q(W; Θk )
+
+| {z }
+
+> Global Base
+
++
+
+> Ks
+
+X
+
+> k=1
+
+Q(Rbase ; Φk ) ⊙ M 
+
+| {z }
+
+> Salient Refinement
+
+(9) 
+
+Here, Q(·) denotes the quantization func-tion (Def. 3.1), with parameter sets Θk =
+
+{B(k), α(k) 
+
+> r
+
+, α(k) 
+
+> c
+
+} for the global branch and Φk =
+
+{B(k) 
+
+> s
+
+, α(k) 
+
+> sr
+
+, α(k) 
+
+> sc
+
+} for the salient branch. Rbase 
+
+represents the residual of the global approximation: 
+
+Rbase = W − P 
+
+> k
+
+Q(W; Θk).
+
+3.2 FluxBin LUT-based Kernel 
+
+Figure 3a illustrates the FluxBin LUT-based GEMV kernel architecture, comprising three stages: (i) LUT Building with Scale Fusion to re-move column scaling αc from the critical path; (ii) 
+
+LUT reading for Multiplication-free GEMV, utiliz-ing bitwise operations for high throughput; and (iii) 
+
+Reduction with Row-Scale, applying row scaling 
+
+αr and performing reduction before writing back to global memory. Crucially, our Virtual Columnar Mapping (VCM) allows unified kernel execution. Based on Eqs. (3) and (9), the GEMV is: 
+
+X ˆWT = X
+
+PKb 
+
+> k=1
+
+B(k) ⊙(α(k) 
+
+> r
+
+α(k)⊤ 
+
+> c
+
+)
+
+T
+
+| {z }
+
+> Global Base
+
++ X
+
+PKs
+
+> k=1
+
+(B(k) 
+
+> s
+
+⊙M )⊙(α(k) 
+
+> sr
+
+α(k)⊤ 
+
+> sc
+
+)
+
+T
+
+| {z }
+
+> Salient Refinement
+
+(10) 
+
+Since α(k) 
+
+> c
+
+and α(k) 
+
+> r
+
+are diagonal per-column and per-row factors, the Global Base GEMV Yb
+
+factorizes so that the column scale folds into the input and the row scale is applied after the binary matvec: 
+
+Yb =
+
+> Kb
+
+X
+
+> k=1
+
+
+
+(X ⊙ α(k)⊤ 
+
+> c
+
+) B(k)T 
+
+⊙ α(k)⊤ 
+
+> r
+
+(11) 
+
+Virtual Columnar Mapping (VCM) for Salient Phase. The GEMV computation of salient refinement is restricted to sparse columns defined by Isal . Since conventional sparse implementations suffer from irregular memory access, we introduce VCM, inspired by OS memory virtualization. As shown in Figure 3b, we map the logical sparse 𝒚 𝟎  
+
+> Block [𝟎, 𝟎] Block [𝟎, 𝑵 𝒕 ]
+
+… 𝒚 𝟑  
+
+> …
+> 𝒚 𝟒
+> Block [𝟏, 𝟎] Block [𝟏, 𝑵 𝒕 ]
+
+… 𝒚 𝟕  
+
+> …
+> 𝒚 𝑴&𝟒
+> Block [𝑴 𝒕 , 𝟎] Block [𝑴 𝒕 , 𝑵 𝒕 ]
+
+… 𝒚 𝑴&𝟏            
+
+> …
+> …
+> (b) GPU Grid
+> LUT-3 Addr Value 0x00 0xff
+> 𝒅 𝟎
+> 𝒅 𝟐𝟓𝟓
+> ……LUT-2 Addr Value 0x00 0xff
+> 𝒄 𝟎
+> 𝒄 𝟐𝟓𝟓
+> ……LUT-0 Addr Value 0x00 0xff
+> 𝒂 𝟎
+> 𝒂 𝟐𝟓𝟓
+> ……Addr Value 0x00 0xff
+> 𝒃 𝟎
+> 𝒃 𝟐𝟓𝟓
+> ……LUT-1
+> …
+> Thread Group 𝒌 ∈ [𝟎, 𝑲 − 𝟏]
+> 𝜶 𝒓 (𝒌) [𝟎]
+> 𝒚 𝟎 (𝒌)
+> Uint32 Unpack
+> Thread [𝟎, 𝒌]
+> 𝑩 (𝒌) [0,:]
+> 𝜶 𝒓 (𝒌) [𝟑]
+> 𝒚 𝟑 (𝒌)
+> Uint32 Unpack
+> Thread [𝟑, 𝒌]
+> 𝑩 (𝒌) [3,:]
+> …
+> Shared Memory
+> 𝒚 '(𝟎)
+> 𝒚 '(𝑲)𝟏)
+> …
+> Shared Memory
+> 𝜶 𝒄 (𝒌)
+> LUT-0 Thread [𝟎]
+> MAC 𝑿 𝒔𝒖𝒃
+> Bit Ctrl 𝜶 𝒄 (𝒌)
+> LUT-1 Thread [𝟏]
+> MAC 𝑿 𝒔𝒖𝒃
+> Bit Ctrl 𝜶 𝒄 (𝒌)
+> LUT-2 Thread [𝟐]
+> MAC 𝑿 𝒔𝒖𝒃
+> Bit Ctrl 𝜶 𝒄 (𝒌)
+> LUT-3 Thread [𝟑]
+> MAC 𝑿 𝒔𝒖𝒃
+> Bit Ctrl
+> Step ⓵: LUT Building (a) GPU Block and Thread Function
+> 𝒚 𝟑 (𝟎)
+> 𝒚 𝟑 (𝑲)𝟏)
+> …
+> Step ⓶: LUT Reading Step ⓷: Reduction
+> ……𝑴 𝒕𝒊𝒍𝒆
+
+…
+
+> 𝑵 𝒕𝒊𝒍𝒆
+
+…
+
+> 𝑩 (𝒌)
+> 𝑿 𝜶 𝒓 (𝒌)
+> 𝜶 𝒄 (𝒌)
+> (c) Matrix Tiling
+> Block [𝟎, 𝟎]
+
+(a) Overview of the FluxBin LUT-based GEMV Kernel. Reduction  
+
+> 𝒀 𝒔𝒂𝒍 ∈ ℝ 𝟏×𝑴
+
+(a) Global Base (b) Salient Refinement 
+
+> Mapping to Physical Dense
+> MSB -- LSB
+
+CUDA Kernel   
+
+> 32 Col
+> MSB -- LSB
+> 32 Col
+> Column Gather
+> Pack Pack
+> Base 1 Base K Base 1 Base K
+
+……… 
+
+> 𝑿 ∈ ℝ 𝟏×'
+> 𝑿 𝒔𝒂𝒍 ∈ ℝ 𝟏×𝑵 𝒔𝒂𝒍
+
+CUDA Kernel    
+
+> 𝑩 )* (𝒌) ∈ {−𝟏, 𝟏} 𝑴×𝑵 𝒔𝒂𝒍
+> 𝒀 𝒃 ∈ ℝ 𝟏×𝑴
+> 𝑩 (𝒌) ∈ {−𝟏, 𝟏} 𝑴×𝑵
+
+Translation Layer 
+
+… (b) Virtual Columnar Mapping. 
+
+Figure 3: FluxBin kernel architecture and VCM strategy. 
+
+bases to physical dense matrix, and maintain a translation layer (via Isal ) to gather activation and scaling factor at runtime. 
+
+Definition 3.5 (VCM Projection) . VCM decou-ples logical sparsity from physical storage. Salient columns are remapped into a contiguous dense ma-trix B(k)
+
+sd ∈ {− 1, 1}M ×Nsal :
+
+B(k)
+
+sd = [ B(k)
+
+s;: ,j | j ∈ I sal ] (12) 
+
+Prior to GEMV, we gather input activations into 
+
+Xsal and extract scales α(k)
+
+scd :
+
+Xsal = [ X:,j | j ∈ I sal ],
+
+α(k)
+
+scd = [ α(k)
+
+sc [j] | j ∈ I sal ] (13) 
+
+This transforms the logically sparse operation into a physically dense GEMV, enabling kernel reuse for Global Base and Salient Refinement. 
+
+Stage 1: LUT Building with Scale Fusion (BSF). We partition inputs into sub-vectors Xsub of size μ (Park et al., 2024). Exploiting the column-wise scaling of αc that shared by all rows, we fuse it directly into the LUT, computing entries using 
+
+X ⊙ αc.
+
+Definition 3.6 (LUT-BSF) . For an integer index 
+
+p ∈ [0 , 2μ − 1] , bn(p) ∈ { 0, 1} denote the n-th bit of p, the fused LUT entry is: 
+
+LUT con [p] = 
+
+μ
+
+X
+
+n=1 
+
+(Xsub [n] · αc,sub [n]) · (2 bn(p) − 1) (14) 
+
+Here, (2 bn(p) − 1) maps bits to {− 1, +1 }. This strategy decouples αc from the main GEMV loop, effectively eliminating related floating-point opera-tions. 
+
+Stage 2&3: LUT Reading and Reduction. In-stead of unpacking weights to Float16, the kernel directly streams compressed Uint32 weights. For each sub-block of size μ, we extract pattern indices 
+
+p via bitwise ops to retrieve pre-computed partial sums from LUT. The results are accumulated mod-ulated by the row-wise scaling factor in registers before being written to global memory. 
+
+Yb =
+
+KbX
+
+k=1 
+
+
+
+LUT read [B(k)] ⊙ α(k)⊤
+
+r
+
+
+
+,
+
+Ysal =
+
+KsX
+
+k=1 
+
+
+
+LUT read [B(k)
+
+sd ] ⊙ α(k)⊤
+
+sr 
+
+ (15) 
+
+Matrix Tiling. As shown in Figure 3a (c), B is partitioned into Mtile × Ntile tiles mapped to thread blocks. Within each tile, input sub-vectors and 
+
+αc,sub are fused to build LUTs in shared memory, queried by all threads in the block. 
+
+4 Experiment 
+
+Experimental Setup. All evaluations are con-ducted on a single NVIDIA A100 (80GB) GPU. For end-to-end throughput, we customize the Hug-ging Face generate API (Wolf et al., 2020) with CUDA graphs to eliminate Python scheduling and kernel launch overhead: both prefill and decode ker-nels are captured and replayed from a pre-recorded graph with a static KV cache, ensuring that the measured latency reflects actual kernel execution time rather than framework overhead. Regarding FluxBin configurations, we adopt the notation Kb-sS-gG, where the leading number K denotes the base count (the literal “b” stands for “bases”), shared by the global and salient-refinement branches (we use the same number of 1 16 32 64 128                           
+
+> Batch Size
+> 012345
+> Throughput (tokens/s)
+> ×10 3LLaMA-2-7B
+> FluxBin-4b-g128 FluxBin-2b-s16-g128 FluxBin-2b-s8-g128 FluxBin-2b-g128 QuIP#-2bit AWQ-4bit FP16
+> 116 32 64 128
+> Batch Size
+> 0.0 0.5 1.0 1.5 2.0 2.5 3.0
+> ×10 3LLaMA-2-13B
+> OOM
+> 116 32 64 128
+> Batch Size
+> 0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0
+> ×10 2LLaMA-2-70B
+> OOM OOM OOM OOM OOM OOM OOM
+> 7B 13B 70B
+> Model Size
+> 050 100 150 200 250
+> Power (W) LLaMA-2
+> OOM FluxBin-4b-g128 FluxBin-2b-s16-g128 FluxBin-2b-s8-g128 FluxBin-2b-g128 AWQ-4bit FP16
+> (a) Inference Throughput Scaling (b) Average Power 116 32 64 128
+> Batch Size
+> 012345
+> Decode Throughput (tokens/s)  ×10 3
+> 6.3x
+> LLaMA-2-7B
+> FluxBin-2b-g128 FluxBin-2b-s8-g128 FluxBin-2b-s16-g128 FluxBin-4b-g128 FP16
+> 116 32 64 128
+> Batch Size
+> 0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 ×10 3
+> 6.6x
+> LLaMA-2-13B
+> 116 32 64 128
+> Batch Size
+> 1.0 1.5 2.0 2.5 3.0 3.5 4.0 4.5 ×10 2
+> FP16: OOM
+> LLaMA-2-70B
+> (c) Decode-Only Throughput (prompt=128, output=128)
+
+Figure 4: (a) E2E throughput scaling. (b) Average power. (c) Decode-only throughput. 
+
+bases for both). s denotes salient columns per group, and g is group size for both saliency search and row-wise scale. We primarily evaluate the mixed-precision variants 2b-s8-g128 and 2b-s16-g128. Additionally, 2b-g128 and 4b-g128 (pure global base) are included to provide a comprehen-sive analysis. 
+
+4.1 End-to-end Analysis 
+
+We compare FluxBin against the FP16 baseline and SOTA quantization frameworks, including Au-toAWQ (4-bit) and QuIP# (2-bit). 
+
+Throughput and Scalability. As shown in Fig-ure 4 (a), FluxBin demonstrates superior through-put across all batch sizes, with hybrid configu-rations (2b-s8/s16) matching the pure 2-bit base-line. Unlike conventional weight-only quantiza-tion whose advantage diminishes at large batch, FluxBin retains speedup because its LUT-based computation reduction ( μ/K b = 4 ×, Sec. 4.4) is batch-size independent, and the batch dimen-sion is tiled per thread block with fixed per-block shared memory cost. To further isolate the decode phase, Figure 4 (c) reports decode-only through-put. FluxBin achieves 6.3×–6.6× decode speedup at BS=1, and the gap persists at large batch sizes, demonstrating that the LUT kernel delivers con-sistent acceleration throughout the autoregressive generation process. 
+
+Memory Efficiency. FluxBin achieves up to 
+
+4× memory reduction as shown in Table 3 (Ap-pendix C.3). This critical compression capability enables the feasible execution of massive models, such as LLaMA-2-70B, on a single A100 GPU, whereas the FP16 baseline fails due to Out-Of-Memory (OOM) errors. 
+
+Energy Efficiency. As visualized in Figure 4 (b), FluxBin significantly lowers the average power during inference (e.g., dropping from ∼225W to 
+
+∼115W on 13B). Combined with the speedup, this results in a total energy reduction of 10 .19 × com-pared to FP16 (detailed in Appendix E.1). This efficiency stems from minimized data movement overhead and the reduction of floating-point arith-metic. 
+
+Architectural Robustness and Scalability. To validate the generality of FluxBin, we extend our evaluation to the Qwen3 family (featuring GQA) and the massive LLaMA-3.1-70B (detailed in Ap-pendix D.1). The results mirror our LLaMA-2 findings, and empirically confirms that FluxBin is architecture-agnostic, delivering consistent acceler-ation regardless of attention mechanisms or model size. 
+
+4.2 Speed vs. Accuracy 
+
+Table 1 presents a comparison of FluxBin with SOTA ultra-low-bit quantization methods (Frantar et al., 2022a; Shao et al., 2024; Huang et al., 2025; Egiazarian et al., 2024; Tseng et al., 2024) across the LLaMA-2 family (Touvron et al., 2023). We analyze the results from accuracy retention and inference speed. During the speed evaluation, we set the input and output length to 512. 
+
+Competitive Accuracy without Training. De-spite being a training-free method, FluxBin achieves accuracy comparable to that of fine-tuning or distillation based approaches. On LLaMA-2-7B, Table 1: E2E speed and zero-shot accuracy on LLaMA-2. ∗FT/Dist used. †Avg bit incl. scales (Sec. C.2). ‡HS=HellaSwag, WG=Winogrande. Best / 2nd / 3rd . 
+
+LLaMA-2 Method FT/Dist ∗ W bit † Speed (tok/s) ↑ Wiki ↓ PIQA ↑ ARC-e ↑ ARC-c ↑ BoolQ ↑ HS ‡ ↑ WG ‡ ↑ Avg. ↑
+
+7B FP16 16 42.94 5.47 78.13 75.46 43.00 79.36 57.08 69.38 67.07 GPTQ % 3.125 – 8.42 73.50 63.43 30.29 67.00 48.57 64.96 57.96 OmniQuant ! 3 83.40 6.62 74.70 64.26 35.92 66.29 51.73 63.45 59.39 SLiM-LLM ! 2 73.70 16.38 63.43 46.42 23.63 61.71 33.22 55.64 47.34 AQLM ! 2.02 98.50 6.59 72.69 65.11 32.85 69.24 49.34 62.59 58.64 QuIP# ! 2.02 131.97 8.22 75.10 64.60 34.60 74.31 42.94 64.90 59.41 FluxBin-2b-s8-g128 % 2.63 254.39 8.76 72.52 65.45 30.97 69.88 45.64 64.09 58.09 FluxBin-2b-s16-g128 % 2.75 250.87 8.20 75.50 65.40 32.42 70.80 45.97 64.80 59.15 13B FP16 16 33.14 4.88 79.49 78.87 47.53 82.20 60.19 72.69 70.16 GPTQ % 3.125 – 6.40 75.95 73.23 41.89 73.64 54.15 67.56 64.40 OmniQuant ! 3 57.60 5.58 77.69 69.02 41.97 69.02 56.79 65.09 63.26 SLiM-LLM ! 2 61.20 9.41 64.96 54.67 24.82 65.22 38.43 55.48 50.60 AQLM ! 2 32.90 5.60 76.71 78.79 40.36 75.81 54.52 64.80 65.17 QuIP# ! 2.01 84.16 6.06 77.30 69.30 42.92 79.24 55.46 67.70 65.32 FluxBin-2b-s8-g128 % 2.63 162.94 7.43 75.46 71.80 36.52 79.11 49.36 69.53 63.63 FluxBin-2b-s16-g128 % 2.75 162.73 7.16 75.46 72.81 38.05 76.91 50.53 69.96 63.95 70B FP16 16 OOM 3.12 81.50 82.70 54.10 85.17 65.33 80.43 74.87 GPTQ % 3.125 – 4.96 79.27 78.41 48.12 79.51 59.10 74.66 69.85 OmniQuant ! 3 – 3.92 79.70 75.58 47.52 66.48 61.92 73.71 67.49 AQLM ! 2.07 6.82 3.94 80.30 78.79 51.19 82.29 62.23 75.77 71.76 QuIP# ! 2.01 18.64 4.21 80.30 77.30 48.70 82.91 61.92 75.90 71.17 FluxBin-2b-s8-g128 % 2.63 60.67 4.90 78.64 80.22 49.83 81.04 59.16 76.80 70.95 FluxBin-2b-s16-g128 % 2.75 60.60 4.84 79.49 80.26 49.06 79.54 59.34 76.32 70.67 64x32 64x64 128x32 128x64 0246810 12 14                            
+
+> Latency (Cycles)
+> ×10 32b-g128
+> 12% 12% 14% 22% 49% 58% 38% 37% 39% 31% 48% 42%
+> Global Read Global Build Global Red. Salient Trans. Salient Read Salient Build Salient Red.
+> 64x32 64x64 128x32 128x64
+> Tile Config ( Mtile ×Ktile )
+> ×10 32b-s8-g128
+> 6% 7% 7% 10% 8% 9% 12% 8% 22% 29% 17% 20% 23% 20% 21% 19% 15% 14% 19% 19% 22% 19% 23% 22%
+> 64x32 64x64 128x32 128x64
+> ×10 32b-s16-g128
+> 7% 6% 8% 7% 7% 7% 6% 18% 27% 15% 19% 19% 18% 20% 18% 14% 14% 19% 21% 34% 25% 30% 26%
+> 050 100 150 200 250
+> Throughput (tok/s)
+> 50 55 60 65 70
+> Avg Zero-shot Acc. (%) FluxBin: High Accuracy & Extreme Speed
+> FluxBin-2b-s8-g128 FluxBin-2b-s16-g128 FP16 OmniQuant Slim-LLM AQLM QuIP#
+> 7B 13B 70B
+
+(a) LUT-based Kernel Breakdown (b) Speed-Accuracy Trade-off 
+
+Figure 5: (a) Latency breakdown of LUT-based kernel. (b) Speed-accuracy trade-off on LLaMA-2. 
+
+our 2b-s16-g128 configuration attains an average zero-shot accuracy of 59.15%, which is on par with the heavily fine-tuned QuIP# (59.41%) and outper-forms AQLM (58.64%). 
+
+Extreme Speed Advantage. For LLaMA-2-7B, FluxBin reaches 254.39 tokens/s, representing a 5.92 × speedup over FP16 baseline. This speed advantage scales effectively to larger models; on LLaMA-2-70B, FluxBin achieves 3.25 × higher throughput compared to QuIP#. 
+
+Optimal Trade-off. As visualized in Fig-ure 5 (b), existing methods typically compromise significant speed to maintain accuracy (bottom-right) or sacrifice accuracy for compression (top-left). FluxBin occupies the desirable top-right re-gion of the scaling curve. This positions FluxBin as the optimal solution that simultaneously deliv-ers high-fidelity generation and ultra-low latency, effectively breaking the conventional constraints of the speed-accuracy trade-off. 
+
+Generalization Across Different Architec-tures. To demonstrate FluxBin’s broad applicabil-ity, we extend our evaluation to the latest LLaMA-3.1 and Qwen3 model families (detailed in Ap-pendix D.2). In sensitive LLaMA-3.1 models, FluxBin exhibits remarkable robustness, achiev-ing accuracy comparable to 3-bit baselines (e.g., GPTQ), outperforming AQLM (+17.5% accuracy) while maintaining leadership in inference through-put. This suggests that as models become more complex and sensitive, the structural robustness of our Hybrid Base strategy becomes increasingly critical. 
+
+4.3 Ablation Study Impact of Quantization Components. The upper section of Table 2 validates each algorithmic com-ponent. Removing column scaling significantly de-grades PPL, while replacing Saliency Search with random selection causes a catastrophic failure (PPL 26.02), confirming the necessity of our Hessian-guided strategy. Relying solely on the Global Base increases PPL to 13.71, indicating that salient re-Table 2: Ablation study on LLaMA-2-7B (baseline: FluxBin-2b-s16-g128). Removing a component is de-noted by %.                          
+
+> Config. w/o Wiki PPL ↓PIQA ↑
+> Baseline 8.20 75.50
+> Column Scaling %8.96 71.65 Saliency Search %26.02 66.92 Hybrid Base %13.71 69.79
+> Config. w/o Speed (tok/s) ↑Max Mem. (MB) ↓
+> Baseline 250.87 3475.21
+> VCM %205.68 4640.37
+
+finement is crucial for error compensation. 
+
+Impact of Kernel Optimization. The lower sec-tion of Table 2 evaluates the benefits of the VCM strategy. Disabling the VCM strategy (treating re-finement as sparse operations) results in an 18% speed drop and a 33% memory surge, validating VCM’s ability to ensure coalesced memory access. 
+
+Hyperparameter Sensitivity. (i) Group Size (g): As shown in Sec. D.3 Table 6, reducing the group size can improve model perfor-mance but result in higher storage for the scaling factor. Empirically, g=128 yields the optimal trade-off, which balances the competitive accuracy and average bit. 
+
+(ii) Calibration Samples ( Ncal ): Following the GPTQ framework, we estimate the Hessian using 
+
+Ncal random samples from the C4 dataset. As shown in Sec. D.4 Table 7, accuracy follows a rise-then-fall trend: Ncal = 256 captures sufficient cur-vature information, whereas larger sizes ( > 512 )lead to overfitting and performance drops. 
+
+(iii) Sub-vector Size ( μ): We demonstrate the impact of μ in Sec. E.2 and Table 9. The smaller 
+
+μ minimizes the shared memory footprint, but in-creases the LUT reading operation, which is the main source of complexity. Despite larger LUTs, a larger μ without violating shared memory con-straints achieves superior energy efficiency, and maintains almost constant inference latency with small μ.
+
+4.4 Discussion: Sources of Acceleration 
+
+We identify three sources behind FluxBin’s speedup that collectively explain why the frame-work retains advantages even at large batch sizes. 
+
+Reduced Memory Traffic. A 2-base binary configuration stores weights at ∼2 bits ( 8× com-pression vs. FP16), directly relieving the HBM bottleneck that dominates autoregressive decoding. 
+
+Reduced and Simplified Operations. The LUT kernel replaces μ FMA operations per sub-vector with a single shared-memory lookup, reducing complexity by μ/K b (4× at default μ=8 , Kb=2 ;Appendix C.1). The remaining work is dominated by additions rather than FMAs, which enjoy higher pipeline throughput. Both reductions are batch-size independent. 
+
+Trading ALU Computation for SRAM Access. 
+
+Dequantization-based kernels spend ALU slots on bit-shift, mask, and type-convert instructions be-fore every GEMV; FluxBin replaces this ALU-heavy path with shared-memory (SRAM) lookups. As SRAM bandwidth is independent of HBM, this offloads work from a contended resource (the ALU) without worsening the memory-bound bottleneck. 
+
+Empirical Validation. Runtime profiling (Ta-ble 8, Appendix E.1) corroborates the analysis above. FluxBin consistently reports >99.8% GPU busy time versus 67–87% for FP16. Its memory-bandwidth utilization is correspondingly low, re-flecting the small weight traffic of the 2-bit for-mat; together these indicate the LUT kernel is limited by on-chip lookup/compute throughput rather than stalled on HBM transfers (GPU busy time reflects occupancy, not arithmetic-unit sat-uration). The average power drop from 225W to ∼115W (13B) directly follows from replac-ing power-hungry FP16 FMAs with lightweight additions and SRAM lookups. Per-operator ker-nel latencies against QuIP# and AQLM, together with a tiling-parameter study, are reported in Ap-pendix E.4 and Appendix E.3. Figure 5 (a) further breaks down per-block execution cycles: increas-ing Mtile from 64 to 128 amortizes LUT Building cost (49% →38%), and the VCM translation over-head for hybrid configurations (2b-s8/s16) remains negligible. 
+
+5 Conclusion 
+
+In this work, we propose FluxBin to bridge the gap between theoretical compression and realized acceleration. By synergizing Row-Column Bi-nary Decomposition and Hessian-guided Hybrid Bases with a hardware-optimized LUT-based Ker-nel (LUT-BSF and VCM), we jointly enhance rep-resentational capacity and reduce runtime overhead. Across diverse architectures, FluxBin achieves up to 5.92 × speedup and 10.19 × energy savings 
+
+while maintaining competitive accuracy, offering a training-free solution for efficient large-scale LLM deployment. Limitations 
+
+While FluxBin demonstrates significant advance-ments in ultra-low-bit LLM inference, we identify two primary limitations. 
+
+Shared Memory Constraints on Scalability. 
+
+The efficiency of our LUT-based kernel relies heav-ily on caching pre-computed results in on-chip Shared Memory (SRAM). However, the LUT stor-age requirement scales exponentially with the sub-vector size ( 2μ) and linearly with the batch size per block. While high-end GPUs like the A100 provide ample SRAM (164 KB/SM) to support our optimal configuration ( μ = 8 ), deploying FluxBin on hard-ware with limited Shared Memory may necessitate reducing μ or the batch size. 
+
+Optimization Bounds of Pure PTQ. FluxBin operates as a strict training-free framework to en-sure rapid deployment. While it outperforms exist-ing PTQ methods and rivals fine-tuned baselines, there remains a marginal accuracy gap compared to approaches that use extensive, computationally expensive iterative fine-tuning on specific tasks. Future work could explore integrating lightweight parameter-efficient fine-tuning on top of the binary bases to further bridge this gap without compromis-ing the LUT-based inference speed. 
+
+References 
+
+Tom B. Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, Sandhini Agarwal, Ariel Herbert-Voss, Gretchen Krueger, Tom Henighan, Rewon Child, Aditya Ramesh, Daniel M. Ziegler, Jeffrey Wu, Clemens Winter, and 12 others. 2020. Lan-guage models are few-shot learners. Preprint ,arXiv:2005.14165. Adrian Bulat, Yassine Ouali, and Georgios Tzimiropou-los. 2024. Qbb: quantization with binary bases for llms. In Proceedings of the 38th International Con-ference on Neural Information Processing Systems ,NIPS ’24, Red Hook, NY, USA. Curran Associates Inc. Hong Chen, Chengtao Lv, Liang Ding, Haotong Qin, Xiabin Zhou, Yifu Ding, Xuebo Liu, Min Zhang, Jinyang Guo, Xianglong Liu, and Dacheng Tao. 2024. DB-LLM: Accurate dual-binarization for efficient LLMs. In Findings of the Association for Compu-tational Linguistics: ACL 2024 , pages 8719–8730, Bangkok, Thailand. Association for Computational Linguistics. Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke Zettlemoyer. 2023. Qlora: Efficient finetuning of quantized llms. In Advances in Neural Information Processing Systems .Tim Dettmers, Ruslan Svirschevski, Vage Egiazarian, Denis Kuznedelev, Elias Frantar, Saleh Ashkboos, Alexander Borzunov, Torsten Hoefler, and Dan Alis-tarh. 2024. Spqr: A sparse-quantized representation for near-lossless LLM weight compression. In The Twelfth International Conference on Learning Rep-resentations, ICLR 2024, Vienna, Austria, May 7-11, 2024 . OpenReview.net. Vage Egiazarian, Andrei Panferov, Denis Kuznedelev, Elias Frantar, Artem Babenko, and Dan Alistarh. 2024. Extreme compression of large language mod-els via additive quantization. In Proceedings of the 41st International Conference on Machine Learning ,ICML’24. JMLR.org. Elias Frantar and Dan Alistarh. 2023. Sparsegpt: mas-sive language models can be accurately pruned in one-shot. In Proceedings of the 40th International Con-ference on Machine Learning , ICML’23. JMLR.org. Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. 2022a. Gptq: Accurate post-training quantization for generative pre-trained transformers. 
+
+arXiv preprint arXiv:2210.17323 .Elias Frantar, Sidak Pal Singh, and Dan Alistarh. 2022b. Optimal brain compression: a framework for accu-rate post-training quantization and pruning. In Pro-ceedings of the 36th International Conference on Neural Information Processing Systems , NIPS ’22, Red Hook, NY, USA. Curran Associates Inc. Wei Huang, Yangdong Liu, Haotong Qin, Ying Li, Shiming Zhang, Xianglong Liu, Michele Magno, and Xiaojuan Qi. 2024. Billm: pushing the limit of post-training quantization for llms. In Proceedings of the 41st International Conference on Machine Learning ,ICML’24. Wei Huang, Haotong Qin, Yangdong Liu, Yawei Li, Qinshuo Liu, Xianglong Liu, Luca Benini, Michele Magno, Shiming Zhang, and Xiaojuan Qi. 2025. Slim-llm: Salience-driven mixed-precision quantization for large language models. Preprint ,arXiv:2405.14917. Benoit Jacob, Skirmantas Kligys, Bo Chen, Meng-long Zhu, Matthew Tang, Andrew Howard, Hartwig Adam, and Dmitry Kalenichenko. 2018. Quan-tization and training of neural networks for effi-cient integer-arithmetic-only inference. In 2018 IEEE/CVF Conference on Computer Vision and Pat-tern Recognition , pages 2704–2713. Yongkweon Jeon, Baeseong Park, Se Jung Kwon, Byeongwook Kim, Jeongin Yun, and Dongsoo Lee. 2020. Biqgemm: matrix multiplication with lookup table for binary-coding-based quantized dnns. In Pro-ceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis , SC ’20. IEEE Press. Aravindh Krishnamoorthy and Deepak Menon. 2013. Matrix inversion using cholesky decomposition. In 
+
+2013 Signal Processing: Algorithms, Architectures, Arrangements, and Applications (SPA) , pages 70–72. Jinmook Lee, Changhyeon Kim, Sanghoon Kang, Dongjoo Shin, Sangyeob Kim, and Hoi-Jun Yoo. 2019. Unpu: An energy-efficient deep neural network accelerator with fully variable weight bit precision. IEEE Journal of Solid-State Circuits ,54(1):173–185. Jung Hyun Lee, Jeonghoon Kim, Se Jung Kwon, and Dongsoo Lee. 2023. Flexround: Learnable round-ing based on element-wise division for post-training quantization. Preprint , arXiv:2306.00317. Shiyao Li, Xuefei Ning, Ke Hong, Tengxuan Liu, Lun-ing Wang, Xiuhong Li, Kai Zhong, Guohao Dai, Huazhong Yang, and Yu Wang. 2023. Llm-mq: Mixed-precision quantization for efficient llm de-ployment. In The Efficient Natural Language and Speech Processing Workshop with NeurIPS , vol-ume 9, page 3. Zhiteng Li, Xianglong Yan, Tianao Zhang, Haotong Qin, Dong Xie, Jiang Tian, Zhongchao Shi, Linghe Kong, Yulun Zhang, and Xiaokang Yang. 2024. Arb-llm: Alternating refined binarizations for large language models. ArXiv , abs/2410.03129. Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Guangxuan Xiao, and Song Han. 2025. Awq: Activation-aware weight quantization for on-device llm compression and acceleration. 28(4):12–17. Saeed Maleki. 2023. Look-up mai gemm: Increasing ai gemms performance by nearly 2.5x via msgemm. 
+
+Preprint , arXiv:2310.06178. Stefano Markidis, Steven Wei Der Chien, Erwin Laure, Ivy Bo Peng, and Jeffrey S. Vetter. 2018. Nvidia ten-sor core programmability, performance & precision. In 2018 IEEE International Parallel and Distributed Processing Symposium Workshops (IPDPSW) , pages 522–531. Zhiwen Mo, Lei Wang, Jianyu Wei, Zhichen Zeng, Shi-jie Cao, Lingxiao Ma, Naifeng Jing, Ting Cao, Jilong Xue, Fan Yang, and Mao Yang. 2025. Lut tensor core: A software-hardware co-design for lut-based low-bit llm inference. In Proceedings of the 52nd Annual International Symposium on Computer Ar-chitecture , ISCA ’25, page 514–528, New York, NY, USA. Association for Computing Machinery. Ying Jiang Ningning Chen, Weicai Ye. 2025. Hbllm: Wavelet-enhanced high-fidelity 1-bit quantization for llms. arXiv preprint arXiv:2512.00862 .Gunho Park, Baeseong Park, Minsub Kim, Sungjae Lee, Jeonghoon Kim, Beomseok Kwon, Se Jung Kwon, Byeongwook Kim, Youngjoo Lee, and Dong-soo Lee. 2024. Lut-gemm: Quantized matrix mul-tiplication based on luts for efficient inference in large-scale generative language models. Preprint ,arXiv:2206.09557. Antonio Polino, Razvan Pascanu, and Dan Alistarh. 2018. Model compression via distillation and quanti-zation. arXiv preprint arXiv:1802.05668 .Haotong Qin, Mingyuan Zhang, Yifu Ding, Aoyu Li, Zhongang Cai, Ziwei Liu, Fisher Yu, and Xiang-long Liu. 2023. Bibench: benchmarking and ana-lyzing network binarization. In Proceedings of the 40th International Conference on Machine Learning ,ICML’23. JMLR.org. Mohammad Rastegari, Vicente Ordonez, Joseph Red-mon, and Ali Farhadi. XNOR-net: ImageNet classi-fication using binary convolutional neural networks. In Computer Vision – ECCV 2016 , pages 525–542. Springer International Publishing. Yuzhang Shang, Zhihang Yuan, Qiang Wu, and Zhen Dong. 2023. Pb-llm: Partially binarized large lan-guage models. ArXiv , abs/2310.00034. Wenqi Shao, Mengzhao Chen, Zhaoyang Zhang, Peng Xu, Lirui Zhao, Zhiqian Li, Kaipeng Zhang, Gao Peng, Yu Qiao, and Ping Luo. 2024. Omniquant: Omnidirectionally calibrated quantization for large language models. In International Conference on Representation Learning , volume 2024, pages 45472– 45496. Xiaohu Tang, Yang Wang, Ting Cao, Li Lyna Zhang, Qi Chen, Deng Cai, Yunxin Liu, and Mao Yang. 2023. Lut-nn: Empower efficient neural network inference with centroid learning and table lookup. In Proceed-ings of the 29th Annual International Conference on Mobile Computing and Networking , ACM MobiCom ’23, New York, NY, USA. Association for Computing Machinery. Hugo Touvron, Louis Martin, Kevin Stone, Peter Al-bert, Amjad Almahairi, Yasmine Babaei, Nikolay Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti Bhosale, Dan Bikel, Lukas Blecher, Cristian Canton Ferrer, Moya Chen, Guillem Cucurull, David Esiobu, Jude Fernandes, Jeremy Fu, Wenyin Fu, and 49 oth-ers. 2023. Llama 2: Open foundation and fine-tuned chat models. Preprint , arXiv:2307.09288. Albert Tseng, Jerry Chee, Qingyao Sun, Volodymyr Kuleshov, and Christopher De Sa. 2024. Quip#: even better llm quantization with hadamard incoher-ence and lattice codebooks. In Proceedings of the 41st International Conference on Machine Learning ,ICML’24. JMLR.org. Thomas Wolf, Lysandre Debut, Victor Sanh, Julien Chaumond, Clement Delangue, Anthony Moi, Pier-ric Cistac, Tim Rault, Remi Louf, Morgan Funtowicz, et al. 2020. Transformers: State-of-the-art natural language processing. In Proceedings of the 2020 con-ference on empirical methods in natural language processing: system demonstrations , pages 38–45. He Xiao, Qingyao Yang, Dirui Xie, Wendong Xu, Zun-hai Su, Runming yang, Wenyong Zhou, Haobo Liu, Zhengwu Liu, and Ngai Wong. 2025. Exploring layer-wise information effectiveness for post-training quantization in small language models. Preprint ,arXiv:2508.03332. He Xiao, Runming Yang, Qingyao Yang, Wendong Xu, Zhen Li, Yupeng Su, Zhengwu Liu, Hongxia Yang, and Ngai Wong. 2026. Ptqtp: Post-training quantization to trit-planes for large language models. 
+
+Preprint , arXiv:2509.16989. Shiyu Xu, Qi Wang, Xingbo Wang, Shihang Wang, and Terry Tao Ye. 2022. Multiplication through a sin-gle look-up-table (lut) in cnn inference computation. 
+
+IEEE Transactions on Computer-Aided Design of Integrated Circuits and Systems , 41(6):1916–1928. Qingyao Yang, Xiaoqin Wang, Yumei Zhou, Qiang Li, and Shushan Qiao. 2025. Hardware friendly trans-former optimization with dynamic attention matrix fusion. In 2025 IEEE International Symposium on Circuits and Systems (ISCAS) , pages 1–5. Aohan Zeng, Xiao Liu, Zhengxiao Du, Zihan Wang, Hanyu Lai, Ming Ding, Zhuoyi Yang, Yifan Xu, Wendi Zheng, Xiao Xia, Weng Lam Tam, Zixuan Ma, Yufei Xue, Jidong Zhai, Wenguang Chen, Peng Zhang, Yuxiao Dong, and Jie Tang. 2023. Glm-130b: An open bilingual pre-trained model. Preprint ,arXiv:2210.02414. Dongqing Zhang, Jiaolong Yang, Dongqiangzi Ye, and Gang Hua. 2018. Lq-nets: Learned quantization for highly accurate and compact deep neural net-works. In Computer Vision – ECCV 2018: 15th European Conference, Munich, Germany, September 8-14, 2018, Proceedings, Part VIII , page 373–390, Berlin, Heidelberg. Springer-Verlag. 
+
+A Derivation of Parameter Optimization 
+
+In this section, we provide the rigorous mathemati-cal proofs for the optimal update rules presented in the Methodology section. 
+
+A.1 Derivation of Optimal Scaling Factors 
+
+Recall the objective function for a single decompo-sition order k:
+
+L = W −
+
+
+
+αrα⊤
+
+> c
+
+
+
+⊙ B 2 
+
+> F
+
+(16) 
+
+Proof of Proposition 3.2. We aim to derive the closed-form solution for the row scaling vector αr
+
+while keeping B and αc fixed. Since the Frobenius norm is the sum of squared element-wise errors, Eq. (16) can be expanded as: 
+
+L =
+
+> M
+
+X
+
+> i=1
+> N
+
+X
+
+> j=1
+
+(Wij − αr,i · αc,j · Bij )2 (17) The optimization problem for αr decouples into 
+
+M independent scalar least-squares problems. For the i-th row scalar αr,i , the partial derivative is: 
+
+∂L
+
+∂αr,i 
+
+= ∂∂αr,i NX
+
+> j=1
+
+(Wij − αr,i (αc,j Bij )) 2
+
+= −2
+
+> N
+
+X
+
+> j=1
+
+(Wij − αr,i (αc,j Bij )) · (αc,j Bij )
+
+(18) Setting the derivative to zero to find the critical point: 
+
+> N
+
+X
+
+> j=1
+
+Wij (αc,j Bij ) = αr,i NX
+
+> j=1
+
+(αc,j Bij )2 (19) Solving for αr,i , we obtain: 
+
+αr,i =
+
+PNj=1 (αc,j · Bij ) · Wij 
+
+PNj=1 (αc,j · Bij )2 + ϵ (20) where ϵ is added for numerical stability. This matches Eq. (5). Due to the symmetry of the rank-1 structure, the derivation for the column scale αc
+
+follows an identical logic by taking the derivative w.r.t αc,j , yielding the column-scale expression in Eq. (5). 
+
+A.2 Derivation of Joint Binary Basis Optimization 
+
+When Kb ≥ 2, we optimize the binary bases 
+
+B(1: Kb) jointly. 
+
+Proof of Proposition 3.3. We define the magni-tude tensor for the k-th basis as M(k) =
+
+α(k) 
+
+> r
+
+α(k)⊤ 
+
+> c
+
+. The global reconstruction error is: 
+
+L = W −
+
+> Kb
+
+X
+
+> k=1
+
+M(k) ⊙ B(k)
+
+> 2
+> F
+
+(21) Crucially, the elements of B(k) are independent across spatial coordinates (i, j ). Thus, minimizing the global Frobenius norm is equivalent to mini-mizing the squared error for each element indepen-dently:      
+
+> min
+> {B(k)}
+> L ⇐⇒ X
+> i,j
+> min
+> b(1)
+> ij ,...,b (Kb)
+> ij
+> Wij −
+> KbX
+> k=1
+> M(k)
+> ij ·b(k)
+> ij
+> !2
+
+(22) For a specific coordinate (i, j ), let b =[b(1) , . . . , b (Kb)]⊤ ∈ {− 1, +1 }Kb be the vector of binary choices. The problem reduces to: 
+
+b∗ = argmin 
+
+> b∈{− 1,+1 }Kb
+
+Wij −
+
+> Kb
+
+X
+
+> k=1
+
+M(k) 
+
+> ij
+
+· b(k)
+
+!2
+
+(23) Since the square function is monotonic for positive errors, minimizing the squared L2 error is equiv-alent to minimizing the absolute L1 error in this scalar context. Thus, we have: 
+
+B(1: Kb) 
+
+> ij
+
+= argmin 
+
+> b∈{− 1,+1 }Kb
+
+Wij −
+
+> Kb
+
+X
+
+> k=1
+
+M(k) 
+
+> ij
+
+· bk
+
+(24) This confirms that the element-wise exhaustive search (Eq. (6)) yields the globally optimal binary assignment for the fixed scaling factors. 
+
+B Algorithmic Descriptions 
+
+FluxBin is seamlessly integrated into the GPTQ framework (Frantar et al., 2022a), adopting a block-wise reconstruction paradigm to ensure high in-ference efficiency and quantization fidelity. By leveraging the Optimal Brain Quantization (OBQ) theory, we utilize the inverse Hessian matrix H−1
+
+not only for structural saliency search but also for compensating the quantization error accumulating across columns. The Hessian is computed effi-ciently using calibration data via H = 2 XX T , and its inverse is updated iteratively, ensuring the pro-cess remains computationally lightweight. We provide two algorithmic variants correspond-ing to the configurations evaluated in the main pa-per: 
+
+FluxBin Base (Algorithm 1). This algorithm describes the standard global base quantization pro-cess without mixed-precision refinement. It iterates through column groups, performing the proposed Row-Column Binary Decomposition to obtain the quantized block cWblk . The residual error is then propagated to the remaining unquantized weights using the Hessian inverse. This algorithm is uti-lized for pure binary configurations, specifically 2b-g128 ( Kb = 2 ) and 4b-g128 ( Kb = 4 ), where no salient refinement is applied. 
+
+FluxBin Hybrid Base (Algorithm 2). This algo-rithm details the salient-aware hybrid base (mixed-precision) strategy. Within each block, it first iden-tifies critical columns via StructuralSearch using Hessian metrics. Following the global base de-composition, it performs a secondary decomposi-tion on the residual Rblk restricted to the masked salient columns. This algorithm is utilized for our primary hybrid configurations, specifically 2b-s8-g128 ( s = 8 ) and 2b-s16-g128 ( s = 16 ). 
+
+Sub-routines (Algorithm 3). This section de-fines the core components: RC_BinaryDecomp, which solves the optimization problem for decou-pled scaling factors and binary bases (Eq. (5)-(6)), and StructuralSearch, which computes the column-wise sensitivity score (Eq. (7)). 
+
+Algorithm 3 FluxBin Sub-routines  
+
+> 1:
+
+Function 
+
+RC_Decomp( X, mask , K, T ) 
+
+> 2:
+
+Init residual R ←
+
+X ⊙ mask  
+
+> 3:
+
+bX ← 0 
+
+> 4:
+
+// Init via Greedy Residual  
+
+> 5:
+
+for k = 1 to K do  
+
+> 6:
+
+Init B(k), α(k) 
+
+> r
+
+, α(k)
+
+> c
+
+from R 
+
+> 7:
+
+R ← R −
+
+(α(k) 
+
+> r
+
+α(k)⊤ 
+
+> c
+
+) ⊙ B(k) 
+
+> 8:
+
+end for  
+
+> 9:
+
+// Alternating Opti-mization  
+
+> 10:
+
+for iter = 1 to T do  
+
+> 11:
+
+for k = 1 to K do  
+
+> 12:
+
+Update α(k)
+
+> r
+
+(Eq. 5)  
+
+> 13:
+
+Update α(k)
+
+> c
+
+(Eq. 5)  
+
+> 14:
+
+end for  
+
+> 15:
+
+Update {B(k)} via search (Eq. 6)  
+
+> 16:
+
+for k = 1 to K do  
+
+> 17:
+
+B(k) ← B(k) ⊙
+
+mask  
+
+> 18:
+
+end for  
+
+> 19:
+
+end for  
+
+> 20:
+
+Reconstruct bX 
+
+> 21:
+
+return bX, {α, B} 
+
+> 22:
+
+End Function  
+
+> 1:
+
+Function Struc-turalSearch  
+
+> 2:
+
+Input: 
+
+W, H−1, N sal  
+
+> 3:
+
+// Compute Sen-sitivity  
+
+> 4:
+
+for j = 1 to g do  
+
+> 5:
+
+Sj =
+
+P 
+
+> i
+> W2
+> ij
+> [H−1]2
+> jj
+> 6:
+
+end for  
+
+> 7:
+
+I ←
+
+TopK ({Sj }, N sal ) 
+
+> 8:
+
+return I 
+
+> 9:
+
+End Function 
+
+C Cost Estimation 
+
+C.1 Compute Complexity Analysis of LUT-base Kernel 
+
+To quantify the computational efficiency of FluxBin, we analyze the theoretical complexity of our LUT-based kernel. Following the standard analysis in LUT-GEMM (Park et al., 2024), the total cost C consists of the LUT construction cost (Cbuild ) and the table lookup cost ( Cread ). Assume the weight matrix has dimensions M ×Algorithm 1 FluxBin-Base (Global Base)  
+
+> 1:
+
+Input: W, Calib X, Group g, Bases Kb, Iter 
+
+T 
+
+> 2:
+
+Output: cW, Params Θ 
+
+> 3:
+
+H ← 2XX T {Hessian from input}  
+
+> 4:
+
+H−1 ← CholeskyInverse (H) 
+
+> 5:
+
+Q ← 0 
+
+> 6:
+
+for j = 0 , g, . . . , N − g do  
+
+> 7:
+
+Wblk ← W:,j :j+g 
+
+> 8:
+
+H−1 
+
+> blk
+
+← (H−1)j:j+g,j :j+g 
+
+> 9:
+
+{Global Base Decomp}  
+
+> 10:
+
+cWblk , Θ ← RC_Decomp (Wblk , 1, K b, T ) 
+
+> 11:
+
+Q:,j :j+g ← cWblk  
+
+> 12:
+
+{Error Compensation}  
+
+> 13:
+
+E ← Wblk − cWblk  
+
+> 14:
+
+Update Wremaining via E, H−1 
+
+> 15:
+
+end for  
+
+> 16:
+
+return Q, Θ
+
+Algorithm 2 FluxBin-Hybrid (Salient-Aware)  
+
+> 1:
+
+Input: W, X, g , Bases Kb, K s, Salient 
+
+Nsal , T  
+
+> 2:
+
+Output: cW, Θ, Φ, Mask M 
+
+> 3:
+
+H ← 2XX T ; H−1 ← CholInv (H) 
+
+> 4:
+
+for j = 0 , g, . . . , N − g do  
+
+> 5:
+
+Wblk ← W:,j :j+g 
+
+> 6:
+
+H−1 
+
+> blk
+
+← (H−1)j:j+g,j :j+g 
+
+> 7:
+
+{Step 1: Saliency Search}  
+
+> 8:
+
+I ← StructuralSearch (Wblk , H−1
+
+> blk
+
+, N sal ) 
+
+> 9:
+
+Construct mask Mblk from I 
+
+> 10:
+
+{Step 2: Global Base}  
+
+> 11:
+
+cWg, Θ ← RC_Decomp (Wblk , 1, K b, T ) 
+
+> 12:
+
+{Step 3: Salient Refinement}  
+
+> 13:
+
+Rblk ← Wblk − cWg 
+
+> 14:
+
+cWs, Φ ← RC_Decomp (Rblk , Mblk , K s, T ) 
+
+> 15:
+
+cWblk ← cWg + cWs 
+
+> 16:
+
+{Step 4: Compensation}  
+
+> 17:
+
+E ← Wblk − cWblk  
+
+> 18:
+
+Update Wremaining via E, H−1 
+
+> 19:
+
+end for  
+
+> 20:
+
+return cW, Θ, Φ, M
+
+N , the sub-vector length is μ, and the number of binary bases is K. Since the column scaling factor 
+
+α(k) 
+
+> c
+
+is unique for each basis k and is fused into the input, independent LUTs must be constructed for each basis. 
+
+1. Global Base Complexity. For the global base branch with Kb bases, the input dimension is N .
+
+Cbase  
+
+> build
+
+= Kb · Nμ · 2μ
+
+Cbase  
+
+> read
+
+= Kb · M · Nμ
+
+(25) Here, Nμ represents the number of sub-vectors, and 
+
+2μ is the number of entries per LUT. 
+
+2. Salient Refinement Complexity. For the salient refinement branch, the operation is re-stricted to Nsal columns with Ks bases. 
+
+Csal  
+
+> build
+
+= Ks · Nsal 
+
+μ · 2μ
+
+Csal  
+
+> read
+
+= Ks · M · Nsal 
+
+μ
+
+(26) 
+
+3. Total Complexity. The overall complexity is the sum of both branches:             
+
+> Ctotal = 2μ
+> μ(KbN+KsNsal )
+> |{z }
+> LUT Build
+> +Mμ(KbN+KsNsal )
+> |{z }
+> LUT Read
+
+(27) In typical generative LLM scenarios, the output channel dimension M is significantly larger than the LUT size 2μ (e.g., M ≫ 2μ). Consequently, the lookup cost Cread dominates the total runtime. The complexity can be approximated as: 
+
+Ctotal ≈ O 
+
+ Mμ (KbN + KsNsal )
+
+
+
+(28) 
+
+Efficiency Gain. Compared to standard FP16 matrix multiplication which has a complexity of 
+
+O(M N ), FluxBin achieves a theoretical reduction factor of approximately μKb . Furthermore, since the salient refinement typically involves a very sparse subset of columns ( Nsal ≪ N ), the additional over-head introduced by the hybrid precision is marginal, preserving the high-throughput advantage of the LUT-based paradigm. 
+
+C.2 Storage Consumption Analysis 
+
+We conduct a comprehensive analysis of the stor-age overhead introduced by FluxBin, evaluating the Total Storage ( Stotal ) and the Effective Average Bit-Width (ABW). Let M and N denote the num-ber of rows and columns of the weight matrix W,respectively. Our configuration divides columns into groups of size g, and selects s salient columns per group. The quantization model consists of Kb binary bases for the global approximation and Ks bases for the salient refinement. We assume all scaling factors (row and column) and indices are stored in FP16 format (16 bits). 
+
+1. Global Base Storage ( Sbase ). The global base component stores the dense binary weights, column-wise scaling factors, and block-wise row scaling factors. The storage cost (in bits) is calcu-lated as: 
+
+Sbase = Kb ·
+
+ M N |{z} 
+
+> Weights
+
++ 16 N|{z} 
+
+> Col Scales
+
++ 16 · M · Ng
+
+| {z }
+
+> Row Scales
+
+
+
+(29) where the term M · Ng reflects our strategy of storing one row scale per group to capture local magnitude variations. 
+
+2. Salient Refinement Storage ( Ssal ). The salient refinement targets a subset of columns, de-noted as Nsal = Ng · s. This component requires storage for the sparse binary refinements, their cor-responding scales, and the indexing metadata .          
+
+> Ssal =Ks·
+> 
+> M N sal + 16 Nsal + 16 ·M·Ng
+> 
+> +Sidx
+
+(30) The term Sidx accounts for the overhead of storing the indices of salient columns. Since we select s
+
+indices for each of the N/g groups, the overhead is: 
+
+Sidx = 16 · Nsal (31) Note that we use 16 bits per index to ensure mem-ory alignment and support large column dimen-sions, although 8 bits could suffice for smaller group sizes (e.g., g ≤ 256 ). 
+
+3. Effective Average Bit-Width (ABW). Aggre-gating the components from Eq. (29) and Eq. (30), the total storage is Stotal = Sbase + Ssal . The effec-tive average bit-width is derived as: ABW = Stotal 
+
+M N = Sbase + Ssal 
+
+M N (32) For our typical configuration (e.g., Kb = 2 ,
+
+Ks = 2 , g = 128 , s = 8 ), the salient branch intro-duces a sparsity ratio of s/g = 6 .25% . The index-ing overhead Sidx is amortized over the large matrix dimensions ( ≈ 16 ·s/g M bits per weight), so the ef-fective ABW settles at ≈ 2.63 bits (and ≈ 2.75 
+
+bits for s = 16 ) while significantly boosting model accuracy. 
+
+C.3 Maximum Memory Consumption 
+
+Table 3 presents the peak GPU memory allocation during inference. 
+
+Comparison with FP16 Baseline: FluxBin sig-nificantly reduces memory footprints compared to the FP16 baseline. For instance, on Qwen3-32B, the memory usage drops from 62.7GB (FP16) to 12.1GB (2b-g128), achieving a 5.1×compression ratio. Notably, for LLaMA-2-70B, which triggers an Out-Of-Memory (OOM) error in FP16 on our testing hardware, FluxBin enables successful in-ference with only 20.2GB of memory in the 2-bit configuration, demonstrating its capability to de-mocratize large model deployment on consumer-grade GPUs. Furthermore, FluxBin consistently achieves comparable memory usage to other 2-bit baselines like AQLM and QuIP#. 
+
+Impact of Model Configuration: The memory consumption correlates with the complexity of the binary decomposition: • Binary Bases: Increasing the global quantiza-tion precision from 2-bit to 4-bit naturally in-creases memory usage. For LLaMA-2-7B, the usage rises from 2.9GB (2b-g128) to 4.7GB (4b-g128), reflecting the storage of additional binary bases. • Salient Refinement: Incorporating salient re-finement (s8/s16) introduces a moderate mem-ory overhead compared to the standard 2b configuration due to the storage of the aux-iliary dense matrix and indices. However, it is worth noting that the difference between 2b-s8 and 2b-s16 is negligible (e.g., < 1
+
+MB for LLaMA-2-7B). This confirms that our Virtual Columnar Mapping strategy is highly memory-efficient: doubling the num-ber of salient columns incurs minimal addi-tional cost, as the overhead is dominated by fixed allocations (e.g., KV cache and activa-tion buffers) rather than the compact salient weights themselves. Table 3: Max GPU Memory (MB) Allocated in Inference with Input Length 512 and Output Length 512.                                                   
+
+> Baselines FluxBin Model Name FP16 AQLM 2bit QuIP# 2bit 2b-g128 2b-s8-g128 2b-s16-g128 4b-g128
+> LLaMA-2-7B 13330.61 5247.35 3461.87 2895.24 3474.30 3475.21 4684.38 LLaMA-2-13B 25681.85 4058.02 5785.77 4558.59 6172.64 6173.32 8474.27 LLaMA-2-70B OOM 20415.70 19360.84 20251.61 26393.52 26393.13 38633.95 Qwen3-8B 15779.09 ––4557.90 5185.48 5187.33 6444.57 Qwen3-14B 28322.55 ––7043.43 8215.49 8221.31 10486.19 Qwen3-32B 62720.77 ––12135.80 14993.71 14995.25 20323.56
+
+D Extension Experiment 
+
+D.1 Extension on Throughput 
+
+To comprehensively validate the generality of FluxBin, we extend our throughput evaluation to two representative model families: Qwen3 (8B, 14B, 32B), which features Grouped-Query Atten-tion (GQA), and LLaMA-3.1 (8B, 70B), represent-ing the latest generation of massive-scale models. As illustrated in Figure 6 and Figure 7, the re-sults exhibit remarkable consistency. Crucially, the throughput for hybrid precision configurations (2b-s8-g128 and 2b-s16-g128) remains virtually indis-tinguishable from the pure 2-bit baseline (2b-g128) across all cases. This empirical evidence reinforces two critical attributes of FluxBin: • Architectural Robustness: FluxBin proves to be architecture-agnostic. Whether applied to standard architectures or modern designs utilizing GQA (as in Qwen3), our kernel in-tegrates seamlessly, delivering consistent ac-celeration without being hindered by specific architectural variations. • Scalability to Massive Models: The method demonstrates exceptional scalability. On the massive LLaMA-3.1-70B, FluxBin maintains the same high-efficiency profile as on smaller models. This confirms that the overhead of our mixed-precision strategy does not grow disproportionately with model size, making it an ideal solution for deploying large-scale foundation models. 
+
+D.2 Extended Evaluation on Speed vs. Accuracy 
+
+To comprehensively validate the generalization ca-pability of FluxBin across diverse and modern LLM architectures, we extend our evaluation to the LLaMA-3.1 family (8B-Instruct and 70B) and the Qwen3 family (8B and 14B). The results are summarized in Table 4 and Table 5. 
+
+Robustness on LLaMA-3.1. LLaMA-3.1 poses significant challenges for low-bit quantization due to its complex activation distributions and high sen-sitivity. As shown in Table 4, existing 2-bit meth-ods like FlexRound (Lee et al., 2023) and AQLM suffer severe accuracy degradation, particularly on the 70B model where their average accuracy drops to 36.18% and 50.27%, respectively. In stark contrast, FluxBin maintains exceptional fidelity. Our 2b-s16-g128 configuration achieves an aver-age accuracy of 67.81%, outperforming AQLM by +17.5% and FlexRound by +31.6%. This un-derscores the effectiveness of our Hessian-guided hybrid base strategy in preserving critical informa-tion even in the most sensitive models. In terms of inference speed, FluxBin continues to lead. On LLaMA-3.1-8B, it reaches 217.03 tokens/s, sur-passing AQLM (124.50 tokens/s) by 1.74 ×. Even on the massive 70B model, FluxBin achieves 55.69 tokens/s, significantly faster than AQLM (19.00 tokens/s) and competitive with the higher-precision GPTQ (3-bit). 
+
+Adaptability to Qwen3 Architectures. We further evaluate FluxBin on the Qwen3 family to assess its adaptability to architectures employing Grouped-Query Attention (GQA). As detailed in Table 5, FluxBin demonstrates strong performance retention. Compared to the SLiM-LLM baseline, FluxBin achieves substantial accuracy gains (e.g., +18.3% on 8B Avg). More importantly, despite us-ing a lower bit-width ( ∼2.75 bits), FluxBin’s accu-racy is highly competitive with the 3.125-bit GPTQ baseline (e.g., 69.39% vs. 70.45% on 14B), while offering the theoretical throughput advantages of binary kernels. This confirms that FluxBin’s de-coupled row-column decomposition and salient-aware refinement are architecture-agnostic, effec-1 16 32 64 128       
+
+> Batch Size
+> 0.0 0.5 1.0 1.5 2.0
+> Throughput (tokens/s)
+> ×10 3LLaMA-3.1-8B-Instruct
+> FluxBin-2b-g128 FluxBin-2b-s8-g128 FluxBin-2b-s16-g128 FluxBin-4b-g128
+> 116 32 64 128
+> Batch Size
+> 01234
+> ×10 2LLaMA-3.1-70B-Instruct
+
+Figure 6: Throughput Comparison on LLaMA-3.1 Across All Batch Sizes 1 16 32 64 128            
+
+> Batch Size
+> 0.00 0.25 0.50 0.75 1.00 1.25 1.50 1.75
+> Throughput (tokens/s)
+> ×10 3Qwen3-8B
+> FluxBin-2b-g128 FluxBin-2b-s8-g128 FluxBin-2b-s16-g128 FluxBin-4b-g128
+> 116 32 64 128
+> Batch Size
+> 0.0 0.2 0.4 0.6 0.8 1.0 1.2
+> ×10 3Qwen3-14B
+> 116 32 64 128
+> Batch Size
+> 012345
+> ×10 2Qwen3-32B
+
+Figure 7: Throughput Comparison on Qwen3 Across All Batch Sizes 
+
+tively handling modern LLM designs. 
+
+D.3 Impact of Group Size 
+
+We investigate the impact of group size (g) on the trade-off between model accuracy and effective bit-width. As detailed in Table 6, we evaluate three granularities (g={64, 128, 256}) across pure and hybrid configurations. 
+
+Sensitivity of Global Base. The pure binary con-figuration (2b) exhibits high sensitivity to group granularity. Increasing g from 64 to 256 results in a severe degradation in average accuracy, drop-ping from 57.96% to 47.20%. This indicates that a coarse-grained global binary approximation strug-gles to capture the local weight variance without refinement. 
+
+Robustness of Hybrid Bases. In contrast, our salient-aware hybrid configurations (2b-s8 and 2b-s16) demonstrate remarkable robustness to larger group sizes. For instance, 2b-s16 maintains a high average accuracy of 58.87% even at g=256, signifi-cantly outperforming the pure 2b baseline at g=64 (57.96%). This confirms that our salient refinement effectively compensates for the information loss caused by coarse-grained grouping. 
+
+Optimal Configuration. While g=64 yields the highest accuracy, it inflates the effective bit-width to ∼3.5 bits (for s16). Conversely, g=128 strikes the optimal balance, achieving competitive accu-racy (59.15%) with a compact footprint ( ∼2.75 bits), justifying its selection as our default setting. 
+
+D.4 Sensitivity to Calibration Sample Size 
+
+We investigate the impact of the calibration c4 dataset size ( Ncal ) on both quantization perfor-mance and computational overhead for LLaMA-2-7B FluxBin-2b-s8-g128. As shown in Table 7, we vary Ncal from 64 to 1024. The results reveal a dis-tinct "rise-then-fall" trend in model performance. 
+
+Hessian Estimation vs. Overfitting. The per-formance trajectory can be explained through the approximation of the Hessian matrix H ≈ E[xx T ],which guides the quantization objective ∆L ≈  
+
+> 12
+
+∆wT H∆w.• Under-sampling ( Ncal < 256 ): When sam-ples are scarce, the Hessian estimate only captures the principal directions of activation magnitudes. Increasing Ncal from 64 to 256 significantly improves the average accuracy (57.86% → 58.77%) and reduces Wiki PPL (8.92 → 8.63). This gain stems from a more stable and representative estimation of H, al-lowing the algorithm to better identify sensi-tive weights. • Calibration Overfitting ( Ncal > 512 ): Sur-Table 4: Comparison of quantization methods on LLaMA-3.1 models. Higher accuracy and speed are better ( ↑). ∗
+
+HS = HellaSwag, WG = Winogrande. †MMLU: Evaluated using 5-shot in-context learning. We highlight the best , second , and third results (excluding FP16). 
+
+LLaMA-3.1 Method #W bit Speed (tok/s) ↑ ARC-e ↑ ARC-c ↑ HS ∗ ↑ WG ∗ ↑ MMLU † ↑ Avg. ↑
+
+8B-Instruct FP16 16 41.51 82.15 52.05 60.77 74.35 69.40 67.74 FlexRound 2.125 - 24.75 24.57 43.78 55.16 24.27 34.51 AQLM 2 124.50 46.25 30.89 61.40 58.25 42.29 47.82 GPTQ 3.125 – 72.14 37.97 53.73 68.75 46.90 55.90 FluxBin-2b-s8-g128 2.63 217.02 69.23 35.41 45.16 68.19 43.90 52.38 FluxBin-2b-s16-g128 2.75 217.03 69.91 36.77 44.49 68.43 45.15 52.95 70B FP16 16 OOM 86.66 64.93 85.03 79.64 78.58 78.97 FlexRound 2.125 - 25.13 24.83 50.67 53.59 26.70 36.18 AQLM 2 19.00 48.82 28.67 52.83 59.59 61.45 50.27 GPTQ 3.125 – 80.72 51.79 63.63 79.72 72.87 69.75 FluxBin-2b-s8-g128 2.63 58.38 81.27 49.66 58.06 79.01 64.71 66.54 FluxBin-2b-s16-g128 2.75 55.69 82.73 53.24 57.43 79.48 66.17 67.81 
+
+Table 5: Comparison of quantization methods on Qwen3 models. Higher accuracy and speed are better ( ↑). ∗ HS = HellaSwag, WG = Winogrande. We highlight the best , second , and third results (excluding FP16). 
+
+Qwen3 Method #W bit Speed (tok/s) ↑ Wiki ↓ PIQA ↑ ARC-e ↑ ARC-c ↑ BoolQ ↑ HS ∗ ↑ WG ∗ ↑ Avg. ↑
+
+8B FP16 16 28.60 9.72 76.39 83.29 55.38 86.57 57.16 68.03 71.14 SLiM-LLM 2 - 30.61 60.11 43.81 23.97 62.99 34.83 55.80 46.92 GPTQ 3.125 - 11.18 74.16 77.90 48.63 84.07 53.42 65.43 67.27 FluxBin-2b-s8-g128 2.63 121.85 13.46 74.37 74.41 42.58 83.33 47.90 66.30 64.82 FluxBin-2b-s16-g128 2.75 121.97 12.44 74.21 74.71 43.77 82.75 49.09 66.77 65.22 14B FP16 16 26.54 8.64 80.36 84.13 58.62 89.42 60.94 72.69 74.36 Slim-LLm 2 - 22.85 61.83 52.54 29.35 61.20 31.52 52.04 48.08 GPTQ 3.125 - 9.73 77.42 79.12 52.82 86.64 58.02 68.67 70.45 FluxBin-2b-s8-g128 2.63 102.07 11.60 74.59 77.74 51.96 87.43 53.96 69.30 69.16 FluxBin-2b-s16-g128 2.75 102.09 11.42 76.17 78.66 51.62 86.70 53.74 69.46 69.39 Table 6: Ablation study across different group sizes (g) in fixed configurations of LLaMA-2-7B. Lower Wiki PPL is better, while higher accuracy is better for downstream tasks. † The average bit includes weight and scale factors. The calculation for FluxBin is derived in Sec. C.2. ‡ HS = HellaSwag, WG = Winogrande.                                                                                                   
+
+> Config. W bit †Wiki ↓PIQA ↑ARC-e ↑ARC-c ↑BoolQ ↑HS ‡↑WG ‡↑Avg. ↑
+> 2b-g64 2.51 10.27 73.50 63.43 30.29 67.00 48.57 64.96 57.96 2b-g128 2.25 13.71 69.79 56.23 25.00 65.41 38.64 56.69 51.96 2b-g256 2.13 12.79 64.91 48.91 22.35 62.08 34.52 50.43 47.20 2b-s8-g64 3.25 7.95 73.01 67.59 32.51 73.70 47.05 66.06 59.99 2b-s8-g128 2.63 8.76 72.52 65.45 30.97 69.88 45.64 64.09 58.09 2b-s8-g256 2.31 8.91 72.47 64.98 30.46 71.25 44.97 64.88 58.17 2b-s16-g64 3.50 7.40 74.76 70.54 34.22 72.72 48.26 64.96 60.91 2b-s16-g128 2.75 8.20 75.50 65.40 32.42 70.80 45.97 64.80 59.15 2b-s16-g256 2.38 8.64 73.34 65.74 31.48 72.66 46.06 63.93 58.87
+
+prisingly, further increasing Ncal to 1024 leads to performance degradation (Avg. Acc drops to 58.07%). This phenomenon is cali-bration overfitting, occurs when the Hessian captures fine-grained distribution details spe-cific to the calibration set that do not general-ize to the test distribution. The quantization decision boundary becomes overly biased to-wards the calibration data, harming general-ization. 
+
+Efficiency Trade-off. In terms of cost, the PTQ time increases linearly with Ncal . While Ncal =1024 incurs a lengthy calibration time ( ∼75 min), 
+
+Ncal = 256 offers the optimal trade-off, achieving peak accuracy with a moderate time cost ( ∼25 min). Consequently, we adopt Ncal = 256 as the default setting for our main experiments. 
+
+E Profiling Study 
+
+E.1 Energy Efficiency and Resource Utilization 
+
+To evaluate the environmental impact and deploy-ment cost of FluxBin, we profile power consump-tion and hardware utilization on an NVIDIA A100 GPU using nvidia-smi at 100ms sampling inter-vals during steady-state decode generation (exclud-ing the first 10s of warmup). Total energy is com-puted as E = P 
+
+> t
+
+P (t) · ∆t. Table 8 summarizes the results across the LLaMA-2 family, with input and output length 128, batch size 1. 
+
+Energy Consumption. FluxBin demonstrates a dramatic reduction in total energy cost (Joules). For LLaMA-2-13B, FluxBin reduces total energy consumption by over 10.19 × compared to the FP16 baseline (579.23J vs. 5908.03J). This massive effi-ciency gain stems from two factors: (i) the signif-icant reduction in inference latency (as discussed in Sec. 4.2), which reduces the total active time of the GPU; and (ii) lower average power draw (∼115W vs. 225W). The reduced power draw is attributed to the minimized data movement over-head—since memory access energy typically domi-nates arithmetic energy—and the use of lightweight bitwise/integer operations instead of power-hungry FP16 arithmetic. 
+
+Hardware Utilization. A notable observation is the GPU busy time reported by nvidia-smi , where FluxBin consistently stays near >99.8%, whereas the FP16 baseline hovers around 67%–86%. We stress that this is a device-busy fraction, not a mea-sure of arithmetic-unit saturation; read together with the very low memory utilization below, it in-dicates that the LUT kernel keeps the SMs con-tinuously occupied and is not stalled waiting on HBM traffic, unlike the FP16 baseline. Simultane-ously, the memory-bandwidth utilization remains low (e.g., ∼6% for 7B). This is not a performance target in itself; it reflects the small weight traffic of the compressed 2-bit format and indicates that the kernel is limited by on-chip LUT/compute through-put rather than HBM bandwidth. For LLaMA-2-70B, where FP16 fails due to OOM, FluxBin oper-ates efficiently with high GPU utilization and stable power consumption ( ∼155W), further validating its scalability for massive model deployment. 
+
+E.2 Shared Memory Footprint Analysis 
+
+Efficient utilization of Shared Memory (SRAM) is critical for LUT-based kernels to maximize occu-pancy and hide memory latency. We analyze the shared memory consumption for a single thread Table 7: Ablation study of the number of calibration samples (nsample) on evaluation time and performance on LLaMA-2-7B, with FluxBin configuration 2b-s8-g128. Lower PTQ time and Wiki PPL are better ( ↓), while higher accuracy is better ( ↑). ‡ HS = HellaSwag, WG = Winogrande. 
+
+nsample Time (min) ↓ Wiki ↓ PIQA ↑ ARC-e ↑ ARC-c ↑ BoolQ ↑ HS ‡ ↑ WG ‡ ↑ Avg. ↑
+
+64 13.22 8.92 72.31 64.60 30.55 70.06 45.61 64.01 57.86 128 17.02 8.85 72.74 65.49 30.97 69.88 45.38 63.54 58.00 256 25.53 8.63 74.10 64.44 33.28 71.13 45.51 64.17 58.77 512 41.78 8.54 73.34 65.78 32.00 71.13 45.89 63.30 58.57 1024 74.58 8.76 72.63 65.40 30.80 69.82 45.67 64.09 58.07 
+
+Table 8: Power, energy, and resource utilization comparison on LLaMA-2 models. Lower power and energy are better ( ↓); GPU and memory utilization are reported as diagnostics of the compute/bandwidth balance rather than as quality targets.                                                                    
+
+> Model Quantization Avg Power (W) ↓Total Energy (J) ↓Avg GPU Util. (%) Avg Mem. Util. (%)
+> LLaMA-2-7B FP16 168.66 3467.69 67.01 18.09 FluxBin-2b-g128 106.75 462.98 99.83 5.55 FluxBin-2b-s8-g128 110.80 425.05 99.81 6.27 FluxBin-2b-s16-g128 107.40 434.34 99.87 6.27 FluxBin-4b-g128 109.40 401.16 99.85 7.65 LLaMA-2-13B FP16 225.49 5908.03 86.83 33.16 FluxBin-2b-g128 113.86 579.23 99.89 8.15 FluxBin-2b-s8-g128 115.82 603.46 99.98 9.69 FluxBin-2b-s16-g128 115.07 644.74 99.93 9.69 FluxBin-4b-g128 112.57 560.84 99.89 12.45 LLaMA-2-70B FP16 OOM OOM OOM OOM FluxBin-2b-g128 150.22 2522.47 99.95 26.54 FluxBin-2b-s8-g128 157.08 2441.06 99.98 34.19 FluxBin-2b-s16-g128 154.56 2560.80 99.98 34.19 FluxBin-4b-g128 159.68 2477.17 99.96 49.14
+
+block based on our default configuration ( Mtile =128 , K tile = 64 ). The total shared memory usage Stotal consists of two components: the storage for Look-Up Tables (SLUT ) and the intermediate accumulation buffer (Sacc ). 
+
+LUT Storage ( SLUT ). Since the input vector 
+
+X varies across the batch, and the column scaling factor αc is fused into the LUT, independent LUTs must be constructed for each batch index within the block. For a sub-vector size μ = 8 and Kb binary bases, the LUT storage is calculated as: 
+
+SLUT = Btile · Kb · Ktile 
+
+μ · 2μ · sizeof(float) (33) where Btile denotes the batch size handled per block. The term Ktile  
+
+> μ
+
+represents the number of sub-vectors per tile. 
+
+Accumulation Buffer ( Sacc ). To perform par-allel reduction and row-scale post-correction, we maintain a buffer to store partial sums for each row and each binary base before the final reduction. 
+
+Sacc = Btile · Kb · Mtile · sizeof(float) (34) 
+
+Impact of Sub-vector Size ( μ) on Resource Trade-offs. Table 9 presents a comparative anal-ysis of shared memory footprint, throughput, and energy efficiency between sub-vector sizes μ = 4 
+
+and μ = 8 .
+
+(i) Shared Memory Occupancy: Consistent with our theoretical derivation, μ = 4 maintains an ex-tremely low footprint ( <24 KB), imposing negligi-ble pressure on SRAM. In contrast, μ = 8 exhibits significantly higher consumption due to the expo-nential growth of LUT size ( 28 vs 24). Specifically, at Batch Size (BS) 8, μ = 8 consumes 136 KB. Crucially, this remains within the 164 KB capacity limit per SM on the NVIDIA A100, ensuring that the larger LUT configuration does not cause shared memory overflow or prevent kernel execution. 
+
+(ii) Performance and Selection Strategy: The end-to-end throughput remains comparable be-Table 9: Impact of sub-vectors size μ on block-level shared memory usage and end-to-end generation performance of FluxBin-2b-g128 LLaMA-2-7B. Higher throughput is better ( ↑), while lower power and energy are better ( ↓). 
+
+μ BS Shared Mem. (KB) Throughput ↑ Power (W) ↓ Energy (J) ↓
+
+41 3 213.97 107.13 397.15 4 12 656.50 146.97 802.74 8 24 952.86 172.31 1301.12 81 17 213.96 105.41 451.18 4 68 655.58 140.04 792.82 8 136 953.04 169.48 1220.45 tween μ = 4 and μ = 8 , suggesting it is not a shared memory bound regime. However, we select 
+
+μ = 8 as the default configuration driven by energy efficiency. According to our complexity analysis (Eq. 27), the number of sub-vectors within a fixed 
+
+K-tile is inversely proportional to μ (sub-vectors number = Ktile /μ ). Consequently, decreasing μ
+
+from 8 to 4 doubles the number of sub-vectors. This necessitates a 2× increase in the frequency of LUT read operations, which is shown to dominate the complexity in Sec. C.1, and the associated accumu-lation within the block. As empirically evidenced in Table 9, this intensified operational frequency di-rectly translates to higher power consumption (e.g., an increase of ∼3W at BS=8), making μ = 8 the superior choice for energy-efficient inference. 
+
+E.3 Tiling Strategy and TFLOPS Comparison 
+
+To maximize the utilization of GPU compute units and memory bandwidth, we conduct a sensitivity analysis on the matrix tiling parameters. Specifi-cally, we investigate the tile size along the output channel dimension ( Mtile ), the input channel di-mension ( Ktile ), and the salient refinement block size ( Ms_tile ). 
+
+Performance Metric. We evaluate the kernel throughput using Effective TFLOPS (Tera Floating-point Operations Per Second). Since FluxBin uti-lizes integer-based LUT logic rather than floating-point arithmetic, this metric represents the equiva-lent computational throughput required to perform the same matrix-vector multiplication in FP16. For hybrid configurations, we explicitly account for the additional workload introduced by the salient refinement branch. The Effective TFLOPS is cal-culated as: TFLOPS = 2 · M · (N + Nsal )
+
+Latency (s) × 10 12 (35) where M and N denote the output and input chan-nel dimensions, respectively, and Nsal is the num-ber of salient columns. For standard global base kernels (e.g., 2b-g128), we simply set Nsal = 0 .
+
+Optimization of Global Base Tiling. Table 10 presents the performance of pure binary kernels (2-bit and 4-bit) under various (Mtile , K tile ) combi-nations. • Impact of Mtile : Increasing Mtile yields the most significant performance gain. For instance, with the 2-bit kernel at K =4096 , expanding Mtile from 32 to 128 in-creases throughput from 0.30 TFLOPS to 0.81 TFLOPS. A larger Mtile increases the number of threads per block, effectively hiding instruc-tion latency and amortizing the overhead of LUT construction. • Impact of Ktile : The choice of Ktile involves a trade-off between reduction efficiency and shared memory occupancy. While larger Ktile 
+
+reduces the number of global atomic reduc-tions, it consumes more shared memory for LUT storage. Our empirical results suggest that Ktile = 32 or 64 typically offers the opti-mal balance. 
+
+Optimization of Mixed-Precision Tiling. Ta-ble 11 extends the analysis to hybrid bases con-figurations (2b-s8/s16-g128). We observe that the mixed-precision kernel exhibits tiling sensitivities similar to the global base kernel, with Mtile = 128 
+
+consistently delivering the best performance. Re-garding the salient-specific tile size Ms_tile , setting it to 64 provides a slight latency reduction com-pared to 16, as it promotes better memory coalesc-ing for the dense salient matrix. Notably, the per-formance gap between s8 and s16 configurations is marginal across all tiling setups. This confirms the efficiency of our Virtual Columnar Mapping (VCM) strategy, which ensures that scaling up the salient branch incurs minimal computational penal-ties. Based on these findings, we adopt (Mtile =128 , K tile = 64 , M s_tile = 64) as default for all end-to-end evaluations. 
+
+E.4 Kernel-Level Latency Comparison 
+
+To isolate the kernel contribution from the end-to-end pipeline, we further compare the per-operator GEMV latency of FluxBin against the leading 2-bit weight-only baselines, AQLM and QuIP#, across the weight shapes that dominate LLM lin-ear layers. Each kernel is timed in isolation us-ing its official implementation. As reported in Ta-ble 12, FluxBin’s LUT-based kernel is consistently the fastest at the pure 2-bit setting, e.g. 41 μs at 
+
+4096 × 4096 versus 112 μs for QuIP# and 79 μsfor AQLM. This gap reflects the reconstruction cost of the competing schemes: QuIP# decodes an E8 lattice and AQLM performs a multi-codebook gather per weight, whereas FluxBin reconstructs each weight with a single foldable table lookup plus addition. Crucially, the hybrid-precision con-figurations (2b-s8/s16-g128) add only a marginal overhead over the pure 2-bit kernel, confirming that the Virtual Columnar Mapping keeps the salient branch nearly free; and even the 4-bit kernel re-mains faster than the 2-bit baselines at most shapes. Table 10: Effect of tile sizes on FluxBin kernel performance. 
+
+FluxBin-2b-g128 FluxBin-4b-g128 M K Mtile Ktile Latency (μs) ↓ TFLOPS ↑ Latency (μs) ↓ TFLOPS ↑
+
+4096 4096 32 32 113 .3 0.30 109 .6 0.31 
+
+32 64 143 .0 0.23 108 .4 0.31 
+
+32 128 228 .9 0.15 108 .4 0.31 
+
+64 32 58 .0 0.58 72 .9 0.46 
+
+64 64 67 .6 0.50 66 .9 0.50 
+
+64 128 84 .6 0.40 66 .8 0.50 
+
+128 32 41 .2 0.81 57 .8 0.58 
+
+128 64 41 .4 0.81 56 .3 0.60 
+
+128 128 47 .5 0.71 56 .4 0.60 
+
+4096 11008 32 32 289 .2 0.31 296 .4 0.30 
+
+32 64 379 .9 0.24 307 .0 0.29 
+
+32 128 594 .5 0.15 308 .7 0.29 
+
+64 32 148 .5 0.61 215 .1 0.42 
+
+64 64 166 .3 0.54 200 .9 0.45 
+
+64 128 208 .8 0.43 201 .0 0.45 
+
+128 32 102 .8 0.88 158 .9 0.57 
+
+128 64 103 .5 0.87 181 .3 0.50 
+
+128 128 114 .8 0.79 182 .1 0.50 Table 11: Effect of tile sizes on FluxBin kernel performance on hybrid bases. 
+
+FluxBin-2b-s8-g128 FluxBin-2b-s16-g128 M K Ktile Mtile Ms_tile Lat (μs) ↓ TFLOPS ↑ Lat (μs) ↓ TFLOPS ↑
+
+4096 4096 32 32 16 121 .0 0.29 124 .4 0.28 
+
+32 119 .5 0.29 123 .2 0.28 
+
+64 118 .3 0.29 121 .9 0.28 
+
+64 16 67 .3 0.51 69 .0 0.50 
+
+32 65 .7 0.53 67 .9 0.51 
+
+64 64 .7 0.53 66 .5 0.52 
+
+128 16 51 .5 0.67 53 .5 0.65 
+
+32 50 .0 0.69 52 .1 0.66 
+
+64 48 .6 0.71 50 .9 0.68 
+
+64 32 16 157 .7 0.22 158 .7 0.22 
+
+32 154 .4 0.22 156 .5 0.22 
+
+64 155 .1 0.22 156 .6 0.22 
+
+64 16 76 .3 0.45 78 .2 0.44 
+
+32 74 .6 0.46 77 .0 0.45 
+
+64 73 .7 0.47 75 .6 0.46 
+
+128 16 49 .8 0.69 51 .7 0.67 
+
+32 48 .3 0.72 50 .5 0.69 
+
+64 47 .1 0.74 49 .2 0.70 
+
+4096 11008 32 32 16 297 .8 0.31 304 .2 0.30 
+
+32 296 .5 0.31 303 .1 0.30 
+
+64 295 .3 0.31 301 .3 0.30 
+
+64 16 159 .4 0.57 161 .1 0.57 
+
+32 157 .9 0.58 159 .8 0.57 
+
+64 156 .8 0.58 157 .9 0.58 
+
+128 16 122 .4 0.75 124 .1 0.73 
+
+32 120 .9 0.75 122 .6 0.74 
+
+64 119 .9 0.76 121 .4 0.75 
+
+64 32 16 388 .1 0.24 402 .0 0.23 
+
+32 386 .5 0.24 405 .1 0.23 
+
+64 385 .2 0.24 401 .5 0.23 
+
+64 16 172 .6 0.53 174 .8 0.52 
+
+32 171 .1 0.53 173 .4 0.53 
+
+64 170 .1 0.54 172 .2 0.53 
+
+128 16 112 .1 0.81 114 .1 0.80 
+
+32 110 .7 0.82 112 .6 0.81 
+
+64 109 .7 0.83 111 .4 0.82 Table 12: Per-operator GEMV kernel latency ( μs) across weight matrix sizes ( M × N ), measured for the 2-bit quantized baselines and FluxBin. Lower is better ( ↓); the best result in each row is in bold . Each kernel is measured in isolation with its official implementation. 
+
+Weight Size (M × N ) Baselines FluxBin AQLM 2bit QuIP# 2bit 2b-g128 2b-s8-g128 2b-s16-g128 4b-g128 
+
+4096 ×4096 79 112 41 47 49 56 5120 ×5120 111 174 63 73 74 87 4096 ×11008 169 272 102 109 111 158 5120 ×13824 277 411 167 166 169 252

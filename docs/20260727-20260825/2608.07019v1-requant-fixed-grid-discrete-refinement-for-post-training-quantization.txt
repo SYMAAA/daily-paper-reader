@@ -1,0 +1,679 @@
+Title: ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization
+
+URL Source: https://arxiv.org/pdf/2608.07019v1
+
+Published Time: Mon, 10 Aug 2026 00:42:25 GMT
+
+Number of Pages: 21
+
+Markdown Content:
+# REQUANT : F IXED -G RID DISCRETE REFINEMENT FOR 
+
+# POST -T RAINING QUANTIZATION 
+
+Yongge Ma 1, Guoan Wang 2, Feiyu Wang 1, Yaoming Li 1, Qian Zhang 3, Zihan Yan 4, Yinjun Han 5, Tong Yang 1∗
+
+> 1
+
+School of Computer Science, Peking University 
+
+> 2
+
+School of Software and Microelectronics, Peking University 
+
+> 3
+
+School of Physics, Peking University 
+
+> 4
+
+The Chinese University of Hong Kong, Shenzhen 
+
+> 5
+
+Central Research Institute, ZTE Corporation 
+
+## ABSTRACT 
+
+Post-training quantization (PTQ) is widely used to reduce the memory and computational cost of large language models. Existing PTQ methods typically obtain an initial quantized model through heuristic rules or greedy optimization, and once quantization is completed the resulting integer assignments are usually treated as final. This observation motivates a complementary optimization stage within PTQ that keeps quantized weights improvable after an executable quantized model has been produced, while preserving the quantized format. We introduce ReQuant, a backpropagation-free fixed-grid refinement procedure for this stage. Agnostic to the PTQ initializer, ReQuant takes an existing quantized model as a feasible starting point and iteratively revisits its discrete weight assignments on the fixed quantization grid. Accepted updates strictly reduce the mean squared reconstruction error and remain on the original grid. In this way, ReQuant turns the initially fixed PTQ output into an iteratively optimizable discrete solution and serves as a plug-and-play post-processing stage for existing PTQ pipelines. Experiments across diverse model families, bit-widths, and downstream tasks show that ReQuant consistently improves quantized models from heterogeneous PTQ initializers, with especially large gains on simple initializers and lower bit-widths. Notably, ReQuant can refine a simple round-to-nearest initialization across multiple sweeps until it approaches or surpasses GPTAQ under the same quantization format. These results establish ReQuant as a practical complementary stage for further improving existing PTQ pipelines. 
+
+Keywords Post-training quantization · Large language models · Model quantization · Discrete optimization 
+
+## 1 Introduction 
+
+Large language models (LLMs) based on the transformer architecture have achieved remarkable performance across a wide range of tasks [1–5]. However, the rapidly growing parameter sizes of LLMs lead to significant deployment costs [6, 7]. Modern LLMs often contain tens to hundreds of billions of parameters, with some mixture-of-experts models reaching the trillion-parameter scale, requiring substantial memory for inference [8–10]. During autoregressive decoding, model weights dominate memory consumption, making memory capacity a major bottleneck for inference. Quantization addresses this challenge by approximating full-precision weights or activations with values from a discrete quantization grid, thereby reducing both storage and memory access costs [11, 12]. As a result, quantization has become a key technique for improving deployment efficiency without modifying the model architecture [13, 14]. Existing quantization methods can be broadly categorized into two paradigms: quantization-aware training (QAT) and post-training quantization (PTQ) [15]. QAT simulates low-precision arithmetic during training with fake-quantization operations and back-propagates through the non-differentiable quantizer via the straight-through estimator [11, 16, 17]. While QAT often achieves the strongest low-bit accuracy, it requires access to training data and repeated forward– backward optimization, making it prohibitively expensive at LLM scale [18–22]. In contrast, PTQ directly quantizes pretrained full-precision models using only a small calibration set and no additional training, making it a practical alternative for large-scale deployment [13, 23–26]. Existing PTQ methods mainly improve 
+
+> ∗
+
+Corresponding author: yangtong@pku.edu.cn arXiv:2608.07019v1 [cs.AI] 7 Aug 2026 ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 
+
+quantization through either reshaping the weight or activation distributions, or minimizing reconstruction error on a calibration dataset. Distribution-reshaping methods, such as SmoothQuant [14], QuaRot [27], and SpinQuant [28], apply scaling or rotation transformations to make weight or activation distributions more compatible with the quantization grid. AWQ [13] instead uses activation-aware scaling to protect salient weights from large quantization errors. Reconstruction-based methods, such as GPTQ [24] and GPTAQ [25], build on OBQ-style second-order approximations and perform greedy column-wise quantization with error compensation. Existing PTQ methods differ in design, yet they typically treat the grid assignments obtained after quantization as final, as shown in Figure 1. For reconstruction-based methods such as GPTQ [24] and GPTAQ [25], once a column is mapped to the quantization grid, its discrete assignment is fixed, and subsequent steps compensate for the induced error through the remaining columns while leaving earlier decisions unchanged. From a discrete optimization perspective, the quantized model produced by such methods is a feasible assignment on the fixed quantization grid and remains open to further improvement after quantization. This observation motivates us to revisit a complementary stage within PTQ: after an upstream method has already produced an executable quantized model, its discrete assignments can still be improved while preserving the deployment format. We propose ReQuant, a backpropagation-free fixed-grid refinement procedure for this stage. ReQuant is a post-processing stage inside PTQ that takes a completed PTQ output as input, freezes bit-width, scales, zero-points, grid layout, and inference kernels, and directly revisits integer codes on that fixed grid. Through iterative refinement, ReQuant improves quantized weights from heterogeneous PTQ initializers while preserving the deployed representation. Our main contributions are summarized as follows: • Method. ReQuant formulates post-quantization discrete refinement as a composable stage inside PTQ. It treats an existing PTQ solution as a feasible initialization and optimizes its integer weight codes on the fixed quantization grid, while preserving the bit-width, scale, zero-point, grid layout, and deployment format. • Analysis. We show that ReQuant reduces the overall reconstruction loss and terminates after a finite number of accepted updates, with per-sweep complexity comparable to a single GPTAQ pass. • Empirical results. Across Llama-3 8B/70B and Qwen3-14B under W4A16, W4A4, W3A4, and W2A4, ReQuant improves perplexity, KL divergence, and zero-shot accuracy over four PTQ baselines across the reported settings, with especially large gains for simple initializers and lower bit-widths; the offline budget is controllable through the number of sweeps T . Matched W4A16 pipeline comparisons with FlexRound [29] and a paired GPTQ ±ReQuant study further isolate refinement gains under a backpropagation-free procedure, and a Qwen3-235B MoE experiment demonstrates large-scale feasibility. 
+
+## 2 Related Work 
+
+Post-training quantization. Post-training quantization (PTQ) maps pre-trained weights, and optionally activations, to a discrete grid using only a small calibration set, without retraining [14, 30, 31]. Existing PTQ methods mainly improve quantization by either reshaping weight or activation distributions to better align with the quantization grid, or minimizing reconstruction error to preserve the behavior of the full-precision model. 
+
+Distribution-reshaping methods make weights or activations more amenable to low-bit quantization by modifying their numerical distributions before quantization. SmoothQuant [14] uses channel-wise rescaling to migrate activation outliers into weights, thereby reducing activation quantization difficulty. OmniQuant [31] learns lightweight affine transformations to reshape weight and activation distributions during calibration. QuaRot [27] and SpinQuant [28] apply orthogonal rotations to redistribute outliers across dimensions, producing representations that are more robust to low-bit quantization. 
+
+Optimization-driven methods formulate PTQ as a reconstruction-error minimization problem and solve it through local or greedy optimization procedures. Building on OBQ [32], GPTQ [24] performs sequential column-wise quantization under a second-order approximation. Once a column is mapped to the quantization grid, its assignment is fixed, while the resulting quantization error is compensated by closed-form updates to the remaining unquantized columns. GPTAQ [25] further accounts for the activation mismatch introduced by preceding quantized layers, using the activations actually produced by the quantized model to more accurately evaluate the reconstruction error. In parallel, AWQ [13] takes a complementary activation-aware perspective. It identifies salient weight channels using activation statistics and applies channel-wise rescaling to better preserve their contribution after quantization. 
+
+Construction-time continuous relaxation vs. post-deployment fixed-grid refinement. A related but distinct line of work optimizes quantization decisions while constructing the quantized model from full-precision weights. 2ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT Full-Precision Model                                                                                     
+
+> Initial PTQ Weights
+> ReQuant
+> Final Quantized Model 1-1 0101-1 1001-1 -1 001
+> ... ... ... ...
+> -2 -1 012
+> 1-1 1101-1 1001-1 -1 001
+> ... ... ... ...
+> 1-1 1101-1 1001-1 -1 001
+> ... ... ... ...
+> -2 -1 012
+> +0.31 +0.12 +0.04 -0.28 -0.06
+> 1-1 0101-1 1001-1 -1 001
+> ... ... ... ...
+> 0.732 -1.246 0.087 0.512 -0.345 0.678 -0.910 1.203 0.156 -0.225 0.998 -0.667 -1.112 0.443 -0.321 0.789
+> ... ... ... ...
+
+Figure 1: Overview of ReQuant. ReQuant refines an initial PTQ model by iteratively updating discrete weight assignments on the fixed quantization grid, improving reconstruction error while preserving the quantized format. AdaRound [33] learns continuous rounding variables through gradient-based optimization; BRECQ [34] extends reconstruction-based PTQ to block-level settings; and FlexRound [29] jointly learns element-wise division factors and a quantization-grid scale via STE-based backpropagation for Transformers. AdaQuant [26] similarly optimizes layer-level reconstruction with continuous parameters. These methods introduce continuous surrogate variables, optimize a relaxed objective, and then discretize to obtain the final codes. They share a reconstruction objective with ReQuant, but operate at a different pipeline stage and optimize different variables. ReQuant instead starts after an upstream PTQ method has already produced an executable quantized model. It freezes the inherited bit-width, scales, zero-points, quantization grid, storage format, and inference kernels, and directly updates integer codes on that fixed grid with exact discrete loss-change evaluations, remaining free of model backpropagation, STE, and optimizer states for learnable quantizer parameters. Consequently, every intermediate solution remains deployable under the original format. We therefore position ReQuant as a complementary, initializer-agnostic refinement stage inside PTQ that can be composed with AdaRound/BRECQ/FlexRound-style construction-time optimization as well as with standard heuristic or greedy PTQ pipelines. 
+
+## 3 Method 
+
+3.1 Preliminaries 
+
+For a linear layer with full-precision weights W ∈ Rdrow ×dcol and calibration activations X ∈ Rdcol ×m, classical layer-wise PTQ is commonly formulated as minimizing the reconstruction error 
+
+min ∥WX − Wq X∥2 
+
+> F
+
+. (1) However, at inference time, the input to a given layer is produced by preceding quantized layers rather than by the full-precision model. To model this activation mismatch, GPTAQ [25] replaces the full-precision activations X in the quantized branch with the activations eX observed under the quantized prefix, yielding the activation-aware objective 
+
+min L(Wq ) = ∥WX − Wq eX∥2 
+
+> F
+
+. (2) Both X and eX can be collected by forward passes on the calibration set, using the full-precision and partially quantized models, respectively. 
+
+Notation. For a matrix W ∈ Rdrow ×dcol , the first subscript indexes rows and the second indexes columns: Wi, :
+
+denotes its i-th row and W:,j denotes its j-th column. For an ordered index set R, Wi,R denotes the entries of row i
+
+restricted to the columns in R, and WR,R denotes the corresponding principal submatrix when the matrix is square. The same convention applies to eH := eX eX⊤ and other matrices appearing below. 
+
+3.2 ReQuant Method 
+
+The framework of ReQuant is shown in Figure 1. The core idea is that existing PTQ methods typically stop after a single quantization procedure and treat the resulting on-grid assignment as final, whereas ReQuant uses this assignment as initialization and continues to optimize the discrete weight values on the same quantization grid. 3ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 
+
+Optimization objective. After the quantization parameters (e.g., scale and zero-point) are fixed, we consider the optimization problem on the induced discrete grid. Our objective is to further optimize the quantized weights: 
+
+min   
+
+> Wq∈G
+
+L(Wq ) = ∥WX − Wq eX∥2 
+
+> F
+
+. (3) where G is the fixed quantization grid. We refer to L(Wq ) as the layer-wise reconstruction objective. In this work, we adopt Eq. 3 as the refinement objective and optimize the quantized weights directly over the discrete grid. 
+
+Row-wise decomposition. The key observation is that each output row of a linear layer is produced by the corre-sponding weight row independently. In particular, the i-th row of Wq only affects the i-th row of the quantized output 
+
+Wq eX. Therefore, the reconstruction loss decomposes as 
+
+∥WX − Wq eX∥2 
+
+> F
+
+=
+
+> drow
+
+X
+
+> i=1
+
+∥Wi, :X − Wq,i, : eX∥22. (4) Updating a single coordinate Wq,i,j affects only the i-th term in Eq. 4; the losses of all other rows remain unchanged. Thus, reducing L for any single row directly decreases the layer-level loss L(Wq ), and ReQuant can refine each row independently and in parallel. In the rest of this section we derive the update rule for a single row and omit the row index for clarity. 
+
+Row-level reconstruction loss. Following the row-wise decomposition above, we focus on a single row and omit the row index. Let w = Wi, : denote the full-precision weight row, q = Wq,i, : denote its current quantized counterpart, and e = w − q denote the corresponding quantization error. By Eq. 4, the contribution of this row to L(Wq ) is 
+
+L(e) = ∥wX − q eX∥22 = ∥e eX − w∆X∥22, (5) where ∆X = eX − X denotes the activation mismatch induced by earlier quantized layers. Eq. 5 rewrites the row-level loss as a function of the quantization error e, which is the form on which ReQuant operates. We define the gradient vector g as the gradient of L with respect to e:
+
+g = ∇eL(e) = 2( e eH − wB ), (6) where B = ∆ X eX⊤ and eH = eX eX⊤ ⪰ 0 is the row-level Hessian of L with respect to e. Consequently, L(e) is a convex quadratic function of e, and the curvature along coordinate j is eHjj . If the quantized value at coordinate j is moved by an on-grid step ∆qj , then the quantization error becomes e′ = e − ∆qj uj , and the loss change is 
+
+∆L(∆ qj ) = L(e′) − L(e) = −∆qj gj + (∆ qj )2 eHjj . (7) The derivation is given in Appendix A.1. This computation reduces the cost of evaluating the reconstruction error. Once the current row loss L and vector g are computed, the effect of any subsequent coordinate update can be obtained directly from Eq. 6 and Eq. 7. Therefore, during refinement, ReQuant only needs to maintain the current row loss L and vector g, which substantially reduces the cost of evaluating candidate updates. 
+
+Coordinate update. Let sj , oj , and zj denote the scale, zero-point, and quantized integer code of coordinate j, so that qj = ( zj − oj )sj . Starting from the current integer code zj , ReQuant considers integer offsets k such that the updated code zj + k remains within the representable range. Therefore, any candidate update has the form ∆qj = ks j ,and the feasible set at coordinate j is 
+
+Gj = { ks j : k ∈ Z, k ̸ = 0 , z min ≤ zj + k ≤ zmax }. (8) In practice we further restrict the search to a local neighborhood of size K,
+
+G(K) 
+
+> j
+
+= { ks j ∈ G j : 1 ≤ | k| ≤ K },
+
+and score candidates with Eq. 7, selecting 
+
+∆q⋆j = arg min 
+
+> ∆q∈G (K)
+> j
+
+∆L(∆ q). (9) This step can be viewed as a discrete coordinate descent update. With all other coordinates fixed, ReQuant moves coordinate j to the best feasible grid point in the K-neighborhood. 4ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 
+
+Algorithm 1 Post-Quantization Discrete Coordinate Refinement                                                                 
+
+> 1: Input: full-precision row w, initial quantized row q, grid information, eH,B, neighborhood size K, sweeps T
+> 2: e←w−q,g←2( eeH−wB )
+> 3: L← ∥ eeX−w∆X∥22
+> 4: for t= 1 , . . . , T do
+> 5: for j= 1 , . . . , d col do
+> 6: ∆q⋆j←arg min ∆qj∈G (K)
+> j
+> ∆L(∆ qj)
+> 7: if ∆L(∆ q⋆j)<0then
+> 8: qj←qj+ ∆ q⋆j
+> 9: g←g−2∆ q⋆jeHj, :
+> 10: L←L+ ∆ L(∆ q⋆j)
+> 11: end if
+> 12: end for
+> 13: end for
+> 14: Return: refined quantized row q
+
+ReQuant accepts a move whenever it strictly decreases the row loss, i.e., ∆L(∆ q⋆j ) < 0. Upon acceptance, ReQuant updates coordinate j and increments the row loss by L ← L + ∆ L(∆ q⋆j ). The gradient vector is then refreshed incrementally as 
+
+g ← g − 2∆ q⋆j eHj, :. (10) This follows from g = 2( e eH − wB ), since an accepted move changes e only at coordinate j. Therefore, g can be updated in O(dcol ) time using the j-th row of eH.Because each accepted update changes e and hence the score vector g, a coordinate that appears locally fixed in one pass can become improvable after other coordinates have changed. Thus, a single greedy traversal over j = 1 , . . . , d col 
+
+leaves additional discrete improvements available for the coupled quadratic objective L(e). ReQuant therefore repeats the coordinate cycle for a fixed number of sweeps T , as summarized in Algorithm 1, providing a controllable compute– accuracy trade-off. 
+
+3.3 Analysis Convergence. ReQuant performs discrete coordinate descent over a finite quantization grid, searching the K-neighborhood G(K) 
+
+> j
+
+at each coordinate. At each step, a candidate update is accepted whenever ∆L(∆ q⋆j ) < 0
+
+(Algorithm 1). Hence, every accepted update strictly decreases the corresponding row-level loss L. Since the layer objective decomposes as L(Wq ) = P 
+
+> i
+
+L(ei) and each update affects a single row, it also strictly decreases L(Wq ).The feasible set is finite, and the objective strictly decreases after each accepted update, so each accepted move yields a distinct quantized state with strictly lower reconstruction loss. If refinement continues until every K-neighborhood move has been exhausted, the returned solution is a coordinate-wise local optimum within that neighborhood; in practice a fixed budget of T sweeps already yields strong empirical improvements while keeping offline cost controllable. A full proof of the infinite-sweep case is provided in Appendix A.2. As the calibration set increases, the empirical activation statistics in eH and B provide increasingly accurate estimates of their population counterparts. As a result, the empirical refinement objective better approximates the population-level objective, and the solution obtained by ReQuant becomes better aligned with the population-level on-grid optimum. 
+
+Reconstruction loss versus downstream metrics. The analysis guarantees monotone decrease of the empirical layer-wise objective along accepted updates, and neighborhood-local optimality when the K-search is run to exhaustion. Reducing layer reconstruction error is a standard proxy in PTQ [24, 33, 34]: if the remaining network is locally Lipschitz, smaller layer residuals tighten a bound on later hidden-state perturbations. Consistent with this proxy, our experiments show that reconstruction-driven refinement typically improves held-out PPL, KL, and zero-shot accuracy, which we report as empirical outcomes of Algorithm 1. 
+
+Efficiency. ReQuant evaluates candidate updates from cached statistics rather than recomputing the full reconstruction loss each time. Using the row-wise decomposition and the closed-form coordinate score in Eq. 7, it scores on-grid moves efficiently and refreshes the score vector after each accepted move with a rank-one update. Since output rows are independent, they can also be refined in parallel while sharing the same activation statistics. For a layer with T
+
+5ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 
+
+refinement sweeps, the dominant cost is O(md 2col + ( T + 1) drow d2col ) under low-bit quantization, where each coordinate has a small number of feasible moves. Appendix A.3 provides the full complexity analysis. 
+
+## 4 Experiments 
+
+4.1 Experimental Setup Overview. We organize our experiments as follows. First, we use GPTAQ as the primary baseline and evaluate perplexity and downstream task performance on Qwen3 [35] and Llama-3 [36]. We then examine scale, including 8B, 70B, and a 235B MoE setting (Section 4.6). Finally, we evaluate generality across PTQ initializers (RTN, AWQ [13], GPTQ [24], GPTAQ [25]), cost–benefit via T , and comparisons with FlexRound. 
+
+Implementation details. We implement ReQuant with Hugging Face Transformers [37] and PyTorch [38]. We use WikiText-2 [39] as the calibration dataset and sample 512 sequences of length 2048 to collect activation statistics. Unless otherwise specified, weights are quantized with per-channel asymmetric quantization, and activations are quantized with per-tensor asymmetric quantization. Following GPTAQ [25], activation quantizers are calibrated and applied before weight quantization, so ReQuant optimizes weights under the activations produced by the quantized model. By default, we set the number of ReQuant refinement sweeps to T =4 and evaluate K=2 neighboring grid moves in each direction for every coordinate. Unless noted otherwise, main tables use data-parallel calibration on eight NVIDIA GeForce RTX 4090 GPUs; Llama-3 70B uses four NVIDIA B200 GPUs. FlexRound comparisons (Section 4.5) are timed on an NVIDIA RTX PRO 6000 for memory-matched fairness, and the Qwen3-235B experiment (Section 4.6) uses eight NVIDIA H200 GPUs. 
+
+Evaluation. We evaluate language modeling performance by reporting perplexity on WikiText-2 [39], UltraChat-2k [40], and NuminaMath [41]. For downstream evaluation, we report accuracy on ten standard commonsense reasoning and language understanding benchmarks, including ARC-Challenge (ARC-C), ARC-Easy (ARC-E), BoolQ, CEval, HellaSwag, LAMBADA, OpenBookQA (OBQA), PIQA, SocialIQA (SIQA), and Winogrande [42–50]. We use the average accuracy across these tasks as the overall downstream score. 
+
+4.2 Main results Results on Llama-3 8B and Qwen3-14B. We evaluate ReQuant on Llama-3 8B and Qwen3-14B under W4A16 and W4A4 quantization. We use four representative PTQ initializers: RTN [30], AWQ [13], GPTQ [24], and GPTAQ [25], covering both heuristic and greedy reconstruction-based quantization methods. In Table 1, both W4A16 and W4A4 use QuaRot [27] rotations; a W4A16 ablation without QuaRot is reported in Appendix B.6. ReQuant is applied only after the initial PTQ stage: the quantization grid, scale, zero-point, and bit-width remain fixed, and only the integer code at each coordinate is updated. Table 1 reports the average zero-shot accuracy over ten downstream tasks across all model, precision, and initializer combinations. We defer the corresponding KL divergence and perplexity (PPL) results on WikiText-2, UltraChat-2k, and NuminaMath to Appendix B.1 and Appendix B.2, report runtime measurements in Appendix B.4, and analyze how WikiText-2 PPL, KL, and average zero-shot accuracy vary with the calibration sample count for Llama-3 8B at W4A4 in Appendix B.7. Table 1 shows that ReQuant improves average downstream accuracy across both precision settings, both model families, and all four PTQ initializers in the reported pairs. The gains are larger for simpler initializers such as RTN and AWQ, indicating that many errors left by basic quantizers can still be corrected on the fixed grid. For example, under W4A16 on Qwen3-14B, ReQuant improves RTN by +2 .51 average accuracy points. Under the more challenging W4A4 setting, where both weights and activations are quantized to 4 bits, the improvement becomes more pronounced: on Llama-3 8B, ReQuant improves RTN by +8 .61 average accuracy points. ReQuant also improves stronger initializers such as GPTQ and GPTAQ, confirming that residual fixed-grid assignment error remains exploitable even after advanced PTQ construction. The offline budget remains controllable through T , so practitioners can allocate more sweeps when larger gains are desired. Notably, ReQuant substantially narrows the gap between simple and advanced PTQ methods. Under W4A4, RTN refined by ReQuant nearly matches GPTAQ on Llama-3 8B in average accuracy, and surpasses GPTAQ on Qwen3-14B. This suggests that a substantial share of the performance gap among PTQ methods comes from correctable discrete assignment errors that ReQuant can recover on the fixed grid. 
+
+Results on Llama-3 70B at W4A4. We further evaluate ReQuant on Llama-3 70B under the challenging W4A4 setting with QuaRot [27] rotation. ReQuant is applied to the same four PTQ initializers: RTN, AWQ, GPTQ, and 6ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 
+
+Table 1: Zero-shot accuracy (%) at W4A16 and W4A4; both settings use QuaRot [27] rotation (W4A16 without QuaRot is in Appendix B.6). Avg. is the mean over ten tasks; the better entry of each pair is bolded. Corresponding KL/PPL are reported in Table 7 (Appendix B.1) and Table 8 (Appendix B.2). 
+
+Precision Method Arc C Arc E BoolQ CEval HellaSwag LAMBADA OBQA PIQA SIQA Winogrande Avg. ↑
+
+Llama-3 8B 
+
+FP – 53.58 77.69 81.25 48.44 79.17 75.70 45.00 80.90 46.88 73.24 66.19 W4A16 RTN 47.53 69.74 78.01 36.63 75.78 73.78 43.00 77.91 45.04 70.40 61.78 RTN + ReQuant 50.68 75.93 80.18 41.98 77.06 73.86 43.20 79.16 45.39 72.93 64.04 
+
+AWQ 50.34 77.53 79.05 38.86 77.34 74.36 44.80 80.09 45.75 71.82 63.99 AWQ + ReQuant 51.79 75.59 82.11 44.65 77.72 73.92 44.20 79.43 46.42 72.30 64.81 
+
+GPTQ 51.88 77.65 80.76 45.32 78.13 74.99 44.60 79.49 45.80 73.56 65.22 GPTQ + ReQuant 54.18 77.69 82.14 45.47 78.01 75.12 44.60 79.98 46.06 72.22 65.55 
+
+GPTAQ 53.33 77.95 81.80 44.73 77.97 75.28 44.40 80.20 45.85 73.48 65.50 GPTAQ + ReQuant 53.33 78.16 80.86 47.47 78.17 75.49 45.20 80.36 46.21 72.30 65.76 
+
+W4A4 RTN 39.85 62.58 67.40 31.05 66.16 51.31 37.80 70.51 42.37 64.25 53.33 RTN + ReQuant 46.25 74.58 78.07 38.11 74.46 70.02 44.00 77.58 45.65 70.72 61.94 
+
+AWQ 37.97 60.44 65.93 28.97 68.89 60.59 37.80 71.11 41.50 64.01 53.72 AWQ + ReQuant 44.28 69.95 73.67 34.32 73.22 66.93 42.40 75.90 44.73 67.32 59.27 
+
+GPTQ 46.93 74.24 75.81 36.92 74.59 70.13 42.60 76.77 45.29 69.61 61.29 GPTQ + ReQuant 47.35 75.00 76.67 37.67 75.46 71.10 42.00 78.07 45.60 68.43 61.82 
+
+GPTAQ 47.27 75.88 78.62 37.59 75.57 70.50 42.00 78.07 45.70 68.51 61.97 GPTAQ + ReQuant 50.09 74.16 77.58 39.38 75.69 70.99 42.00 78.51 45.75 69.61 62.38 
+
+Qwen3-14B 
+
+FP – 60.32 82.95 89.30 82.32 78.82 67.82 46.40 79.87 52.05 72.53 71.24 W4A16 RTN 55.20 78.32 86.45 78.38 75.82 67.09 42.20 79.11 48.00 69.69 68.03 RTN + ReQuant 59.90 82.45 88.47 79.20 77.72 67.75 46.60 80.03 50.61 72.69 70.54 
+
+AWQ 57.76 81.86 88.07 78.16 76.17 62.72 45.80 79.33 50.56 71.27 69.17 AWQ + ReQuant 59.30 82.07 89.60 80.46 77.74 66.25 45.40 79.71 51.94 72.14 70.46 
+
+GPTQ 59.73 82.03 88.04 79.94 77.97 68.29 45.00 79.43 51.69 73.09 70.52 GPTQ + ReQuant 59.47 81.40 88.96 81.13 77.92 68.35 46.00 79.82 51.79 72.06 70.69 
+
+GPTAQ 58.96 82.32 89.02 80.31 77.45 67.79 45.40 80.36 51.28 71.98 70.49 GPTAQ + ReQuant 60.07 82.11 88.47 80.01 77.76 68.50 44.80 79.87 51.74 71.98 70.53 
+
+W4A4 RTN 48.72 73.40 84.98 74.15 72.26 64.20 41.40 76.55 46.21 67.80 64.97 RTN + ReQuant 54.95 79.92 86.79 74.67 74.45 65.46 43.20 77.58 49.85 69.22 67.61 
+
+AWQ 51.37 74.20 85.63 73.55 73.26 62.22 42.40 77.09 47.65 66.14 65.35 AWQ + ReQuant 57.85 80.26 87.06 76.30 74.10 63.50 43.60 77.48 48.72 67.56 67.64 
+
+GPTQ 56.83 77.48 86.70 76.37 74.69 65.38 44.80 78.18 48.77 70.32 67.95 GPTQ + ReQuant 57.25 79.92 86.39 77.04 74.57 65.79 43.80 78.67 48.21 68.67 68.03 
+
+GPTAQ 55.20 78.41 86.73 74.00 74.25 64.23 42.40 77.15 48.82 68.98 67.02 GPTAQ + ReQuant 55.89 79.63 87.77 76.45 74.08 65.92 41.00 78.29 48.16 68.11 67.53 
+
+GPTAQ. Table 2 reports zero-shot accuracy across ten downstream tasks, and the corresponding KL divergence and perplexity results are provided in Table 11 of Appendix B.5. At the 70B scale, ReQuant improves all four initializers on average accuracy. On GPTAQ, average accuracy rises from 66 .20% to 67 .01% (+0 .81 ), with lower perplexity and KL as well, showing that even a strong activation-aware initializer retains correctable fixed-grid error. Starting from RTN, ReQuant reaches 66 .93% average accuracy—close to GPTAQ+ReQuant—and obtains better KL/PPL than GPTAQ+ReQuant on the reported evaluation sets. Thus fixed-grid refinement can lift a simple initializer to a competitive final discrete assignment. 7ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 
+
+Table 2: Zero-shot accuracy (%) on Llama-3 70B at W4A4 with QuaRot [27] rotation. Avg. is the mean over ten tasks; the better entry of each pair is bolded. Corresponding KL/PPL are reported in Table 11 of Appendix B.5. 
+
+Method Arc C Arc E BoolQ CEval HellaSwag LAMBADA OBQA PIQA SIQA Winogrande Avg. ↑
+
+FP 64.25 85.94 85.38 64.64 84.96 79.33 49.20 84.39 50.61 80.51 72.92 RTN 22.18 33.63 43.76 23.11 31.10 7.96 25.40 55.44 35.47 49.72 32.78 RTN + ReQuant 55.12 80.13 84.50 46.43 79.83 77.97 44.40 80.96 46.16 73.80 66.93 
+
+AWQ 34.04 57.41 64.37 23.11 57.46 36.31 35.60 68.82 39.25 58.96 47.53 AWQ + ReQuant 54.35 80.81 83.36 44.87 78.13 75.94 45.20 80.69 45.65 74.90 66.39 
+
+GPTQ 43.77 69.02 72.63 30.91 71.68 63.05 42.00 75.84 41.40 70.56 58.09 GPTQ + ReQuant 54.18 79.29 82.84 47.10 77.74 76.25 44.00 79.71 46.42 73.16 66.07 
+
+GPTAQ 55.72 79.84 81.96 46.51 78.79 73.74 43.80 80.85 45.45 75.37 66.20 GPTAQ + ReQuant 55.03 80.43 84.40 47.77 79.15 76.77 44.20 80.85 46.16 75.30 67.01 
+
+Table 3: Zero-shot accuracy (%) of ReQuant on Llama-3 8B at W3A4 and W2A4 with QuaRot [27] rotation. Avg. is the mean over ten tasks; the better entry of each pair is bolded. Corresponding KL/PPL are in Table 9 (Appendix B.3).                                                                                          
+
+> Precision Method Arc C Arc E BoolQ CEval HellaSwag LAMBADA OBQA PIQA SIQA Winogrande Avg. ↑
+> W3A4 GPTQ 40.02 65.82 74.53 31.43 70.08 64.53 38.60 74.92 44.11 66.93 57.10 GPTQ + ReQuant 44.11 68.73 77.16 31.20 69.79 67.40 41.20 74.76 43.65 68.11 58.61
+> GPTAQ 42.92 69.74 74.46 32.32 71.26 66.80 42.40 75.19 44.42 67.01 58.65 GPTAQ + ReQuant 44.03 69.70 74.04 33.66 70.73 66.83 42.80 74.86 42.53 67.96 58.71
+> W2A4 GPTQ 23.63 34.18 56.64 24.22 35.67 12.32 28.20 55.98 34.80 53.12 35.88 GPTQ + ReQuant 28.16 40.82 60.43 22.66 45.15 29.23 29.00 60.77 37.46 56.35 41.00
+> GPTAQ 25.94 39.56 60.95 25.04 46.17 27.46 31.00 61.32 36.49 55.09 40.90 GPTAQ + ReQuant 26.88 42.13 62.08 23.18 46.40 30.18 30.20 61.59 38.54 57.93 41.91
+
+4.3 Lower-bit weight quantization 
+
+We further evaluate ReQuant under more aggressive settings, W3A4 and W2A4, on Llama-3 8B with QuaRot [27] rotation. We focus on GPTQ and GPTAQ, the strongest reconstruction-based initializers at these bit-widths. Table 3 reports zero-shot accuracy; the corresponding KL/PPL results are deferred to Appendix B.3. ReQuant improves both baselines on average accuracy, with larger gains at lower bit-width. At W3A4, ReQuant improves GPTQ from 57 .10 
+
+to 58 .61 (+1 .51 ) and further improves GPTAQ from 58 .65 to 58 .71 . At W2A4, the gains are much larger: GPTQ improves from 35 .88 to 41 .00 (+5 .12 ), matching GPTAQ ( 40 .90 ), while GPTAQ itself rises to 41 .91 . Across both settings, ReQuant narrows the GPTQ–GPTAQ gap and nearly closes it at W2A4, indicating that a large share of the very-low-bit gap is recoverable discrete assignment error on the fixed grid. 
+
+4.4 Effect of refinement sweeps 
+
+We next study how ReQuant evolves with the number of refinement sweeps T . Figure 2 reports WikiText-2 perplexity, WikiText-2 KL divergence to the full-precision model, and average zero-shot accuracy on Llama-3 8B for three representative settings: RTN at W4A16 without QuaRot, RTN+QuaRot at W4A16, and GPTAQ+QuaRot at W4A4. All other settings follow Section 4.1. We vary T ∈ { 0, 1, . . . , 8}, where T = 0 denotes the initial PTQ output. The PPL and KL plots also include full-precision and W4A16 GPTAQ results as horizontal references. Three observations emerge from Figure 2. First, as the number of refinement sweeps T increases, PPL and KL generally decrease, while average zero-shot accuracy improves, consistent with the monotone decrease of the layer-wise objective along accepted updates (Section 3.3). Second, ReQuant benefits both simple and strong initializers. For RTN at W4A16 without QuaRot, additional sweeps substantially improve average accuracy, bringing it close to the GPTAQ + QuaRot W4A16 reference value of 65 .50% on Llama-3 8B. For GPTAQ + QuaRot at W4A4 on the same model, refinement further raises the ten-task mean from 61 .97% to 62 .38% (Table 1), showing that residual fixed-grid error remains exploitable after a strong PTQ start. Third, QuaRot-based settings converge faster and achieve better final performance, suggesting that rotation makes fixed-grid optimization more favorable. 8ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 0 1 2 3 4 5 6 7 8                
+
+> ReQuant sweeps
+> 6.25 6.50 6.75 7.00 7.25 7.50 7.75 8.00
+> WikiText2 Perplexity
+> RTN + ReQuant (W4A16) RTN + QuaRot + ReQuant (W4A16) GPTAQ + QuaRot + ReQuant (W4A4) Full precision GPTAQ + QuaRot (W4A16) 012345678
+> ReQuant sweeps
+> 0.050 0.075 0.100 0.125 0.150 0.175 0.200
+> WikiText2 KL Divergence
+> RTN + ReQuant (W4A16) RTN + QuaRot + ReQuant (W4A16) GPTAQ + QuaRot + ReQuant (W4A4) GPTAQ + QuaRot (W4A16) 012345678
+> ReQuant sweeps
+> 61 62 63 64 65 66
+> Average Accuracy (%)
+> RTN + ReQuant (W4A16) RTN + QuaRot + ReQuant (W4A16) GPTAQ + QuaRot + ReQuant (W4A4) GPTAQ + QuaRot (W4A16)
+
+Figure 2: Effect of the number of ReQuant refinement sweeps T on (left) WikiText-2 perplexity, (center) WikiText-2 KL divergence to the FP model, and (right) average zero-shot accuracy on Llama-3 8B. Three settings are compared: RTN at W4A16 (no QuaRot), RTN with QuaRot [27] rotation at W4A16, and GPTAQ with QuaRot rotation at W4A4. Table 4: Cost–benefit of the number of refinement sweeps T under W4A16 on Llama-3 8B ( K=2 ). T =0 is the initializer without ReQuant. W2/UC/NM denote WikiText-2, UltraChat-2k, and NuminaMath. Time is end-to-end offline quantization wall-clock. Within each setting, the best entry in each column is bolded. 
+
+W2 UC NM Setting T KL ↓ PPL ↓ KL ↓ PPL ↓ PPL ↓ Acc. ↑ Time (min) ↓
+
+RTN+QuaRot 0 0.180 7.65 0.115 3.90 3.06 62.64 5.03 
+
+1 0.067 6.61 0.050 3.65 2.87 64.83 50.82 2 0.061 6.56 0.048 3.65 2.86 65.13 60.00 4 0.055 6.52 0.042 3.62 2.85 65.42 81.80 8 0.052 6.51 0.040 3.62 2.85 65.22 125.24 GPTQ+QuaRot 0 0.054 6.53 0.038 3.60 2.85 65.16 31.62 
+
+1 0.044 6.44 0.034 3.59 2.83 65.41 60.58 2 0.043 6.44 0.033 3.59 2.83 65.66 70.86 4 0.041 6.43 0.033 3.58 2.83 65.33 94.05 8 0.040 6.42 0.032 3.58 2.83 65.49 209.57 
+
+Cost–benefit of T . Table 4 reports the accuracy–runtime trade-off under W4A16 on Llama-3 8B for RTN+QuaRot and GPTQ+QuaRot with neighborhood size K=2 . On RTN, T =4 uses 81 .80 minutes of end-to-end offline wall-clock; on GPTQ, T =4 uses 94 .05 minutes. Most of the held-out gain appears within the first one or two sweeps. For RTN+QuaRot, T =2 recovers a large fraction of the T =8 WikiText PPL/KL improvement at lower cost; for GPTQ+QuaRot, T =2 already reaches the best average accuracy in this sweep ( 65 .66% ), and additional sweeps further reduce PPL/KL. 
+
+4.5 Comparison with FlexRound 
+
+To situate ReQuant relative to construction-time adaptive rounding, we compare against FlexRound [29] under W4A16 with the same WikiText-2 calibration budget ( 512 sequences of length 2048 ) and evaluation protocol. All methods in Table 5 were timed on the same NVIDIA RTX PRO 6000 for a hardware-matched offline-cost comparison. FlexRound follows its original reconstruction pipeline; ReQuant pipelines use QuaRot [27], which is orthogonal to ReQuant and common in low-bit Transformer PTQ. We therefore treat Table 5 as a pipeline-level comparison in which metric gaps reflect the full stack (initializer, rotation, and refinement). The paired GPTQ+QuaRot control in Appendix B.8 freezes the initializer, grid, scales, and zero-points and isolates the refinement stage: PPL/KL metrics improve and average accuracy rises from 65 .16% to 65 .33% . Relative to plain FlexRound, GPTQ+QuaRot+ReQuant is stronger on both Llama-2 7B [51] and Llama-3 8B in Table 5, with lower measured offline time. On Llama-3 8B, RTN+QuaRot+ReQuant attains the best average accuracy among the compared pipelines ( 65 .42% ), and GPTQ+QuaRot+ReQuant attains the best WikiText/UltraChat PPL–KL and NuminaMath PPL while remaining free of backpropagation and optimizer states. These results support ReQuant as a practical backpropagation-free refinement stage within a PTQ pipeline. 9ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 
+
+Table 5: Pipeline comparison with FlexRound under W4A16 (hardware-matched timing on RTX PRO 6000). ReQuant uses T =8 for Llama-2 RTN and T =4 otherwise ( K=2 ). FlexRound+QuaRot is reported for Llama-3 8B. W2/UC/NM denote WikiText-2, UltraChat-2k, and NuminaMath. Within each model, the best entry in each column is bolded.                                                            
+
+> W2 UC NM Model Method KL ↓PPL ↓KL ↓PPL ↓PPL ↓Acc. ↑Time (min) ↓
+> Llama-2 7B FlexRound 0.034 5.65 0.029 3.09 3.26 60.65 150.67 RTN+QuaRot+ReQuant 0.020 5.59 0.019 3.06 3.22 60.69 95.72 GPTQ+QuaRot+ReQuant 0.016 5.57 0.016 3.05 3.20 60.96 70.00
+> Llama-3 8B FlexRound 0.075 6.69 0.067 3.73 2.97 65.08 179.50 FlexRound+QuaRot 0.048 6.47 0.039 3.58 2.84 65.24 188.50 RTN+QuaRot+ReQuant 0.055 6.52 0.042 3.62 2.85 65.42 81.80
+> GPTQ+QuaRot+ReQuant 0.041 6.43 0.033 3.58 2.83 65.33 94.05
+
+Table 6: Qwen3-235B-A22B W4 scalability evaluation (8 ×H200). W2/UC/NM denote WikiText-2, UltraChat-2k, and NuminaMath. The best entry in each column is bolded.                                           
+
+> W2 UC NM Method TKL ↓PPL ↓KL ↓PPL ↓PPL ↓Acc. ↑Time (min) ↓
+> GPTQ+QuaRot 00.075 4.53 0.041 3.98 2.49 75.00 441.09 GPTQ+QuaRot+ReQuant 40.064 4.53 0.035 4.12 2.53 75.35 695.28 RTN+QuaRot+ReQuant 40.083 4.60 0.045 4.13 2.53 74.95 321.27
+> RTN+QuaRot+ReQuant 80.079 4.58 0.044 4.16 2.52 74.58 624.92
+
+4.6 Scalability to Qwen3-235B MoE 
+
+Table 6 evaluates W4 quantization of Qwen3-235B-A22B [35] (235B total / 22B active parameters) on eight NVIDIA H200 GPUs with expert-parallel solving, QuaRot, and the same 512 ×2048 WikiText-2 calibration protocol used else-where. Relative to GPTQ+QuaRot, four ReQuant sweeps reduce Top-20 KL on WikiText-2 / UltraChat / NuminaMath by 13 .8% / 13 .1% / 5.5% and raise average accuracy from 75 .00% to 75 .35% . RTN+QuaRot+ReQuant completes in 
+
+321 .27 minutes at T =4 , providing a faster offline path at this scale. These results show that ReQuant remains effective beyond 100B parameters as a one-time offline refinement stage. 
+
+## 5 Conclusion 
+
+We presented ReQuant, a fixed-grid discrete refinement stage within PTQ that treats completed PTQ outputs as feasible initializations and continues optimizing their discrete assignments. ReQuant iteratively revisits integer codes on the fixed quantization grid, accepts loss-reducing updates, and preserves the original deployment format. Across model families, bit-widths, and PTQ initializers—including a Qwen3-235B MoE setting—ReQuant improves quantized models, with especially large gains for simple initializers and lower bit-widths; the offline budget is controllable through 
+
+T , and refinement is performed entirely offline with zero impact on serving latency. 
+
+Limitations. ReQuant performs coordinate-wise local search on a fixed quantization grid inherited from an upstream PTQ method, so its solution quality depends on the calibration set and the frozen scales/zero-points. The offline refinement cost grows with the number of sweeps T and is most noticeable relative to very fast initializers such as RTN; this cost is incurred once, leaves inference unchanged, and can be reduced by choosing a smaller T . Like other reconstruction-based PTQ methods, ReQuant optimizes a layer-wise calibration objective, and held-out metrics are reported empirically. 
+
+Future Work. Promising directions include more efficient search strategies, extensions to joint weight-activation optimization, and stronger guarantees on approximate optimality and robustness under distribution shift. 
+
+## References  
+
+> [1] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. Advances in Neural Information Processing Systems , 30, 2017.
+
+10 ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 
+
+[2] Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D. Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, et al. Language models are few-shot learners. Advances in Neural Information Processing Systems , 33:1877–1901, 2020. [3] Josh Achiam, Steven Adler, Sandhini Agarwal, Lama Ahmad, Ilge Akkaya, Florencia Leoni Aleman, Diogo Almeida, Janko Altenschmidt, Sam Altman, Shyamal Anadkat, et al. GPT-4 Technical Report. arXiv preprint arXiv:2303.08774 , 2023. [4] Aixin Liu, Bei Feng, Bin Wang, Bingxuan Wang, Bo Liu, Chenggang Zhao, Chengqi Deng, Chong Ruan, Damai Dai, Daya Guo, et al. DeepSeek-V2: A strong, economical, and efficient mixture-of-experts language model. arXiv preprint arXiv:2405.04434 ,2024. [5] Jinze Bai, Shuai Bai, Yunfei Chu, Zeyu Cui, Kai Dang, Xiaodong Deng, Yang Fan, Wenbin Ge, Yu Han, Fei Huang, et al. Qwen Technical Report. arXiv preprint arXiv:2309.16609 , 2023. [6] Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timothée Lacroix, Baptiste Rozière, Naman Goyal, Eric Hambro, Faisal Azhar, et al. LLaMA: Open and efficient foundation language models. arXiv preprint arXiv:2302.13971 , 2023. [7] Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. GPT3.int8(): 8-bit matrix multiplication for transformers at scale. Advances in Neural Information Processing Systems , 35:30318–30332, 2022. [8] Aakanksha Chowdhery, Sharan Narang, Jacob Devlin, Maarten Bosma, Gaurav Mishra, Adam Roberts, Paul Barham, Hyung Won Chung, Charles Sutton, Sebastian Gehrmann, et al. PaLM: Scaling language modeling with pathways. Journal of Machine Learning Research , 24(240):1–113, 2023. [9] William Fedus, Barret Zoph, and Noam Shazeer. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23(120):1–39, 2022. [10] Nan Du, Yanping Huang, Andrew M. Dai, Simon Tong, Dmitry Lepikhin, Yuanzhong Xu, Maxim Krikun, Yanqi Zhou, Adams Wei Yu, Orhan Firat, Barret Zoph, Liam Fedus, Maarten P. Bosma, Zongwei Zhou, Tao Wang, Emma Wang, Kellie Webster, Marie Pellat, Kevin Robinson, Kathleen Meier-Hellstern, Toju Duke, Lucas Dixon, Kun Zhang, Quoc V. Le, Yonghui Wu, Zhifeng Chen, and Claire Cui. GLaM: Efficient scaling of language models with mixture-of-experts. In Proceedings of the 39th International Conference on Machine Learning , volume 162 of Proceedings of Machine Learning Research , pages 5547–5569. PMLR, 2022. [11] Benoit Jacob, Skirmantas Kligys, Bo Chen, Menglong Zhu, Matthew Tang, Andrew Howard, Hartwig Adam, and Dmitry Kalenichenko. Quantization and training of neural networks for efficient integer-arithmetic-only inference. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR) , pages 2704–2713, 2018. [12] Jungwook Choi, Zhuo Wang, Swagath Venkataramani, Pierce I-Jen Chuang, Vijayalakshmi Srinivasan, and Kailash Gopalakr-ishnan. Pact: Parameterized clipping activation for quantized neural networks. In International Conference on Learning Representations (ICLR) , 2018. [13] Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. AWQ: Activation-aware weight quantization for on-device llm compression and acceleration. Proceedings of Machine Learning and Systems (MLSys) , 6:87–100, 2024. [14] Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. SmoothQuant: Accurate and efficient post-training quantization for large language models. In International Conference on Machine Learning (ICML) , pages 38087–38099, 2023. [15] Amir Gholami, Sehoon Kim, Zhen Dong, Zhewei Yao, Michael W. Mahoney, and Kurt Keutzer. A survey of quantization methods for efficient neural network inference. In Low-Power Computer Vision , pages 291–326. Chapman and Hall/CRC, 2022. [16] Itay Hubara, Matthieu Courbariaux, Daniel Soudry, Ran El-Yaniv, and Yoshua Bengio. Binarized neural networks. Advances in neural information processing systems , 29, 2016. [17] Yoshua Bengio, Nicholas Léonard, and Aaron Courville. Estimating or propagating gradients through stochastic neurons for conditional computation. arXiv preprint arXiv:1308.3432 , 2013. [18] Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke Zettlemoyer. Qlora: Efficient finetuning of quantized llms. Advances in neural information processing systems , 36:10088–10115, 2023. [19] Zechun Liu, Barlas Oguz, Changsheng Zhao, Ernie Chang, Pierre Stock, Yashar Mehdad, Yangyang Shi, Raghuraman Krishnamoorthi, and Vikas Chandra. LLM-QAT: Data-free quantization-aware training for large language models. In Findings of the Association for Computational Linguistics: ACL , pages 467–484, 2024. 
+
+11 ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 
+
+[20] Mengzhao Chen, Wenqi Shao, Peng Xu, Jiahao Wang, Peng Gao, Kaipeng Zhang, and Ping Luo. EfficientQAT: Efficient quantization-aware training for large language models. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (ACL) , pages 10081–10100, 2025. [21] Wenjing Ke, Zhe Li, Dong Li, Lu Tian, and Emad Barsoum. Dl-qat: Weight-decomposed low-rank quantization-aware training for large language models. In Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing: Industry Track , pages 113–119, 2024. [22] Vladimir Malinovskii, Denis Mazur, Ivan Ilin, Denis Kuznedelev, Konstantin Burlachenko, Kai Yi, Dan Alistarh, and Peter Richtárik. PV-Tuning: Beyond straight-through estimation for extreme llm compression. Advances in Neural Information Processing Systems , 37:5074–5121, 2024. [23] Ruihao Gong, Yifu Ding, Zining Wang, Chengtao Lv, Xingyu Zheng, Jinyang Du, Yang Yong, Shiqiao Gu, Haotong Qin, Jinyang Guo, et al. A survey of low-bit large language models: Basics, systems, and algorithms. Neural Networks , page 107856, 2025. [24] Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. GPTQ: Accurate post-training quantization for generative pre-trained transformers. arXiv preprint arXiv:2210.17323 , 2022. [25] Yuhang Li, Ruokai Yin, Donghyun Lee, Shiting Xiao, and Priyadarshini Panda. GPTAQ: Efficient finetuning-free quantization for asymmetric calibration. arXiv preprint arXiv:2504.02692 , 2025. [26] Itay Hubara, Yury Nahshan, Yair Hanani, Ron Banner, and Daniel Soudry. Accurate post training quantization with small calibration sets. In Proceedings of the 38th International Conference on Machine Learning , volume 139 of Proceedings of Machine Learning Research , pages 4466–4475. PMLR, 2021. [27] Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L. Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. Quarot: Outlier-free 4-bit inference in rotated llms. Advances in Neural Information Processing Systems (NeurIPS) , 37, 2024. [28] Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghuraman Krishnamoorthi, Vikas Chandra, Yuandong Tian, and Tijmen Blankevoort. Spinquant: Llm quantization with learned rotations. arXiv preprint arXiv:2405.16406 ,2024. [29] Jung Hyun Lee, Jeonghoon Kim, Se Jung Kwon, and Dongsoo Lee. FlexRound: Learnable rounding based on element-wise division for post-training quantization. In Proceedings of the 40th International Conference on Machine Learning , volume 202 of Proceedings of Machine Learning Research , pages 18913–18939. PMLR, 2023. [30] Ron Banner, Yury Nahshan, and Daniel Soudry. Post-training 4-bit quantization of convolutional networks for rapid deployment. In Advances in Neural Information Processing Systems , volume 32, 2019. [31] Wenqi Shao, Mengzhao Chen, Zhaoyang Zhang, Peng Xu, Lirui Zhao, Zhiqian Li, Kaipeng Zhang, Peng Gao, Yu Qiao, and Ping Luo. Omniquant: Omnidirectionally calibrated quantization for large language models. arXiv preprint arXiv:2308.13137 ,2023. [32] Elias Frantar and Dan Alistarh. Optimal brain compression: A framework for accurate post-training quantization and pruning. 
+
+Advances in Neural Information Processing Systems , 35:4475–4488, 2022. [33] Markus Nagel, Rana Ali Amjad, Mart Van Baalen, Christos Louizos, and Tijmen Blankevoort. Up or down? adaptive rounding for post-training quantization. In Proceedings of the 37th International Conference on Machine Learning , volume 119 of 
+
+Proceedings of Machine Learning Research , pages 7197–7206. PMLR, 2020. [34] Yuhang Li, Ruihao Gong, Xu Tan, Yang Yang, Peng Hu, Qi Zhang, Fengwei Yu, Wei Wang, and Shi Gu. BRECQ: Pushing the limit of post-training quantization by block reconstruction. In International Conference on Learning Representations , 2021. [35] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388 , 2025. [36] Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, et al. The llama 3 herd of models. arXiv preprint arXiv:2407.21783 , 2024. [37] Thomas Wolf, Lysandre Debut, Victor Sanh, Julien Chaumond, Clement Delangue, Anthony Moi, Pierric Cistac, Tim Rault, Remi Louf, Morgan Funtowicz, Joe Davison, Sam Shleifer, Patrick von Platen, Clara Ma, Yacine Jernite, Julien Plu, Canwen Xu, Teven Le Scao, Sylvain Gugger, Mariama Drame, Quentin Lhoest, and Alexander M. Rush. Transformers: State-of-the-art natural language processing. In Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing: System Demonstrations , pages 38–45, 2020. 
+
+12 ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 
+
+[38] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, Alban Desmaison, Andreas Kopf, Edward Yang, Zachary DeVito, Martin Raison, Alykhan Tejani, Sasank Chilamkurthy, Benoit Steiner, Lu Fang, Junjie Bai, and Soumith Chintala. Pytorch: An imperative style, high-performance deep learning library. In Advances in Neural Information Processing Systems (NeurIPS) , volume 32, 2019. [39] Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer sentinel mixture models. arXiv preprint arXiv:1609.07843 , 2016. [40] Ning Ding, Yulin Chen, Bokai Xu, Yujia Qin, Shengding Hu, Zhiyuan Liu, Maosong Sun, and Bowen Zhou. Enhancing chat language models by scaling high-quality instructional conversations. arXiv preprint arXiv:2305.14233 , 2023. [41] Jia Li, Edward Beeching, Lewis Tunstall, Ben Lipkin, Roman Soletskyi, Shengyi Costa Huang, Kashif Rasul, Longhui Yu, Albert Jiang, Ziju Shen, Zihan Qin, Bin Dong, Li Zhou, Yann Fleureau, Guillaume Lample, and Stanislas Polu. NuminaMath: A large-scale math reasoning dataset. https://huggingface.co/datasets/AI-MO/NuminaMath-CoT , 2024. [42] Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. Think you have solved question answering? try ARC, the AI2 reasoning challenge. arXiv preprint arXiv:1803.05457 , 2018. [43] Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and Kristina Toutanova. BoolQ: Exploring the surprising difficulty of natural Yes/No questions. In Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 1 (Long and Short Papers) ,pages 2924–2936, 2019. [44] Yuzhen Huang, Yuzhuo Bai, Zhihao Zhu, Junlei Zhang, Jinghan Zhang, Tangjun Su, Junteng Liu, Chuancheng Lv, Yikai Zhang, Jiayi Lei, Yao Fu, Maosong Sun, and Junxian He. C-Eval: A multi-level multi-discipline chinese evaluation suite for foundation models. In Advances in Neural Information Processing Systems , volume 36, pages 62991–63010, 2023. [45] Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. HellaSwag: Can a machine really finish your sentence? In Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics , pages 4791–4800, 2019. [46] Denis Paperno, Germán Kruszewski, Angeliki Lazaridou, Ngoc-Quan Pham, Raffaella Bernardi, Sandro Pezzelle, Marco Baroni, Gemma Boleda, and Raquel Fernández. The LAMBADA dataset: Word prediction requiring a broad discourse context. In Proceedings of the 54th Annual Meeting of the Association for Computational Linguistics, Volume 1: Long Papers , pages 1525–1534, 2016. [47] Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal. Can a suit of armor conduct electricity? a new dataset for open book question answering. In Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing ,pages 2381–2391, 2018. [48] Yonatan Bisk, Rowan Zellers, Ronan Le Bras, Jianfeng Gao, and Yejin Choi. PIQA: Reasoning about physical commonsense in natural language. In Proceedings of the AAAI Conference on Artificial Intelligence , volume 34, pages 7432–7439, 2020. [49] Maarten Sap, Hannah Rashkin, Derek Chen, Ronan Le Bras, and Yejin Choi. SocialIQA: Commonsense reasoning about social interactions. In Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Processing (EMNLP-IJCNLP) , pages 4463–4473, 2019. [50] Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. WinoGrande: An adversarial winograd schema challenge at scale. Communications of the ACM , 64(9):99–106, 2021. [51] Hugo Touvron, Louis Martin, Kevin Stone, Peter Albert, Amjad Almahairi, Yasmine Babaei, Nikolay Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti Bhosale, et al. Llama 2: Open foundation and fine-tuned chat models. arXiv preprint arXiv:2307.09288 , 2023. 
+
+13 ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 
+
+## A ReQuant derivation details 
+
+A.1 ReQuant Coordinate Update Derivation 
+
+We derive the row-wise quantities used by ReQuant and show why every candidate move can be scored from cached statistics. For one output row, let w be the full-precision row, q the current quantized row, and e := w − q the quantization error. With ∆X := eX − X, the activation-aware row loss in Eq. 5 can be rewritten as 
+
+L(e) = ∥wX − q eX∥22
+
+= ∥w(X − eX) + ( w − q) eX∥22
+
+= ∥e eX − w∆X∥22.
+
+Thus L is a quadratic function of e. Defining 
+
+eH := eX eX⊤, B := ∆ X eX⊤,
+
+and expanding the squared norm gives 
+
+L(e) = e eHe ⊤ − 2eB ⊤w⊤ + w∆X∆X⊤w⊤.
+
+The last term is constant with respect to e, so the gradient vector used in the main text is 
+
+g := ∇eL(e) = 2  e eH − wB .
+
+Now consider changing coordinate j of the quantized row by an on-grid step ∆qj . Since e = w − q, increasing qj by 
+
+∆qj changes the error to 
+
+e′ = e − ∆qj uj ,
+
+where uj is the j-th unit vector. The exact loss change is 
+
+∆L(∆ qj ) := L(e′) − L(e)= ∥(e − ∆qj uj ) eX − w∆X∥22 − ∥ e eX − w∆X∥22
+
+= −2∆ qj uj eX(e eX − w∆X)⊤ + (∆ qj )2∥uj eX∥22
+
+= −2∆ qj (e eH − wB )j + (∆ qj )2 eHjj 
+
+= −∆qj gj + (∆ qj )2 eHjj .
+
+This proves Eq. 7. The key point is that evaluating a candidate move requires only gj and eHjj , not a recomputation of the row residual. The feasible candidates are determined by the integer quantization code. If qj = ( zj − oj )sj , any valid move has the form ∆qj = ks j , where k ∈ Z \ { 0} and zmin ≤ zj + k ≤ zmax . Therefore the best coordinate move is the finite enumeration in Eq. 9. After an accepted move, the state maintained by ReQuant is updated exactly. The error update is immediate from e′ = e − ∆q⋆j uj , and the gradient vector satisfies 
+
+g′ = 2  e′ eH − wB 
+
+= 2  (e − ∆q⋆j uj ) eH − wB 
+
+= g − 2∆ q⋆j eHj, :.
+
+Finally, because Eq. 7 gives the exact loss difference, the maintained scalar loss is updated by L ← L + ∆ L(∆ q⋆j ).Together these identities justify the incremental updates used in Algorithm 1. 
+
+A.2 Finite Termination of ReQuant 
+
+We prove finite termination for one row under fixed calibration statistics and a fixed quantization grid; the layer-wise result follows from the row decomposition in Eq. 4. Let the feasible values of coordinate j be the finite set Qj . Under 
+
+b-bit quantization, |Q j | ≤ 2b. The feasible set for one quantized row is therefore the Cartesian product 
+
+Q = Q1 × Q 2 × · · · × Q dcol ,
+
+14 ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 
+
+whose cardinality satisfies 
+
+|Q| =
+
+> dcol
+
+Y
+
+> j=1
+
+|Q j | ≤ (2 b)dcol = 2 bd col .
+
+Hence Q is finite. Let q(r) ∈ Q denote the quantized row after the r-th accepted update, and let 
+
+e(r) = w − q(r)
+
+be the corresponding quantization error. ReQuant accepts an update only if 
+
+∆L(r) := L(e(r+1) ) − L(e(r)) < 0.
+
+Therefore every accepted update strictly decreases the row objective: 
+
+L(e(0) ) > L (e(1) ) > L (e(2) ) > · · · .
+
+We now prove by contradiction that infinitely many accepted updates are impossible. Suppose ReQuant accepted infinitely many updates. Then it would generate an infinite sequence 
+
+q(0) , q(1) , q(2) , . . . 
+
+with every q(r) ∈ Q . Since Q is finite, any infinite sequence in Q must repeat an element. Hence there exist two indices 
+
+a < b such that 
+
+q(a) = q(b).
+
+Because e = w − q, this equality also implies 
+
+e(a) = w − q(a) = w − q(b) = e(b),
+
+and thus 
+
+L(e(a)) = L(e(b)).
+
+However, the sequence contains at least one accepted update between a and b, and every accepted update strictly decreases L. Hence 
+
+L(e(b)) < L (e(a)),
+
+which contradicts L(e(a)) = L(e(b)).Thus ReQuant cannot accept infinitely many updates. Since each accepted update visits a new quantized row, the number of accepted updates is at most 
+
+|Q| − 1 ≤ 2bd col − 1.
+
+This bound is extremely loose, but it is sufficient to establish finite termination under fixed calibration statistics. 
+
+A.3 Complexity Analysis 
+
+We analyze the cost of ReQuant for one linear layer with W ∈ Rdrow ×dcol and X, eX ∈ Rdcol ×m, where m is the number of calibration tokens. Let K denote the number of candidate grid moves considered per coordinate. If all feasible nonzero moves are enumerated for b-bit quantization, then K ≤ 2b − 1; if only nearby grid points are considered, K is a small constant. 
+
+Naive candidate evaluation. The most direct way to test whether changing one entry Wq,i,j improves the objective is to recompute the full layer reconstruction loss ∥WX − Wq eX∥2 
+
+> F
+
+. This requires a matrix multiplication and costs 
+
+O(md row dcol ) per candidate. Since a layer contains drow dcol coordinates and each coordinate has K candidates, naive exhaustive evaluation would cost 
+
+O(K m d 2row d2col ),
+
+which is prohibitive for LLM layers. 
+
+Effect of row-wise decomposition. By Eq. 4, changing Wq,i,j affects only the i-th row loss 
+
+Li = ∥Wi, :X − Wq,i, : eX∥22.
+
+If this row loss were recomputed from scratch for each candidate, the cost would be O(md col ) per candidate, reducing the full-layer factor drow and enabling all rows to be processed independently. This is still expensive because it repeatedly accesses the calibration activations. 15 ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 
+
+Closed-form candidate scoring. ReQuant instead uses the quadratic form in Eq. 5. Once g = 2( e eH − wB ) is available, Eq. 7 scores one candidate using only ∆qj , gj , and eHjj , so each candidate costs O(1) . Scanning all K
+
+candidates at one coordinate costs O(K); scanning all coordinates of all rows in one sweep costs 
+
+O(drow dcol K).
+
+Accepted-update maintenance. When a move is accepted, ReQuant refreshes the gradient vector by g ← g −
+
+2∆ q⋆j eHj, :. This costs O(dcol ), since eHj, : has length dcol . Recomputing g = 2( e eH − wB ) from scratch for one row would cost O(d2col ). If A moves are accepted in one sweep, the state-maintenance cost is therefore O(Ad col ). In the worst case, A ≤ drow dcol , giving O(drow d2col ) per sweep for accepted-update maintenance. 
+
+Precomputation and initialization. Before refinement, ReQuant computes 
+
+eH = eX eX⊤, B = ∆ X eX⊤,
+
+which costs O(md 2col ) and stores O(d2col ) statistics shared by all output rows. Initializing the gradient matrix for all rows, 
+
+G = 2( E eH − WB ), E = W − Q,
+
+costs O(drow d2col ). Initializing all row losses from residuals costs O(md row dcol ), which is usually dominated by the matrix-statistic and gradient-initialization terms. 
+
+Total cost. For T refinement sweeps and average accepted updates Aavg per sweep, the layer-wise ReQuant complexity is 
+
+O(md 2col ) + O(drow d2col ) + O(T d row dcol K) + O(T A avg dcol ).
+
+Using Aavg ≤ drow dcol , the worst-case bound becomes 
+
+O(md 2col ) + O(( T + 1) drow d2col ) + O(T d row dcol K).
+
+For low-bit quantization K ≤ 2b − 1 and typically K ≪ dcol , so the dominant terms are 
+
+O(md 2col + ( T + 1) drow d2col ).
+
+16 ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 
+
+## B Additional experimental results 
+
+This appendix collects supplementary experimental results that did not fit in the main text. All KL/PPL tables below are evaluated on WikiText-2, UltraChat-2k, and NuminaMath; we abbreviate the three column groups as W2 , UC ,and NM , matching the headers. KL is the (unscaled) KL divergence to the full-precision model on each evaluation text. PPL is standard token-level perplexity on the same text. Unless noted otherwise, we report PPL to two decimal places and KL to three. Lower is better for both. Unless noted otherwise, within each baseline pair (each PTQ initializer vs. the same initializer after ReQuant), the better entry is bolded. Section B.1 reports these metrics for Llama-3 8B and Qwen3-14B at W4A16. Section B.2 reports them at W4A4 for the same models. Section B.5 reports them on Llama-3 70B at W4A4. Section B.6 ablates QuaRot by re-running the W4A16 experiments without any orthogonal preprocessing. Section B.4 reports the runtime overhead on Qwen3-14B. Section B.3 reports KL/PPL for the W3A4/W2A4 setting in Section 4.3. Section B.7 plots WikiText-2 PPL/KL and average downstream accuracy as a function of calibration sample size for GPTAQ with QuaRot and ReQuant at W4A4 on Llama-3 8B. Sections B.8–B.9 add FlexRound/QuaRot controls and search-procedure ablations ( K, coordinate order, seed). The Qwen3-235B MoE scalability study is reported in Section 4.6. 
+
+B.1 W4A16 results on Llama-3 8B and Qwen3-14B 
+
+At W4A16 under QuaRot and per-weight–activation quantization, Table 7 shows that ReQuant reduces both KL divergence and perplexity versus each initializer-alone baseline across Llama-3 8B and Qwen3-14B and across W2/UC/NM. The KL/PPL deltas are especially large for simple initial grids (especially RTN, then AWQ), and GPTAQ still exhibits consistent KL/PPL improvements in most bins. Table 7: KL and PPL under W4A16 quantization on Llama-3 8B and Qwen3-14B with QuaRot [27] rotation. 
+
+Llama-3 8B Qwen3-14B W2 UC NM W2 UC NM Method KL ↓ PPL ↓ KL ↓ PPL ↓ KL ↓ PPL ↓ KL ↓ PPL ↓ KL ↓ PPL ↓ KL ↓ PPL ↓
+
+FP – 6.14 – 3.47 – 2.71 – 8.65 – 4.98 – 3.36 RTN 0.174 7.63 0.116 3.94 0.100 3.05 0.176 10.22 0.145 5.20 0.102 3.27 
+
+RTN + ReQuant 0.079 6.71 0.063 3.70 0.068 2.91 0.031 8.85 0.036 4.98 0.029 3.33 AWQ 0.091 6.82 0.064 3.69 0.054 2.87 0.140 9.68 0.117 5.16 0.078 3.43 AWQ + ReQuant 0.069 6.65 0.051 3.65 0.053 2.87 0.052 8.96 0.054 5.04 0.036 3.39 
+
+GPTQ 0.054 6.53 0.038 3.59 0.041 2.83 0.027 8.78 0.031 4.97 0.024 3.34 
+
+GPTQ + ReQuant 0.049 6.49 0.036 3.59 0.041 2.84 0.025 8.81 0.031 4.94 0.025 3.36 GPTAQ 0.043 6.44 0.032 3.59 0.040 2.84 0.027 8.83 0.033 4.96 0.026 3.36 GPTAQ + ReQuant 0.040 6.41 0.031 3.58 0.028 2.83 0.026 8.80 0.033 4.91 0.026 3.34 
+
+B.2 W4A4 results on Llama-3 8B and Qwen3-14B 
+
+Under W4A4, Table 8 records much larger raw KL and PPL than at W4A16 for the same models, reflecting the added difficulty of quantizing activations. ReQuant still improves almost every baseline pair on every corpus, with the same qualitative pattern as in the weight-only regime: naive initializers incur the largest distortions relative to FP, leaving the biggest room for refinement, whereas GPTAQ starts from comparatively low divergence and perplexity. 
+
+B.3 KL/PPL under W3A4 and W2A4 on Llama-3 8B 
+
+Table 9 reports WikiText-2, UltraChat-2k, and NuminaMath KL divergence and perplexity for the low-bit setting in Section 4.3. The corresponding zero-shot accuracies appear in Table 3. 17 ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 
+
+Table 8: KL and PPL under W4A4 quantization on Llama-3 8B and Qwen3-14B with QuaRot [27] rotation. 
+
+Llama-3 8B Qwen3-14B W2 UC NM W2 UC NM Method KL ↓ PPL ↓ KL ↓ PPL ↓ KL ↓ PPL ↓ KL ↓ PPL ↓ KL ↓ PPL ↓ KL ↓ PPL ↓
+
+FP – 6.14 – 3.47 – 2.71 – 8.65 – 4.98 – 3.36 RTN 0.538 13.21 0.401 5.71 0.304 3.89 0.322 11.44 0.255 5.37 0.186 3.41 
+
+RTN + ReQuant 0.165 7.38 0.130 3.97 0.122 3.10 0.149 9.69 0.138 5.10 0.099 3.46 AWQ 0.408 10.99 0.312 5.08 0.220 2.96 0.271 10.43 0.224 5.24 0.153 3.42 
+
+AWQ + ReQuant 0.221 7.94 0.166 4.14 0.115 2.56 0.165 9.80 0.150 5.12 0.101 3.48 GPTQ 0.190 7.86 0.143 4.07 0.121 3.12 0.155 9.71 0.131 5.03 0.088 3.37 
+
+GPTQ + ReQuant 0.167 7.46 0.122 3.95 0.113 3.08 0.143 9.61 0.128 5.06 0.089 3.43 GPTAQ 0.162 7.40 0.115 3.93 0.110 3.06 0.158 9.73 0.149 5.03 0.106 3.47 GPTAQ + ReQuant 0.158 7.36 0.113 3.91 0.112 3.07 0.152 9.67 0.145 5.06 0.101 3.42 
+
+Table 9: KL divergence and perplexity (PPL) on Llama-3 8B at W3A4 and W2A4 with QuaRot [27] rotation, evaluated on WikiText-2 (W2), UltraChat-2k (UC), and NuminaMath (NM).                                                          
+
+> W2 UC NM Precision Method KL ↓PPL ↓KL ↓PPL ↓KL ↓PPL ↓
+> W3A4 GPTQ 0.305 9.21 0.269 4.74 0.245 3.60 GPTQ + ReQuant 0.251 8.19 0.220 4.38 0.216 3.47
+> GPTAQ 0.253 8.27 0.212 4.35 0.211 3.42 GPTAQ + ReQuant 0.242 8.13 0.213 4.35 0.207 3.41
+> W2A4 GPTQ 1.090 31.98 1.180 21.57 1.100 12.82 GPTQ + ReQuant 0.735 15.06 0.838 9.71 0.995 9.10
+> GPTAQ 0.743 15.49 0.811 9.57 1.050 10.18 GPTAQ + ReQuant 0.701 14.38 0.789 9.15 1.040 9.81
+
+B.4 Runtime results on Qwen3-14B 
+
+Table 10 reports the end-to-end quantization time on Qwen3-14B for different PTQ initializers with QuaRot, both with and without ReQuant. For example, RTN+QuaRot uses 15 .6 minutes and RTN+QuaRot+ReQuant uses 117 .1
+
+minutes; GPTAQ+QuaRot uses 35 .3 minutes and GPTAQ+QuaRot+ReQuant uses 128 .6 minutes. The offline budget is controllable through T (Section 4.4). This cost is incurred once during offline model preparation and leaves the deployed representation and inference latency unchanged. In our implementation the overhead is mainly computational, because ReQuant stores neither gradients nor optimizer states for learnable quantizer parameters. Table 10: Runtime on Qwen3-14B. 
+
+Method Runtime RTN + QuaRot 15.6 min RTN + QuaRot + ReQuant 117.1 min AWQ + QuaRot 23.9 min AWQ + QuaRot + ReQuant 109.8 min GPTQ + QuaRot 31.4 min GPTQ + QuaRot + ReQuant 128.6 min GPTAQ + QuaRot 35.3 min GPTAQ + QuaRot + ReQuant 128.6 min 
+
+18 ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 
+
+B.5 KL divergence and perplexity results on Llama-3 70B 
+
+Table 11 focuses on Llama-3 70B at W4A4 under QuaRot [27]. RTN alone exhibits extreme KL/PPL on W2 relative to FP, and ReQuant closes most of that gap while also improving AWQ. For GPTQ and GPTAQ the initial mismatch is already smaller; ReQuant still tends to help on perplexity and many KL cells, though a few entries favor the unrefined baseline, highlighting that fixed-grid moves can redistribute error across corpora at large scale. Table 11: KL and PPL under W4A4 quantization on Llama-3 70B with QuaRot [27] rotation.                                                               
+
+> W2 UC NM Method KL ↓PPL ↓KL ↓PPL ↓KL ↓PPL ↓
+> FP –2.86 –3.07 –2.40 RTN 1.953 60.14 1.405 27.40 1.241 13.34 RTN + ReQuant 0.678 6.00 0.126 3.49 0.143 2.76
+> AWQ 1.158 14.26 0.570 6.33 0.550 4.58 AWQ + ReQuant 0.683 6.07 0.145 3.56 0.160 2.80
+> GPTQ 0.753 7.63 0.307 4.41 0.269 3.21 GPTQ + ReQuant 0.743 6.59 0.168 3.65 0.182 2.87
+> GPTAQ 0.693 6.33 0.130 3.51 0.154 2.80 GPTAQ + ReQuant 0.707 6.27 0.127 3.50 0.148 2.78
+
+B.6 W4A16 results without QuaRot rotation 
+
+Tables 12 and 13 repeat the Llama-3 8B W4A16 study without QuaRot orthogonal preprocessing. On KL/PPL, ReQuant tends to lower both metrics relative to each initializer alone across W2/UC/NM, matching the qualitative pattern under rotation but with a few small reversals on individual cells. On downstream accuracy (mean over ten tasks), ReQuant improves RTN ( 61 .65 → 63 .20 , +1 .55 ), AWQ ( 63 .50 → 64 .06 ), and GPTAQ ( 64 .28 → 64 .68 ), while for GPTQ the average drops slightly ( 64 .63 → 64 .41 ) even though its WikiText-2 KL/PPL still improve—illustrating that fixed-grid refinement can shift the accuracy–perplexity trade-off when rotation is absent. Table 12: KL and PPL under W4A16 on Llama-3 8B without QuaRot rotation.                                                               
+
+> W2 UC NM Method KL ↓PPL ↓KL ↓PPL ↓KL ↓PPL ↓
+> FP –6.14 –3.47 –2.71 RTN 0.255 8.53 0.218 4.42 0.190 3.37 RTN + ReQuant 0.103 6.91 0.091 3.81 0.131 3.15
+> AWQ 0.115 7.06 0.080 3.77 0.079 2.96
+> AWQ + ReQuant 0.082 6.75 0.070 3.72 0.083 2.97 GPTQ 0.090 6.81 0.092 3.82 0.100 3.03
+> GPTQ + ReQuant 0.078 6.68 0.101 3.86 0.105 3.04 GPTAQ 0.073 6.65 0.116 3.94 0.109 3.05
+> GPTAQ + ReQuant 0.073 6.65 0.123 3.97 0.114 3.07
+
+B.7 Effect of calibration sample size on Llama-3 8B at W4A4 (GPTAQ + QuaRot + ReQuant) 
+
+Figure 3 studies the effect of calibration-set size at W4A4 on Llama-3 8B, with all other settings following Section 4.1. We report WikiText-2 perplexity, WikiText-2 KL divergence to the full-precision model, and average zero-shot accuracy from lm-eval-harness for GPTAQ [25] with QuaRot [27], both before and after ReQuant refinement. Increasing the number of calibration sequences generally improves all three metrics by providing more stable activation statistics, although the gains diminish once the calibration budget becomes sufficiently large. Across all calibration-sample counts shown, ReQuant improves over GPTAQ+QuaRot under the same W4A4 deploy-ment format: WikiText-2 perplexity and KL decrease while average zero-shot accuracy increases. The gains therefore appear across calibration budgets, not only under a particular sample count. 19 ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 
+
+Table 13: Zero-shot accuracy (%) under W4A16 on Llama-3 8B without QuaRot rotation. Avg. is the mean over ten tasks. 
+
+Method Arc C Arc E BoolQ CEval HellaSwag LAMBADA OBQA PIQA SIQA Winogrande Avg. ↑
+
+FP 53.58 77.69 81.25 48.44 79.17 75.70 45.0 80.90 46.88 73.24 66.19 RTN 48.98 75.59 73.09 38.04 75.36 70.00 42.0 77.91 44.37 71.11 61.65 RTN + ReQuant 50.68 76.14 77.65 40.86 76.40 72.25 43.2 78.62 43.96 72.22 63.20 
+
+AWQ 50.85 73.82 78.53 43.24 77.60 70.29 43.0 79.71 46.11 71.90 63.50 AWQ + ReQuant 48.89 75.34 80.58 43.98 77.49 71.24 44.2 79.54 46.21 73.16 64.06 
+
+GPTQ 49.06 73.82 81.71 44.58 77.12 72.91 45.6 80.14 46.78 74.59 64.63 
+
+GPTQ + ReQuant 51.45 76.18 78.81 41.16 77.53 72.13 45.8 79.54 46.42 75.30 64.41 GPTAQ 50.43 74.75 79.36 42.50 77.81 71.82 45.2 79.49 46.21 75.22 64.28 GPTAQ + ReQuant 50.51 76.56 80.46 44.21 77.45 71.78 45.8 79.05 46.06 74.90 64.68 32 64 128 256 512               
+
+> Calibration samples N(WikiText-2)
+> 7.4
+> PPL (WikiText-2)
+> GPTAQ+ReQuant GPTAQ 32 64 128 256 512
+> Calibration samples N(WikiText-2)
+> 0.155 0.160 0.165 0.170
+> KL (WikiText-2)
+> GPTAQ+ReQuant GPTAQ 32 64 128 256 512
+> Calibration samples N(WikiText-2)
+> 61.5 62.0 62.5
+> Average accuracy (%)
+> GPTAQ+ReQuant GPTAQ
+
+Figure 3: W4A4: sensitivity to calibration sample size for GPTAQ + QuaRot + ReQuant on Llama-3 8B. (left) WikiText-2 perplexity, (center) WikiText-2 KL divergence to the FP model, (right) average zero-shot accuracy (ten-task mean). Lower is better for PPL and KL; higher is better for accuracy. 
+
+B.8 Separating QuaRot from FlexRound comparisons 
+
+Table 14 reports controlled add-ons around the FlexRound comparison in Section 4.5 on Llama-3 8B under W4A16. Adding QuaRot to FlexRound improves PPL/KL and average accuracy, confirming that rotation is a beneficial and orthogonal pipeline component. Pairing QuaRot with ReQuant further strengthens the RTN pipeline, and the paired GPTQ+QuaRot vs. GPTQ+QuaRot+ReQuant comparison isolates ReQuant under identical initialization, grid, scales, and zero-points: five of six PPL/KL metrics improve and average accuracy rises from 65 .16% to 65 .33% .Table 14: Controlled W4A16 comparisons on Llama-3 8B that separate QuaRot from ReQuant. GPTQ rows reuse Table 4. 
+
+Method Wiki PPL ↓ Wiki KL ↓ UC PPL ↓ UC KL ↓ NM PPL ↓ NM KL ↓ Acc. ↑
+
+FlexRound 6.69 0.075 3.73 0.067 2.97 0.081 65.08 FlexRound+QuaRot 6.47 0.048 3.58 0.039 2.84 0.044 65.24 RTN+ReQuant ( T =4 , no QuaRot) 7.63 0.174 3.94 0.116 3.05 0.100 61.78 RTN+QuaRot+ReQuant ( T =4 ) 6.52 0.055 3.62 0.042 2.85 0.045 65.42 
+
+GPTQ+QuaRot ( T =0 ) 6.53 0.054 3.60 0.038 2.85 0.042 65.16 GPTQ+QuaRot+ReQuant ( T =4 ) 6.43 0.041 3.58 0.033 2.83 0.042 65.33 
+
+B.9 Search-procedure ablations 
+
+Unless noted, experiments below use Llama-3 8B, W4A16, GPTQ+QuaRot+ReQuant, T =4 , and seed 0.
+
+Neighborhood size K. Candidate integer offsets are {± 1, . . . , ±K}. Table 15 shows that K∈{ 1, 2, 3} yields similar quality and runtime. K=2 is strongest on WikiText PPL/KL for GPTQ and yields the highest RTN average accuracy, while K=1 is competitive on most PPL/KL metrics for RTN; we therefore use K=2 as the default. 20 ReQuant: Fixed-Grid Discrete Refinement for Post-Training Quantization A P REPRINT 
+
+Table 15: Neighborhood-size ablation at fixed T =4 on Llama-3 8B (W4A16).                              
+
+> Initializer KWiki PPL ↓Wiki KL ↓Acc. ↑Time (min) ↓
+> RTN+QuaRot 16.52 0.054 64.84 80.72 26.52 0.055 65.48 80.89 36.53 0.055 65.08 80.19
+> GPTQ+QuaRot 16.43 0.042 65.41 92.93
+> 26.43 0.041 65.33 96.36 36.43 0.041 65.73 95.61
+
+Coordinate ordering. Table 16 compares forward ( j=1 . . .d col ), reverse, and a random-fixed within-row permutation reused across sweeps. WikiText PPL differs by at most 0.0076 and average accuracy by 0.37 points. Ordering changes the local solution while preserving overall quality; random-fixed is slower due to permutation overhead. Table 16: Within-row coordinate-order ablation for GPTQ+QuaRot+ReQuant ( T =4 , K=2 ) on Llama-3 8B.                 
+
+> Order Wiki PPL ↓Wiki KL ↓Acc. ↑Time (min) ↓
+> Forward 6.43 0.041 65.33 96.36 Reverse 6.43 0.042 65.70 96.06
+> Random-fixed 6.43 0.042 65.60 122.65
+
+QuaRot seed stability. Given fixed calibration data, ReQuant itself is deterministic; randomness enters through QuaRot. Over five QuaRot seeds with GPTQ+QuaRot+ReQuant ( T =4 , K=2 ), WikiText PPL is 6.4277 ±0.0040 ,WikiText KL is 0.0414 ±0.0004 , and average accuracy is 65 .27 ±0.55 (range 64 .68 –66 .09 ). PPL/KL are stable across seeds, while downstream accuracy exhibits moderate seed variability. 21

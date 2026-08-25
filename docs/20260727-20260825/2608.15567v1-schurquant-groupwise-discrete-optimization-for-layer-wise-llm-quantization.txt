@@ -1,0 +1,1244 @@
+SCHURQUANT: GROUPWISE DISCRETE OPTIMIZATION
+FOR LAYER-WISE LLM QUANTIZATION
+Gunjun Lee
+Sehwan Son
+Younjoo Lee
+Byungjun Kim
+Jung Ho Ahn
+Seoul National University
+Seoul, South Korea
+{kevin970401,sonsh011106,younjoo0614,bjkim1023,gajh}@snu.ac.kr
+ABSTRACT
+Weight-only post-training quantization (PTQ) enables the deployment of large
+language models under tight memory budgets, but accuracy often collapses at 2–3
+bits. Existing backpropagation-free PTQ optimizers have two limitations: group
+decisions ignore the correction that the remaining continuous suffix can absorb,
+and discrete refinements typically keep the affine quantization grid fixed. We
+introduce SCHUROPT, which analytically eliminates the suffix’s optimal continuous
+response, yielding an exact groupwise quadratic with Schur-complement curvature.
+It then alternates closed-form row-wise scale/zero-point refitting with coordinate
+descent over integer codes. With the GPTQ objective fixed, SCHUROPT improves
+mean zero-shot accuracy on 2-bit Qwen3-4B by 11.88 percentage points (pp). At
+higher precision, however, tighter reconstruction does not consistently improve
+end-model metrics. SCHURQUANT therefore combines SCHUROPT with quantized-
+prefix teacher reconstruction, reference-weight regularization, residual-add targets,
+and teacher-decision token weighting. Across eight Llama and Qwen models,
+SCHURQUANT achieves the highest mean zero-shot accuracy among the evaluated
+backpropagation-free PTQ baselines, outperforming the strongest baseline by 9.65
+pp at 2 bits.
+1
+INTRODUCTION
+Deploying large language models (LLMs) is increasingly constrained by memory capacity and
+bandwidth rather than arithmetic throughput (Kimi Team et al., 2026), and these constraints are most
+severe on edge devices. Weight-only post-training quantization (PTQ) addresses this by converting
+pretrained weights to low precision using only a small calibration set without retraining. Yet
+conventional weight-only PTQ collapses sharply in perplexity and downstream accuracy in 2–3-bit
+quantization.
+Weight-only PTQ can be decomposed into two largely independent components. The objective
+determines which error is minimized, classically the output-reconstruction loss ∥WX −W refX∥2
+F
+of a linear layer, where W ref is the teacher weight, X contains calibration activations, and W is
+the quantized weight. These activations determine the curvature XX⊤and thus which weight-
+error directions matter (Appendix A). Recent methods enrich this objective with activation errors
+accumulated in preceding layers, asymmetric calibration, joint correction of past error and future
+propagation, residual-path reconstruction, or combinations of relaxed block objectives (Arai &
+Ichikawa, 2025; Li et al., 2025; Zhang et al., 2026; Lin & Wan, 2026; Ichikawa et al., 2025).
+The optimizer determines how that objective is solved on an integer grid. GPTQ visits weights
+along the input-column axis, rounds each to a nearby level, and propagates the induced error
+to the remaining full-precision weights through an inverse Hessian (Frantar et al., 2023). This
+update is equivalent to Babai’s nearest-plane algorithm on the lattice defined by XX⊤(Chen
+et al., 2026). More recent methods use cyclic or greedy coordinate descent to refine discrete
+0Correspondence to: Gunjun Lee <kevin970401@snu.ac.kr>, Jung Ho Ahn <gajh@snu.ac.kr>
+1
+arXiv:2608.15567v1  [cs.LG]  16 Aug 2026
+
+
+weights or groups (Behdin et al., 2023; Nair & Suggala, 2024; Ichikawa et al., 2025). GuidedQuant
+additionally injects end-loss gradients into the layer-wise objective and derives a monotone scalar
+quantizer (Kim et al., 2025).
+The missing step is to condition a group decision on variables that remain adjustable. Prior coordinate
+descent evaluates the group under the raw block Gcc of a symmetric curvature matrix G, effectively
+holding the continuous suffix fixed, although that suffix can absorb part of the error. The exact curva-
+ture remaining after its best continuous response is the Schur complement S = Gcc −GcrG−1
+rr Grc,
+which can differ substantially from Gcc under strong coupling.
+Based on this observation, we introduce SCHUROPT, the Schur-conditioned discrete optimizer, and
+refer to its pairing with our final augmented surrogate as SCHURQUANT. We partition the input
+dimension into chunks of one quantization group. While quantizing a current chunk Wc, the already
+quantized prefix WF is held fixed and the suffix Wr remains continuous. Analytically minimizing
+over Wr produces S and a corresponding conditional linear term. SCHUROPT then optimizes the
+group against this reduced quadratic: it jointly refits each row’s scale and zero-point for fixed codes
+and updates codes by coordinate descent for fixed grid parameters.
+Holding the objective exactly equal to GPTQ’s isolates the optimizer’s contribution. On Qwen3-4B
+with 2-bit codes, SCHUROPT reduces WikiText-2 perplexity from 258.96 to 81.95 and improves mean
+zero-shot accuracy by 11.88 pp. At 3 and 4 bits, however, the same optimizer worsens perplexity while
+changing mean zero-shot accuracy only marginally. This reveals a second bottleneck. Layer-wise
+reconstruction is a loose surrogate for the final language-model loss. Motivated by this mismatch, our
+final configuration combines quantized-prefix teacher reconstruction with a reference-weight anchor,
+a residual-add target, and teacher-decision token weighting. The last term upweights the calibration
+positions whose clean top-1 prediction has already been changed by the quantized prefix.
+Our contributions are as follows:
+• We derive the exact discrete group problem conditioned on a fixed prefix and the optimal continuous
+suffix response, then optimize its (S, T) with a joint closed-form scale/zero-point refit and row-
+parallel coordinate descent. This conditioning, rather than coordinate descent itself, is the optimizer
+contribution.
+• We integrate prior reference-weight regularization and residual-add reconstruction into the sufficient
+statistics and introduce teacher-decision token weighting, changing the surrogate without changing
+SCHUROPT.
+• We separate optimizer and objective effects experimentally. Across eight Llama and Qwen models
+under 2–4-bit quantization, SCHURQUANT achieves the highest mean zero-shot accuracy among
+the evaluated backpropagation-free PTQ baselines, with its largest advantage at 2 bits.
+2
+BACKGROUND AND MOTIVATION
+2.1
+UNIFORM AFFINE QUANTIZATION
+A uniform affine quantizer maps a real weight w to an integer code z as
+z = clip
+jw
+a
+m
++ o, qmin, qmax
+
+,
+bw = a(z −o),
+(1)
+where a > 0 is the spacing between adjacent levels, o is the code corresponding to zero, ⌊·⌉denotes
+nearest-integer rounding, and clipping enforces the representable range. With unsigned b-bit codes,
+qmin = 0 and qmax = 2b −1. The symmetric case fixes o = 0 and uses signed codes qmin = −2b−1
+and qmax = 2b−1 −1. The representable set is Q(a, o) = {a (ℓ−o) : ℓ∈{qmin, . . . , qmax}}.
+For a weight matrix in Rdout×din, per-row group quantization divides each row along the input
+dimension into groups of size g and assigns each row–group its own quantizer. We call the dout × g
+submatrix processed at one step a chunk. An asymmetric quantizer stores an FP16 scale and a
+b-bit zero-point for each group. With FP16 metadata, this gives an effective weight precision of
+approximately b + 16/g bits. All experiments use g = 128, the standard weight-only PTQ setting
+introduced with GPTQ, which limits metadata overhead to approximately 0.125 bits per weight.
+2
+
+
+2.2
+GPTQ, PROPAGATED-ERROR OBJECTIVES, AND DISCRETE REFINEMENT
+GPTQ minimizes the output-reconstruction objective minW ∈Qdout×din∥W refX −WX∥2
+F of each
+linear layer (Frantar et al., 2023). It initializes a uniform grid for each row–group, visits columns
+sequentially, and rounds the current weights. To reduce the output effect of the rounding error, it
+updates the remaining full-precision weights using the inverse input Hessian H = XX⊤
+δ>q = −wq −quant(wq)
+[H−1]qq
+[H−1]q,>q.
+(2)
+All output rows share the column update and can be processed in parallel. Crucially, the discrete
+decision itself remains nearest-level rounding; curvature enters only through the correction applied
+afterward. The equivalence to Babai’s nearest-plane algorithm makes this limitation explicit (Chen
+et al., 2026). Here the subscript > q denotes input columns scheduled after column q.
+GPTQ is operation-local, not accounting for activation error produced by already quantized operations.
+Let Xref
+ℓ
+and Xℓdenote the inputs to operation ℓproduced by the clean and already quantized prefixes,
+respectively. QEP (Arai & Ichikawa, 2025) optimizes the current quantized weight on Xℓto reproduce
+the clean teacher output W ref
+ℓ
+Xref
+ℓ:
+min
+Wℓ∈Qdout×din
+W ref
+ℓ
+Xref
+ℓ
+−WℓXℓ
+2
+F ,
+δℓ:= Xref
+ℓ
+−Xℓ.
+(3)
+The optimum of its continuous relaxation is a corrected teacher weight, after which QEP uses
+the same GPTQ-style discrete optimizer. FOEM retains the first-order term arising away from a
+stationary pretrained weight (Zheng et al., 2026). LoaQ further extends the reconstruction scope
+from linear-layer outputs to sub-layer outputs by explicitly matching the residual-added hidden state,
+thereby accounting for error accumulated along the residual stream while retaining the layer-wise
+PTQ formulation (Lin & Wan, 2026). These methods, and work on asymmetric calibration or error
+propagation (Li et al., 2025; Zhang et al., 2026), primarily change the objective or reconstruction
+scope rather than how a group is conditioned on its continuous suffix.
+Coordinate optimization of quantized parameters is already used. QuantEase uses cyclic coordinate
+descent for the discrete layer-reconstruction problem and proves non-increase of its objective (Behdin
+et al., 2023). CDQuant directly contrasts greedy coordinate descent with GPTQ’s predetermined pass
+and extends it to group quantization (Nair & Suggala, 2024). To our knowledge, their discrete updates
+do not first analytically eliminate the optimal response of the continuous suffix. SCHUROPT differs at
+this conditioning step. It applies both parameter refitting and code updates to S = Gcc −GcrG−1
+rr Grc
+and the corresponding reduced linear term.
+2.3
+SCHUR COMPLEMENT
+The Schur complement (Schur, 1918) measures the curvature that remains after adjustable variables
+make their optimal response. Let
+x = [xc xr]
+(4)
+denote a generic optimization variable partitioned into a current block xc and a remaining adjustable
+block xr. Partition a symmetric curvature matrix as
+G =
+
+Gcc
+Gcr
+Grc
+Grr
+
+,
+Grc = G⊤
+cr.
+(5)
+For the quadratic form induced by G, if Grr is invertible then minimizing over xr gives x⋆
+r =
+−G−1
+rr Grcxc and
+min
+xr f(xc, xr) = 1
+2x⊤
+c
+ Gcc −GcrG−1
+rr Grc
+
+|
+{z
+}
+G/Grr
+xc.
+(6)
+The subtracted term is the part that xr can absorb, so G/Grr ⪯Gcc whenever G ⪰0. In quantization,
+the current group corresponds to xc and the continuous suffix to xr; the Schur complement therefore
+gives the exact local curvature after the best possible suffix correction.
+3
+
+
+2.4
+RELATED QUANTIZATION APPROACHES
+Quantization-aware optimization.
+Quantization-aware training (QAT) uses fake-quantized
+weights and straight-through gradients to update weights or quantizer parameters. EfficientQAT trains
+weights within each Transformer block and then optimizes quantization parameters end to end (Chen
+et al., 2025). Although accurate, such training requires repeated forward and backward passes and is
+substantially more expensive than gradient-free layer-wise PTQ.
+Calibration-optimized PTQ.
+OmniQuant learns clipping parameters and equivalent transforma-
+tions through blockwise reconstruction on calibration data (Shao et al., 2024), whereas AWQ identifies
+salient weight channels from activation statistics and protects them through per-channel scaling (Lin
+et al., 2024). These are more naturally classified as PTQ: they adapt the objective or representation
+from calibration data rather than retraining the model end to end. SCHURQUANT is complementary,
+as it changes the discrete optimizer applied after the layer-wise objective has been specified.
+A second line changes the representation rather than the search. Rotation-based methods apply
+function-preserving basis changes to spread outliers across channels, using randomized Hadamard
+rotations (Ashkboos et al., 2024) or the rotations learned against a calibration loss (Liu et al., 2025).
+Vector-quantized methods map groups of weights to codewords, combining incoherence processing
+with lattice codebooks (Chee et al., 2023; Tseng et al., 2024) or learning additive codebooks (Egiazar-
+ian et al., 2024). Both families change the inference path, requiring online rotations or packed-index
+decoding and lookup. In contrast, SCHURQUANT retains the same scalar per-row group format as
+GPTQ; only the offline optimizer changes.
+3
+SCHUROPT AND SCHURQUANT
+We first define the quadratic sufficient-statistics interface shared by both methods: SCHUROPT and
+SCHURQUANT. Sections 3.2–3.4 derive SCHUROPT, and Section 3.5 augments the objective to
+obtain the complete SCHURQUANT configuration.
+3.1
+PROBLEM FORMULATION
+Consider one linear projection with weights W ∈Rdout×din, calibration inputs X = [x1, . . . , xN] ∈
+Rdin×N, and teacher targets Y = [y1, . . . , yN] ∈Rdout×N. Let Ω= diag(ω1, . . . , ωN) contain
+nonnegative token weights. Throughout this paper, W ref denotes the clean pretrained weight and W
+the student working weight being discretized; after quantization, W ∈Qdout×din. During a group
+update, the fixed prefix WF and candidate current group Wc are discrete, whereas the remaining suffix
+Wr is optimized as a continuous variable. We refer to Wr as the continuous suffix. Unless a controlled
+GPTQ-objective experiment states otherwise, X is collected from the current quantized-prefix stream
+and Y from the clean teacher stream. We optimize
+L(W) = 1
+2∥(WX −Y )Ω1/2∥2
+F + λ
+2 ∥W −W ref∥2
+F ,
+(7)
+where the dimensionless λ anchors the quantized solution to the pretrained weights. Expanding Eq. 7
+gives
+G = XΩX⊤+ λI,
+C = Y ΩX⊤+ λW ref,
+(8)
+L(W) = 1
+2 tr(WGW ⊤) −tr(CW ⊤) + const.
+(9)
+Thus (G, C) are sufficient statistics: the optimizer need not retain X, Y , or Ω. If λ > 0, G is positive
+definite even when XΩX⊤is rank deficient.
+Eq. 9 is also the interface between SCHUROPT and a layer-wise objective. Setting Ω= I, λ = 0, and
+Y = W refX recovers GPTQ. Using quantized-prefix inputs with clean teacher outputs recovers the
+QEP-style asymmetric teacher-reconstruction objective. Residual-add targets and token weights only
+change how (G, C) are collected; the optimizer below is unchanged.
+4
+
+
+3.2
+THE SCHUR-REDUCED GROUP OBJECTIVE
+For any candidate Wc, the suffix can still react before it is quantized. We therefore eliminate its
+optimal continuous response,
+W ⋆,Schur
+c
+= arg min
+Wc∈Q L(Wc, W ⋆
+r (Wc)) ,
+W ⋆
+r (Wc) = arg min
+Wr L(Wc, Wr),
+(10)
+so that the selected group minimizes the loss remaining after the best possible continuous suffix
+correction, not merely the loss of the group in isolation.
+Proposition 1 (Schur reduction). Fix WF and assume that Grr is invertible. Eliminating Wr yields
+the equivalent local objective
+Llocal(Wc) = 1
+2 tr(WcSW ⊤
+c ) −tr(TW ⊤
+c ) + const,
+(11)
+S = Gcc −GcrG−1
+rr Grc,
+T = Ceff
+c
+−Ceff
+r G−1
+rr Grc,
+(12)
+Ceff
+c
+= Cc −WF GF c,
+Ceff
+r
+= Cr −WF GF r.
+(13)
+The proof is in Appendix B.1. Intuitively, Gcc is the direct curvature of perturbing the current chunk,
+while GcrG−1
+rr Grc is the part absorbable by the optimal continuous suffix, so S ⪯Gcc. The linear
+term T likewise accounts for both the error already introduced by the prefix and the component that
+the suffix can absorb.
+Computing S by factorizing every suffix Grr would be prohibitively expensive. Let t denote the
+starting input-column index of the current chunk. We maintain P = (G[t:,t:])−1 partitioned as
+h Pcc Pcr
+P ⊤
+cr Prr
+i
+with Pcc ∈Rg×g. The block-inverse identity gives
+S = P −1
+cc ,
+G−1
+rr Grc = −P ⊤
+crS,
+Pnext = Prr −P ⊤
+crSPcr.
+(14)
+Each chunk therefore requires one g × g inverse and an O(m2g) update for a suffix of length m,
+rather than a new O(m3) factorization.
+3.3
+EXACT ROW-WISE QUANTIZER-PARAMETER UPDATE
+For output row i, write the quantized current group as qi = ai(zi −oi1⊤) with integer codes
+zi ∈{qmin, . . . , qmax}g, scale ai, and zero-bias oi. A symmetric quantizer is the special case oi = 0.
+Because Eq. 11 separates across output rows,
+Llocal(Q) =
+dout
+X
+i=1
+  1
+2qiSq⊤
+i −tiq⊤
+i
+
+,
+(15)
+all rows can be updated in parallel.
+Proposition 2 (Row-wise scale and zero-point update). For fixed zi and a candidate o, define
+ui(o) = zi −o1⊤, Ai(o) = ui(o)Sui(o)⊤, and di(o) = tiui(o)⊤. The optimal positive scale and
+zero-point are
+a⋆
+i (o) = max
+ di(o)
+Ai(o), ϵa
+
+,
+o⋆
+i = arg
+min
+o∈{0,...,2b−1}
+1
+2a⋆
+i (o)2Ai(o) −a⋆
+i (o)di(o)
+
+.
+(16)
+Only 2b zero-points are considered, so the enumeration is inexpensive at the target precisions. The
+required coefficients are obtained from one product ZS, followed by row-wise reductions and
+evaluation of the 2b candidates. Appendix B.2 gives the proof.
+3.4
+COORDINATE DESCENT OVER INTEGER CODES
+Stack the row code vectors into Z, with scales a ∈Rdout
++
+and integer zero-points o ∈{0, . . . , 2b −
+1}dout. For fixed (a, o), the current chunk is Q = diag(a)(Z −o1⊤). At column j, row i can
+5
+
+
+choose among the 2b candidates vi,k = ai(k −oi). Retaining only terms that depend on v yields the
+coordinatewise objective, up to an additive constant,
+ℓi,j(v) = 1
+2Sjjv2 +
+
+
+(qiS)j −qi,jSjj
+|
+{z
+}
+crossi,j
+−ti,j
+
+
+v,
+zi,j ←arg min
+k ℓi,j(ai(k −oi)) .
+(17)
+At the start of a sweep, we initialize Φ ←QS. Maintaining this state makes crossi,j = Φi,j −qi,jSjj
+immediately available. When the coordinate changes, define ∆i = qnew
+i,j
+−qold
+i,j and update the state
+by the rank-one operation Φi,: ←Φi,: + ∆iSj,:. Evaluating all 2b candidates requires O(2b) time
+and the state update O(g) per coordinate, for a total sweep complexity of O(doutg(2b + g)).
+The cross term is the key difference from independent rounding. It captures coupling with other
+columns in the group, while S already accounts for correction available outside the group. GPTQ
+reduces the curvature to a scalar but still makes a nearest-level decision. SCHUROPT uses the reduced
+curvature both to fit the grid and to choose the integer codes themselves.
+3.5
+AUGMENTING THE LOCAL OBJECTIVE
+Even an exact optimizer can overfit a layer-wise surrogate. We therefore augment its sufficient
+statistics with a reference-weight anchor, a residual-add target, and teacher-decision token weighting
+while leaving SCHUROPT unchanged.
+Reference-weight anchor.
+Following the regularized formulation of QEP (Arai & Ichikawa, 2025),
+we add
+λ
+2 ∥W −W ref∥2
+F ,
+which contributes λI to G and λW ref to C in Eq. 8 without changing the optimizer.
+Residual-add target.
+Following the sub-layer output approximation of LoaQ (Lin & Wan, 2026),
+we use the clean residual output Y = h + f(h) rather than only the projection-local output. Student-
+side statistics are collected from activations propagated through the quantized prefix. This changes
+the target-dependent sufficient statistics while leaving SCHUROPT unchanged.
+Teacher-decision token weighting.
+Before quantizing Transformer layer ℓ, we compare the logits
+sQ,ℓ
+i
+of the current quantized-prefix model with cached clean-teacher logits sT
+i . We define
+τi = arg max
+v
+sT
+i,v,
+m(ℓ)
+i
+= 1
+h
+arg max
+v
+sQ,ℓ
+i,v̸ = τi
+i
+,
+α(ℓ)
+i
+= 1 + (ρ −1)m(ℓ)
+i .
+(18)
+Thus a flipped top-1 prediction receives ρ times the mass of an unchanged prediction. We use ρ = 8
+and normalize α(ℓ)
+i
+to unit mean.
+The mask is shared across projections in a Transformer layer. For each projection, we compute the
+detached residual ri = ∥W refxi −yi∥2 and use
+ωi =
+¯α(ℓ)
+i
+max(ri, ϵ)
+(19)
+in Ω. The resulting statistics remain XΩX⊤and Y ΩX⊤in Eq. 8. Weights are recomputed before
+each Transformer layer while clean logits are cached once. No gradient update or change to the stored
+affine weight format is required.
+3.6
+COMPLETE ALGORITHM
+Each chunk is initialized by row-wise min–max quantization of W ref
+c
+, then alternates the exact update
+of (a, o) with coordinate descent over Z for R refinement steps, followed by a final parameter refit
+because the last sweep changes Z. Each block update is non-increasing in Llocal, and the finite
+code space implies convergence to a coordinate-wise fixed point. Unlike GPTQ, SCHUROPT needs
+6
+
+
+Algorithm 1 SCHUROPT for a single linear layer
+Input: Sufficient statistics (G, C), reference weights W ref, bit width b, group size g, refinement
+count R, and damping coefficient ϵdamp
+Output: Quantized weights W
+1: P ←
+ G + ϵdamp diag(G)I
+−1
+2: Initialize the working matrix W ←W ref
+3: for t = 0, 1, . . . , din/g −1 do
+4:
+Partition P =
+Pcc
+Pcr
+P ⊤
+cr
+Prr
+
+according to the current chunk
+5:
+S ←P −1
+cc
+6:
+K ←−P ⊤
+crS
+7:
+Compute Ceff
+c
+and Ceff
+r
+8:
+T ←Ceff
+c
+−Ceff
+r K
+9:
+Initialize (Z, a, o) by row-wise min–max quantization of W ref
+c
+to b bits
+10:
+for 1, 2, . . . , R do
+11:
+Fit (a, o) by Eq. 16
+12:
+Q ←diag(a)(Z −o1⊤)
+13:
+Sweep all entries of Z using Eq. 17
+14:
+end for
+15:
+Refit (a, o); set Wc ←diag(a)(Z −o1⊤)
+16:
+P ←Prr −P ⊤
+crSPcr
+17: end for
+18: return W
+no explicit suffix error-propagation step. The optimal response is already incorporated into (S, T),
+and the next chunk’s effective linear term reflects the fixed prefix. If g = 1, (a, o) are held fixed,
+and refinement is restricted to a single nearest-level decision, the procedure reduces to GPTQ’s
+column-wise update. Algorithm 1 states the full procedure.
+4
+EXPERIMENTS
+4.1
+EXPERIMENTAL SETUP
+Quantization.
+Unless stated otherwise, all weight-only experiments use group size g = 128, a
+row-wise asymmetric quantizer, and float16 computation. We follow the standard GPTQ calibration
+protocol and quantize the linear attention and MLP projections inside Transformer blocks. Full
+quantization and calibration settings are provided in Appendix D.
+Models.
+We evaluate Llama2-7B/13B (Touvron et al., 2023), Llama3.2-1B/3B and Llama3-
+8B (Grattafiori et al., 2024), and Qwen3-0.6B/4B/8B (Yang et al., 2025). They span 0.6B–13B
+parameters and include distinct tokenizers and normalization designs.
+Metrics.
+We evaluate perplexity (PPL) on the complete WikiText-2 test split (Merity et al., 2017)
+using windows of length 2,048:
+PPL = exp
+ 
+−1
+N
+N
+X
+i=1
+log p(xi | x<i)
+!
+.
+(20)
+We evaluate zero-shot accuracy on PIQA (Bisk et al., 2020), ARC-Easy and ARC-Challenge (Clark
+et al., 2018), HellaSwag (Zellers et al., 2019), WinoGrande (Sakaguchi et al., 2020), and BoolQ (Clark
+et al., 2019). We use length-normalized accuracy for ARC-Easy, ARC-Challenge, and HellaSwag
+and standard accuracy otherwise, and report the unweighted mean across the six tasks.
+Baselines and environment.
+GPTQ, QEP, FOEM, and SCHURQUANT are evaluated within the
+same quantization codebase and calibration protocol. Experiments use Python 3.12, PyTorch 2.11.0,
+Transformers 5.14.1, GPTQModel 7.3.4, Triton 3.6.0, and CUDA runtime 13.0.
+7
+
+
+4.2
+WIKITEXT-2 PERPLEXITY
+Table 1 summarizes WikiText-2 perplexity across all models and bit widths. At 2 bits, SCHURQUANT
+improves substantially over GPTQ on all eight models. It prevents the extreme collapses observed
+for Llama3.2-1B (3432.88 to 79.19), Llama3.2-3B (10549.22 to 29.39), and Qwen3-0.6B (12027.65
+to 74.72), and gives the lowest PPL among all methods on every model. At 3 bits, SCHURQUANT
+is best on seven of the eight models; only Qwen3-8B favors GPTQ (10.92 versus 11.16). At 4 bits,
+SCHURQUANT is best on five models, while FOEM is best on Llama2-13B and GPTQ is best on
+Qwen3-4B/8B. As Section 4.3 shows, this reversal is specific to perplexity.
+4.3
+ZERO-SHOT ACCURACY
+Table 2 reports the mean zero-shot accuracy across the six downstream tasks for all models and
+bit widths. The results reveal three distinct regimes across quantization precisions. At 2 bits,
+SCHURQUANT is best on all eight models and averages 50.83%, exceeding QEP by 9.65 pp and
+GPTQ by 11.58 pp. Search error from greedy rounding is dominant on this coarse grid. At 3
+bits, SCHURQUANT averages 65.11%, 2.16 pp above QEP, and wins on seven of eight models.
+On Llama3-8B, it exceeds GPTQ by 6.05 pp. Notably, the 3-bit Qwen3-8B perplexity reversal in
+Table 1 is flipped again in zero-shot accuracy. SCHURQUANT is 2.33 pp above GPTQ. At 4 bits,
+SCHURQUANT remains best on average at 67.54%, but its 0.68-point advantage over the strongest
+baselines is much smaller than at lower precision, consistent with the diminishing difference between
+nearest rounding and a better discrete assignment on a finer grid.
+4.4
+OPTIMIZER COMPONENT ABLATION
+Table 3 holds the 2-bit current-input self-reconstruction objective, code descent, initialization, g =
+128, R = 16, windows, and seed fixed on Qwen3-4B. “Raw” holds the suffix fixed, “Schur” eliminates
+its continuous response. “Fixed” retains the initial grid, “refit” applies Eq. 16.
+With the grid fixed, Schur conditioning reduces the controlled loss from 1.645% to 1.165% and PPL
+from 2344.82 to 324.81. With the same refit on both curvatures, it reduces the loss from 0.872%
+to 0.550% (36.9% relative) and PPL from 152.95 to 86.64. Thus, the gain is not attributable to
+coordinate descent or grid refitting alone.
+4.5
+OBJECTIVE ABLATION
+Table 4 varies the optimizer and sufficient statistics on Qwen3-4B. Rows 1–2 share the GPTQ
+objective. The remaining rows use quantized-prefix inputs and clean teacher outputs; residual-add
+rows extend the target to the sublayer output. Weighted rows use ρ = 8 and Eq. 19, and λ = 1
+denotes the reference-weight anchor.
+With the GPTQ objective fixed, SCHUROPT changes 2-bit PPL from 258.96 to 81.95 and accuracy
+from 36.77% to 48.65% (+11.88 pp). At 3 and 4 bits, it worsens PPL while changing mean accuracy
+by −0.12 and +0.08 pp, respectively. For the projection-local teacher target, weighting improves
+mean accuracy at every precision, and adding the anchor on top of weighting gives a further +2.58,
++3.06, and +0.98 pp at 2, 3, and 4 bits. With weights and λ = 1 fixed, the residual-add target lowers
+PPL at all three precisions and changes mean accuracy by +5.30, −1.04, and +0.19 pp, respectively.
+The full configuration therefore gives the best 2-bit mean, the best 2/3-bit PPL, and the best 4-bit
+mean; the GPTQ optimizer gives the best 4-bit PPL, while the projection-local weighted objective
+remains best in 3-bit mean accuracy.
+4.6
+CONVERGENCE WITH REFINEMENT STEPS
+Table 5 reports WikiText-2 perplexity across different refinement counts R. Perplexity improves
+rapidly and saturates around R = 4. Variation over R ≥4 is only 0.87, compared with a 49.92
+improvement from R = 0 to R = 4. The local quadratic objective is monotone in R, whereas
+perplexity is not, again illustrating surrogate over-optimization. We use R = 16 elsewhere because it
+was stable across models and bit widths.
+8
+
+
+Table 1: WikiText-2 test perplexity (lower is better). FP16 is the full-precision reference and SchQ
+denotes SCHURQUANT. For each model and bit-width, the best quantized result is bold.
+2 bits
+3 bits
+4 bits
+Model
+FP16 SchQ
+GPTQ
+FOEM
+QEP SchQ GPTQ FOEM
+QEP SchQ GPTQ FOEM
+QEP
+Llama2-7B
+5.46 10.54
+37.63
+68.73
+29.84
+6.07
+6.32
+6.38
+6.39
+5.59
+5.62
+5.64
+5.71
+Llama2-13B
+4.88
+8.28
+16.69
+15.42
+13.50
+5.33
+5.42
+5.43
+5.43
+4.99
+4.98
+4.97
+4.98
+Llama3.2-1B
+9.76 79.19
+3432.88
+6034.37 1248.04 13.25
+15.41
+68.22 15.26 10.42
+10.63
+43.25 10.70
+Llama3.2-3B
+7.82 29.39 10549.22
+4331.26
+378.70
+9.39
+12.07 253.99 18.05
+8.12
+8.24
+17.33
+8.51
+Llama3-8B
+6.14 36.69
+486.51
+554.52
+221.76
+7.55
+8.31
+15.72
+9.79
+6.46
+6.57
+11.04
+6.64
+Qwen3-0.6B 20.96 74.72 12027.65 106866.61
+659.24 26.90
+50.53
+39.16 35.39 22.63
+26.22
+24.13 23.77
+Qwen3-4B
+13.64 32.40
+258.96
+580.99
+80.61 15.48
+15.79
+15.85 15.54 14.22
+14.16
+14.31 14.40
+Qwen3-8B
+9.72 29.48
+77.13
+165.42
+57.47 11.16
+10.92
+11.66 11.37 10.02
+9.91
+10.03 10.17
+Table 2: Mean zero-shot accuracy (%; higher is better) across the six evaluated tasks. For each model
+and bit-width, the best quantized result is bold.
+2 bits
+3 bits
+4 bits
+Model
+FP16 SchQ GPTQ FOEM
+QEP SchQ GPTQ FOEM
+QEP SchQ GPTQ FOEM
+QEP
+Llama2-7B
+70.45 56.58
+41.38
+39.47 43.73 68.13
+67.03
+67.04 67.53 69.54
+70.07
+69.89 69.93
+Llama2-13B
+73.29 62.55
+48.33
+40.35 50.14 71.59
+71.84
+71.08 71.63 73.11
+73.06
+73.04 73.09
+Llama3.2-1B 60.35 45.05
+37.60
+36.45 37.07 55.49
+53.94
+52.07 53.51 59.28
+59.19
+57.88 58.56
+Llama3.2-3B 69.04 47.90
+36.72
+36.90 41.11 65.98
+63.05
+60.54 60.56 68.04
+68.11
+66.52 67.81
+Llama3-8B
+74.61 48.53
+38.04
+37.20 37.73 72.20
+66.15
+66.72 68.22 74.27
+72.94
+73.03 73.27
+Qwen3-0.6B 54.19 44.19
+36.63
+36.33 37.50 49.82
+44.43
+46.04 45.75 52.43
+48.37
+48.25 49.76
+Qwen3-4B
+71.17 51.50
+36.77
+36.36 40.31 65.79
+65.53
+62.82 65.44 70.19
+69.50
+70.39 69.00
+Qwen3-8B
+74.09 50.31
+38.53
+36.95 41.81 71.89
+69.56
+68.92 70.94 73.43
+73.60
+72.70 73.47
+Mean
+68.40 50.83
+39.25
+37.50 41.18 65.11
+62.69
+61.90 62.95 67.54
+66.86
+66.46 66.86
+5
+CONCLUSION
+SCHUROPT analytically eliminates the optimal continuous suffix response and optimizes each group
+under the resulting Schur-reduced quadratic, including a closed-form row-wise scale/zero-point
+refit. With the GPTQ objective fixed on 2-bit Qwen3-4B, replacing GPTQ’s optimizer reduces PPL
+from 258.96 to 81.95 and raises mean accuracy by 11.88 pp. The component ablation separately
+tests the conditional curvature. SCHURQUANT pairs this optimizer with quantized-prefix teacher
+reconstruction, reference-weight regularization, residual-add targets, and teacher-decision token
+weighting, reaching mean accuracy of 50.83%, 65.11%, and 67.54% at 2, 3, and 4 bits across eight
+models.
+6
+LIMITATIONS
+Our method has two main limitations. First, SCHURQUANT incurs higher offline quantization cost
+than existing PTQ methods due to repeated calibration and discrete refinement, limiting its scalability
+to larger models. Second, optimizing the layer-wise surrogate does not always translate to improved
+end-task performance, and our evaluation is limited to asymmetric quantization, leaving broader
+quantization settings for future work.
+REPRODUCIBILITY STATEMENT
+The weighted objective, token-weight construction, sufficient statistics, Schur recurrence, quantizer
+updates, and code-sweep complexity are specified in Sections 3.1–3.6. Section 4 reports the models,
+calibration data, evaluation protocol, software environment, and all principal hyperparameters.
+Complete derivations are provided in Appendix B.
+AI USE STATEMENT
+Generative AI was utilized for minor tasks like grammar checking.
+9
+
+
+Table 3: Controlled optimizer ablation on Qwen3-4B at 2 bits. ∆L is the normalized layer-0 Q/K/V
+local-loss increase in percent.
+Curvature
+Grid
+∆L (%) ↓
+PPL ↓
+Raw
+fixed
+1.645
+2344.82
+Raw
+refit
+0.872
+152.95
+Schur
+fixed
+1.165
+324.81
+Schur
+refit
+0.550
+86.64
+Table 4: Objective ablation on Qwen3-4B. Mean is six-task zero-shot accuracy (%).
+2 bits
+3 bits
+4 bits
+Optimizer and objective
+PPL ↓
+Mean ↑PPL ↓Mean ↑
+PPL ↓
+Mean ↑
+GPTQ optimizer + GPTQ objective
+258.96
+36.77
+15.79
+65.53
+14.16
+69.50
+SCHUROPT + GPTQ objective
+81.95
+48.65
+21.26
+65.41
+15.52
+69.58
+SCHUROPT + teacher, λ = 1
+75.01
+42.97
+16.23
+65.13
+14.29
+69.06
+SCHUROPT + teacher + weights, λ = 0
+64.81
+43.62
+18.92
+63.77
+15.69
+69.02
+SCHUROPT + teacher + weights, λ = 1
+67.70
+46.20
+16.07
+66.83
+14.31
+70.00
+SCHUROPT + teacher + residual-add target, λ = 1
+38.72
+44.84
+15.99
+62.30
+14.22
+68.80
+SCHUROPT + teacher + residual-add target + weights, λ = 0
+38.94
+48.17
+18.63
+65.87
+16.01
+69.54
+SCHURQUANT (full), λ = 1
+32.40
+51.50
+15.48
+65.79
+14.22
+70.19
+Table 5: WikiText-2 perplexity versus refinement count R for 2-bit Llama2-7B under the fixed GPTQ
+objective. R = 0 uses only min–max initialization.
+R
+0
+1
+2
+4
+8
+16
+32
+PPL ↓
+70.46
+37.93
+28.75
+20.54
+21.41
+21.19
+21.21
+REFERENCES
+Yamato Arai and Yuma Ichikawa. Quantization Error Propagation: Revisiting Layer-Wise Post-
+Training Quantization. In Advances in Neural Information Processing Systems, volume 38, pp.
+151916–151951. Curran Associates, Inc., 2025.
+Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L. Croci, Bo Li, Pashmina Cameron, Martin
+Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. QuaRot: Outlier-Free 4-Bit Inference
+in Rotated LLMs. In Advances in Neural Information Processing Systems, volume 37, pp. 100213–
+100240, 2024.
+Kayhan Behdin, Ayan Acharya, Aman Gupta, Qingquan Song, Siyu Zhu, Sathiya Keerthi, and Rahul
+Mazumder. QuantEase: Optimization-based quantization for language models. arXiv preprint
+arXiv:2309.01885, 2023.
+Yonatan Bisk, Rowan Zellers, Ronan Le Bras, Jianfeng Gao, and Yejin Choi. PIQA: Reasoning about
+Physical Commonsense in Natural Language. In Proceedings of the AAAI Conference on Artificial
+Intelligence, volume 34, pp. 7432–7439, 2020.
+Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and Christopher M. De Sa. QuIP: 2-Bit Quantization
+of Large Language Models with Guarantees. Advances in Neural Information Processing Systems,
+36:4396–4429, 2023.
+Jiale Chen, Yalda Shabanzadeh, Elvir Crnˇcevi´c, Torsten Hoefler, and Dan Alistarh. The Geometry of
+LLM Quantization: GPTQ as Babai’s Nearest Plane Algorithm. In International Conference on
+Learning Representations, 2026.
+Mengzhao Chen, Wenqi Shao, Peng Xu, Jiahao Wang, Peng Gao, Kaipeng Zhang, and Ping Luo.
+EfficientQAT: Efficient Quantization-Aware Training for Large Language Models. In Annual
+Meeting of the Association for Computational Linguistics, pp. 10081–10100, 2025.
+10
+
+
+Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and Kristina
+Toutanova. BoolQ: Exploring the Surprising Difficulty of Natural Yes/No Questions. In Conference
+of the North American Chapter of the Association for Computational Linguistics: Human Language
+Technologies, pp. 2924–2936, 2019.
+Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and
+Oyvind Tafjord. Think You Have Solved Question Answering? Try ARC, the AI2 Reasoning
+Challenge. arXiv preprint arXiv:1803.05457, 2018.
+Vage Egiazarian, Andrei Panferov, Denis Kuznedelev, Elias Frantar, Artem Babenko, and Dan Alis-
+tarh. Extreme Compression of Large Language Models via Additive Quantization. In Proceedings
+of the 41st International Conference on Machine Learning, volume 235, 2024.
+Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. GPTQ: Accurate Quantization for
+Generative Pre-trained Transformers. In International Conference on Learning Representations,
+2023.
+Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad
+Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, et al. The Llama 3 Herd
+of Models. arXiv preprint arXiv:2407.21783, 2024.
+Yuma Ichikawa, Yudai Fujimoto, and Akira Sakai. LPCD: Unified Framework from Layer-Wise to
+Submodule Quantization. arXiv preprint arXiv:2512.01546, 2025.
+Jinuk Kim, Marwa El Halabi, Wonpyo Park, Clemens JS Schaefer, Deokjae Lee, Yeonhong Park,
+Jae W. Lee, and Hyun Oh Song. GuidedQuant: Large Language Model Quantization via Exploiting
+End Loss Guidance. In Forty-second International Conference on Machine Learning, 2025.
+Kimi Team, Tongtong Bai, Yifan Bai, Yiping Bao, M. C., Jianfeng Cai, Xinyuan Cai, Peizhou Cao,
+Yuxuan Cao, Ziwei Chai, et al. Kimi K3: Open Frontier Intelligence, 2026.
+Yuhang Li, Ruokai Yin, Donghyun Lee, Shiting Xiao, and Priyadarshini Panda. GPTAQ: Efficient
+Finetuning-Free Quantization for Asymmetric Calibration. In Proceedings of the 42nd International
+Conference on Machine Learning, volume 267, 2025.
+Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan
+Xiao, Xingyu Dang, Chuang Gan, and Song Han. AWQ: Activation-Aware Weight Quantization
+for On-Device LLM Compression and Acceleration. In Proceedings of Machine Learning and
+Systems, volume 6, 2024.
+Li Lin and Xiaojun Wan. LoaQ: Layer-Wise Output Approximation Quantization. arXiv preprint
+arXiv:2509.06297, 2026.
+Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghuraman Krish-
+namoorthi, Vikas Chandra, Yuandong Tian, and Tijmen Blankevoort. SpinQuant: LLM Quantiza-
+tion with Learned Rotations. In International Conference on Learning Representations, 2025.
+Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer Sentinel Mixture
+Models. In International Conference on Learning Representations, 2017.
+Pranav Ajit Nair and Arun Sai Suggala. CDQuant: Greedy coordinate descent for accurate LLM
+quantization. arXiv preprint arXiv:2406.17542, 2024.
+Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang, Michael Matena,
+Yanqi Zhou, Wei Li, and Peter J. Liu. Exploring the Limits of Transfer Learning with a Unified
+Text-to-Text Transformer. Journal of Machine Learning Research, 21(140):1–67, 2020.
+Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. WinoGrande: An
+Adversarial Winograd Schema Challenge at Scale. In Proceedings of the AAAI Conference on
+Artificial Intelligence, volume 34, pp. 8732–8740, 2020.
+J. Schur. ¨Uber Potenzreihen, die im Innern des Einheitskreises beschr¨ankt sind. Journal f¨ur die reine
+und angewandte Mathematik, 148:122–145, 1918.
+11
+
+
+Wenqi Shao, Mengzhao Chen, Zhaoyang Zhang, Peng Xu, Lirui Zhao, Zhiqian Li, Kaipeng Zhang,
+Peng Gao, Yu Qiao, and Ping Luo. OmniQuant: Omnidirectionally Calibrated Quantization for
+Large Language Models. In International Conference on Learning Representations, 2024.
+Hugo Touvron, Louis Martin, Kevin Stone, Peter Albert, Amjad Almahairi, Yasmine Babaei, Nikolay
+Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti Bhosale, et al. Llama 2: Open Foundation
+and Fine-Tuned Chat Models. arXiv preprint arXiv:2307.09288, 2023.
+Albert Tseng, Jerry Chee, Qingyao Sun, Volodymyr Kuleshov, and Christopher De Sa. QuIP#: Even
+Better LLM Quantization with Hadamard Incoherence and Lattice Codebooks. In Proceedings of
+the 41st International Conference on Machine Learning, volume 235, 2024.
+An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao,
+Chengen Huang, Chenxu Lv, et al. Qwen3 Technical Report. arXiv preprint arXiv:2505.09388,
+2025.
+Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. HellaSwag: Can a Machine
+Really Finish Your Sentence? In Annual Meeting of the Association for Computational Linguistics,
+pp. 4791–4800, 2019.
+Shihao Zhang, Haoyu Zhang, Ian Colbert, and Rayan Saab. Qronos: Correcting the Past by Shaping
+the Future... in Post-Training Quantization. In International Conference on Learning Representa-
+tions, 2026.
+Xingyu Zheng, Haotong Qin, Yuye Li, Haoran Chu, Jiakai Wang, Jinyang Guo, Michele Magno, and
+Xianglong Liu. First-order error matters: Accurate compensation for quantized large language
+models. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 40, pp. 28883–
+28891, 2026.
+A
+CALIBRATION
+The purpose of quantization is not to preserve weights in isolation, but to preserve the model’s outputs.
+Let E = W ref −W be the weight error and let X = [x1, . . . , xN] contain calibration inputs. The
+total squared output error is
+∥EX∥2
+F =
+N
+X
+k=1
+∥Exk∥2
+2 = tr
+ E XX⊤E⊤
+.
+(21)
+The Gram matrix XX⊤weights errors by the activation distribution: errors in strongly activated
+directions matter more than equally large errors in nearly inactive directions. Data-free round-to-
+nearest minimizes ∥E∥2
+F , which implicitly replaces XX⊤by the identity and treats every direction
+equally. Calibration estimates the missing curvature from a small sample of activations. Standard
+calibration assigns equal explicit mass to all token columns. With nonnegative token weights ωi, the
+same derivation becomes
+N
+X
+i=1
+ωi∥Exi∥2
+2 = tr
+ EXΩX⊤E⊤
+,
+Ω= diag(ω1, . . . , ωN).
+(22)
+Thus token weighting changes the empirical activation distribution seen by the quantizer without
+changing the quadratic form of the problem. This weighted curvature is the sufficient-statistics
+modification used by teacher-decision weighting in Section 3.5. The residual-add target independently
+modifies the weighted cross-Gram Y ΩX⊤. The unweighted special cases recover the Hessians used
+by GPTQ (Frantar et al., 2023) and QEP (Arai & Ichikawa, 2025).
+B
+DETAILED DERIVATIONS
+B.1
+PROOF OF PROPOSITION 1
+Terms containing only the fixed prefix WF are constant. Expanding the quadratic form in Eq. 9, the
+cross terms involving WF and Wc are
+1
+2 tr
+ WcGcF W ⊤
+F + WF GF cW ⊤
+c
+
+= tr(WF GF cW ⊤
+c ),
+(23)
+12
+
+
+where symmetry gives GcF = G⊤
+F c. Combining this expression with −tr(CcW ⊤
+c ) yields the
+effective linear coefficient Ceff
+c
+= Cc −WF GF c. The same argument gives Ceff
+r
+= Cr −WF GF r
+for the suffix.
+Collecting all terms that depend on (Wc, Wr) gives
+L(Wc, Wr) = 1
+2 tr
+
+[Wc
+Wr]
+
+Gcc
+Gcr
+Grc
+Grr
+
+[Wc
+Wr]⊤
+
+−tr(Ceff
+c W ⊤
+c ) −tr(Ceff
+r W ⊤
+r ) + const.
+(24)
+Holding Wc fixed and differentiating with respect to Wr gives
+WcGcr + WrGrr −Ceff
+r
+= 0,
+(25)
+so the optimal continuous suffix response is
+W ⋆
+r (Wc) =
+ Ceff
+r
+−WcGcr
+
+G−1
+rr .
+(26)
+Let U = Ceff
+r
+−WcGcr. The suffix-dependent terms can be completed to a square
+1
+2 tr(WrGrrW ⊤
+r ) −tr(UW ⊤
+r )
+= 1
+2 tr
+ (Wr −UG−1
+rr )Grr(Wr −UG−1
+rr )⊤
+−1
+2 tr(UG−1
+rr U ⊤).
+(27)
+The first term vanishes at Eq. 26. Expanding the second gives
+−1
+2 tr(UG−1
+rr U ⊤) = −1
+2 tr(Ceff
+r G−1
+rr Ceff⊤
+r
+)
++ tr(Ceff
+r G−1
+rr GrcW ⊤
+c )
+−1
+2 tr(WcGcrG−1
+rr GrcW ⊤
+c ).
+(28)
+The first term is constant in Wc. Combining the remaining terms with Eq. 24 produces the curvature
+S and the linear coefficient T of Eq. 12, proving Proposition 1.
+□
+B.2
+PROOF OF PROPOSITION 2
+For a fixed zero-point o, substitute qi = aiui(o) into Eq. 15:
+Li(ai; o) = 1
+2Ai(o)a2
+i −di(o)ai.
+(29)
+When Ai(o) > 0, differentiating gives the unconstrained optimum di(o)/Ai(o); projecting it onto
+ai ≥ϵa gives Eq. 16. Enumerating the finite set of b-bit zero-points and selecting the smallest
+substituted objective is globally exact for fixed codes.
+□
+C
+QUANTIZATION RUNTIME
+Table 6 reports measured end-to-end wall-clock, including statistics collection and discrete opti-
+mization. SCHURQUANT performs R = 16 sweeps and one current full-model calibration pass
+before each Transformer layer in addition to the clean-cache pass. It is therefore an offline accuracy–
+quantization-time trade-off, not an inference-speed result.
+At 2 bits, quantization with SCHURQUANT takes 45.8×/31.8× as long as GPTQ and 4.6×/5.8× QEP
+on Qwen3-4B/Llama2-7B; the 3/4-bit GPTQ ratios are 37.0/51.1× and 26.5/33.0×. Instrumentation
+now separates statistics and optimizer time and peak memory. Dense evaluator checkpoints are not
+packed-size evidence.
+13
+
+
+Table 6: End-to-end quantization time in minutes on one NVIDIA H100 PCIe GPU.
+Model
+Method
+2 bit
+3 bit
+4 bit
+Qwen3-4B
+GPTQ
+5.5
+6.9
+5.5
+FOEM
+6.4
+7.6
+6.6
+QEP
+55.6
+71.2
+69.4
+SCHURQUANT
+253.7
+254.0
+282.5
+Llama2-7B
+GPTQ
+7.1
+8.4
+7.1
+FOEM
+8.2
+9.1
+8.0
+QEP
+38.6
+54.1
+59.3
+SCHURQUANT
+224.2
+220.9
+235.6
+D
+QUANTIZATION SETUP
+Unless stated otherwise, all weight-only experiments use group size g = 128, a row-wise asymmetric
+quantizer, R = 16 refinement steps, and float16 computation. We draw 128 random windows of
+length 2,048 from long documents in the C4 training split (Raffel et al., 2020), following the standard
+calibration protocol of GPTQ. The final SCHURQUANT configuration constructs the top-mismatch
+weights from all 128 calibration windows before quantizing each Transformer layer. We use mismatch
+multiplier ρ = 8 and the detached projection-local residual normalization in Eq. 19 with residual
+floor ϵ = 10−8. We quantize the linear attention and MLP projections inside Transformer blocks
+while retaining the embeddings, language-model head, and normalization parameters in their original
+precision.
+14

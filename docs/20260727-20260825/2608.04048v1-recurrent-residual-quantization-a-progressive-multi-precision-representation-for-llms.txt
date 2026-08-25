@@ -1,0 +1,510 @@
+Title: Recurrent Residual Quantization: A Progressive Multi-Precision Representation for LLMs
+
+URL Source: https://arxiv.org/pdf/2608.04048v1
+
+Published Time: Thu, 06 Aug 2026 00:01:17 GMT
+
+Number of Pages: 24
+
+Markdown Content:
+# Recurrent Residual Quantization: A Progressive Multi-Precision Representation for LLMs 
+
+Yu Luo 
+
+Intel 
+
+Bo Dong 
+
+Intel 
+
+Wenhua Cheng 
+
+Intel 
+
+Haihao Shen 
+
+Intel 
+
+# Abstract 
+
+Serving large language models (LLMs) under diverse deployment constraints re-quires flexible trade-offs between accuracy, memory footprint, and throughput. However, conventional quantization methods typically require a separate check-point for each target bit-width. We introduce Recurrent Residual Quantization (RRQ), a post-training quantization (PTQ) framework that represents weights as a low-bit quantized base together with a sequence of quantized residual corrections, enabling multiple effective precisions from a single checkpoint. Starting from a 2-bit model obtained via post-training quantization (PTQ) or round-to-nearest (RTN), RRQ progressively adds lightweight 2-bit residuals generated via RTN to construct 4-, 6-, and 8-bit representations. The method is calibration-free and avoids joint multi-bit optimization. In our Qwen3-8B setup, the full all-RTN 2-/4-/6-/8-bit package is constructed in 1,293 seconds, 3.3× faster than the measured MatGPTQ construction. Experiments on six recent LLMs show competitive accuracy at 6 and 8 bits, with model-dependent behavior at 4 bits. The code will be made publicly available upon publication. 
+
+# 1 Introduction 
+
+Large language models (LLMs) [1–4] have achieved strong performance across a wide range of tasks, but their memory footprint and bandwidth demand remain major barriers to efficient serving. Weight-only post-training quantization (PTQ) is a practical way to reduce these costs, and recent methods can preserve strong accuracy at low precision [5–9]. However, most PTQ pipelines are built for a single target precision: supporting 4-bit, 6-bit, and 8-bit deployment typically requires constructing and storing separate checkpoints. This fixed-precision workflow is poorly matched to flexible serving. In practice, the preferred precision may depend on available memory, latency targets, workload size, and accuracy require-ments [10, 11]. A single representation that exposes multiple accuracy–efficiency trade-offs would reduce checkpoint management overhead and avoid repeatedly quantizing the same model for dif-ferent bit-widths. Recent single-checkpoint multi-precision methods [12, 13] address this goal by using nested integer bit layouts, where lower-precision models are derived from a shared higher-bit representation. While effective, this design couples all supported precisions within one bit hierarchy and makes it difficult to reuse an already optimized low-bit checkpoint as the starting point for higher-precision variants. We introduce Recurrent Residual Quantization (RRQ), a post-training framework for single-checkpoint multi-precision LLM representation. RRQ replaces nested bit slicing with additive residual refinement: weights are represented as a low-bit quantized base plus a sequence of quan-tized residual corrections. The base stage gives the lowest-precision model, and adding residual stages progressively improves the reconstruction. This formulation separates the base quantizer from the precision-expansion mechanism, allowing the low-bit foundation and the residual stages to be constructed with different quantizers. 
+
+> Preprint. arXiv:2608.04048v1 [cs.LG] 4 Aug 2026
+
+Our main implementation uses RTN for the 2-bit base and for three lightweight 2-bit residual stages, yielding 2-, 4-, 6-, and 8-bit representations. The entire construction is calibration-free and does not require Hessian estimation or joint multi-bit optimization. As a result, RRQ can efficiently construct a multi-precision package without depending on a learned low-bit base quantizer. We also report a stronger SignRoundV2-base variant as an ablation to separate the effect of first-stage quality from the residual representation itself. In a representative Qwen3-8B case study, the all-RTN RRQ package completes in 1,293 seconds, about 3.3× faster than a prior multi-precision PTQ baseline. We further analyze when residual refinement is expected to help. The analysis shows that RRQ is most favorable when localized outliers dominate the dynamic range of quantization groups. In this regime, the base stage captures large-magnitude components, leaving later stages to quantize a narrower residual signal. This view also explains why RRQ’s low-bit behavior is model-dependent: residual refinement is more effective for outlier-heavy weight distributions, while direct or specialized fixed-bit quantizers may remain preferable for flatter distributions. We evaluate RRQ on six recent LLMs covering both base and instruction-tuned checkpoints. RRQ achieves near-BF16 accuracy at higher effective precisions and remains competitive with existing single-checkpoint multi-precision methods at 8 and 6 bits. At 4 bits, performance varies more across models, consistent with the outlier-based analysis. Our contributions are summarized as follows: • We introduce RRQ, a post-training framework that represents LLM weights as a low-bit quantized base plus quantized residual stages, enabling single-checkpoint multi-precision reconstruction and reuse of existing low-bit checkpoints. • We analyze RRQ through an outlier-based lens, showing when progressive residual refine-ment can be preferable to direct fixed-bit quantization and explaining its model-dependent behavior at low bit-widths. • We validate RRQ on recent LLMs, showing competitive accuracy at 8 and 6 bits, model-dependent 4-bit behavior, and a measured 3.3× construction-time reduction in a Qwen3-8B case study. 
+
+# 2 Related Work 
+
+2.1 Fixed-Precision Weight Quantization for LLMs 
+
+Weight quantization is a standard way to reduce the memory footprint and inference cost of LLMs. Post-training quantization (PTQ) compresses pretrained weights without retraining. Round-to-nearest (RTN) is a simple baseline, while GPTQ [5] and AWQ [6] use second-order informa-tion or activation-aware scaling to reduce quantization loss. SqueezeLLM [14] uses non-uniform quantization for outlier-heavy weight distributions. Outliers were systematically highlighted by LLM.int8() [15], which showed that a small fraction of activation channels can dominate quan-tization error; SmoothQuant [16] mitigates this by shifting difficulty from activations to weights through equivalent per-channel scaling. Training-aware methods such as LLM-QAT [17] incorporate quantization into training, while PTQ methods such as OmniQuant [8] learn auxiliary scaling and shifting parameters by block-wise reconstruction. These methods are effective, but they produce one checkpoint per target precision ; serving multiple precisions therefore requires multiple independently quantized models. 
+
+2.2 Multi-Precision Quantization 
+
+A growing body of work aims to obtain a single quantized model that can run at multiple precisions. MatQuant [12] introduces the Matryoshka idea for integer quantization: a high-bit parent model can be sliced by most-significant-bit extraction to produce lower-bit sub-models at inference time. However, MatQuant is tied to learning-based quantization (QAT or OmniQuant) and does not support one-shot PTQ or reuse of existing checkpoints. MatGPTQ [13] extends this line to PTQ by adapting GPTQ to a joint multi-bit objective, producing a sliceable parent checkpoint in one pass with heterogeneous per-layer bit allocation. Like MatQuant, however, MatGPTQ remains restricted to integer Matryoshka slicing and nested integer bit layouts. 2Table 1: Feature comparison with representative quantization approaches. ✓: supported and evaluated or standard for the method; repr.: representationally supported but not empirically evaluated here; ×:not supported; partial: restricted support; —: outside the method’s scope.                      
+
+> RRQ GPTQ [5] MatQuant [12] MatGPTQ [13] Single-checkpoint multi-precision ✓×✓✓
+> Post-training applicable ✓✓partial ✓
+> Non-integer / FP stages repr. ×××
+> Builds on quantized checkpoints ✓×××
+> Reuses quantizers / kernels ✓—××
+
+Mixed-precision methods such as HAWQ [18], HAWQ-V2 [19], and OWQ [20] assign different bit-widths across layers, but they target one static precision profile rather than switching among multiple usable precisions. RRQ is complementary to MatQuant and MatGPTQ. Instead of MSB slicing within one integer code, it decomposes weights into a base quantizer and recurrent residual stages. This preserves PTQ flexibility while removing the requirement that all precisions arise from nested integer bit fields. RRQ can therefore build on existing quantized checkpoints and reuse existing quantizers or low-bit kernels as stage-wise building blocks. It is also representationally compatible with heterogeneous stage formats, although this paper empirically evaluates only integer low-bit stages. Table 1 summarizes the distinctions. 
+
+2.3 Residual and Multi-Stage Quantization 
+
+Residual quantization has a long history in signal processing and vector quantization, where a signal is approximated by successively quantizing and subtracting reconstruction errors [21]. In neural network compression, residual vector quantization (RVQ) has been used for codebook-based weight compression [22] and learned image compression [23]. Recent activation-compression work also uses residual refinement. Quant VideoGen (QVG) [24] applies progressive residual quantization to KV-cache tensors in auto-regressive video diffusion models, showing that iterative residual coding can reduce activation storage. RRQ differs in target and objective: it quantizes static model weights , uses fixed per-group scalar quantization rather than input-dependent clustering, and makes every prefix of residual stages a usable model at a distinct effective bit-width. 
+
+# 3 Recurrent Residual Quantization 
+
+RRQ is motivated by the heavy-tailed weight distributions observed in modern LLMs. Prior studies report localized outliers in both activations [15, 25] and weights [14, 20, 26] of transformer models. To quantify local outlier severity, we define the Peak-to-Mean Ratio (PMR) as the maximum absolute weight divided by the mean absolute value (MAE) within the same quantization group. Taking the maximum PMR across groups in a tensor highlights the most challenging groups for uniform quantization. For example, Qwen3-14B has a mean tensor-wise maximum PMR of 27.826 under group size 128. Such localized dynamic ranges can increase uniform quantization error, suggesting a setting in which residual correction may be useful. 
+
+3.1 Problem Setup 
+
+Let xji denote the j-th floating-point weight element within quantization group i, and let si and zi
+
+be the shared scale and zero-point for that group. A conventional quantizer first applies an affine transformation to scale and shift each weight: 
+
+qj = xji
+
+si + zi, (1) followed by a rounding operator R(·) to obtain the discrete integer code: 
+
+Qj = R(qj ). (2) 3Algorithm 1 Recurrent Residual Quantization (RRQ) 
+
+Require: Full-precision weights W , and optionally an existing base checkpoint; base quantizer Q0;residual quantizers {Q k}Sk=1 . 
+
+> 1:
+
+if a base checkpoint is provided then  
+
+> 2:
+
+Load its codes, scales, and zero-points; dequantize to ˆW0. 
+
+> 3:
+
+else  
+
+> 4:
+
+Quantize W with Q0; store base codes, scales, and zero-points; dequantize to ˆW0. 
+
+> 5:
+
+end if  
+
+> 6:
+
+R0 ← W − ˆW0 
+
+> 7:
+
+for k = 1 , . . . , S do  
+
+> 8:
+
+Quantize Rk−1 with Qk; store residual codes, scales, and zero-points.  
+
+> 9:
+
+Dequantize the residual stage to ˆRk. 
+
+> 10:
+
+Rk ← Rk−1 − ˆRk 
+
+> 11:
+
+end for  
+
+> 12:
+
+return stored stage codes, scales, and zero-points, with prefix-t reconstruction ˜W(t) = ˆW0 +
+
+Ptk=1 ˆRk.The quantizer stores the integer code Qj alongside the metadata si and zi. Consequently, the quantization error, or residual, is defined as: 
+
+rj = xji − (Qj − zi)si. (3) Standard fixed-bit quantization discards this residual, so each target precision is typically generated as an independent checkpoint. RRQ instead quantizes the residual rj in subsequent stages, producing a sequence of additive corrections. 
+
+3.2 Methodological Framework 
+
+Assume the base stage quantization format is denoted by b0, which may correspond to an integer bit-width or a specialized low-bit floating-point format. We define S as the total number of residual quantization stages, where bk represents the format allocated to the k-th residual stage. If all stages employ integer formats, the accumulated nominal bit budget after t residual stages is given by 
+
+Bt = b0 + Ptk=1 bk.RRQ initiates from a base quantized model and recursively quantizes the residual errors: 
+
+Qj 
+
+> 0
+
+= Qb0 (xj , z j
+
+> 0
+
+), (4) 
+
+rj 
+
+> 0
+
+= xj − ˆxj
+
+> 0
+
+, (5) 
+
+Qjk = Qbk (rjk−1, z jk), for k = 1 , . . . , S, (6) 
+
+rjk = rjk−1 − ˆrjk, (7) where ˆxj 
+
+> 0
+
+is the dequantized approximation from the base stage, and ˆrjk denotes the dequantized correction from the k-th residual stage. The effective reconstructed weight after accumulating t stages is simply the additive sum: 
+
+˜xj 
+
+> (t)
+
+= ˆ xj 
+
+> 0
+
++
+
+> t
+
+X
+
+> k=1
+
+ˆrjk. (8) Algorithm 1 formalizes this construction. The protocol requires full-precision weights to compute residual targets. It can also start from an existing low-bit checkpoint by skipping the initial base quantization step. When the base and all residual stages use a 2-bit format (e.g., a 2-bit base tensor paired with three 2-bit residual tensors), the representation supports 2-, 4-, 6-, and 8-bit operating points. The standalone 2-bit operating point uses only the base stage, while the 4-, 6-, and 8-bit operating points add one, two, and three residual stages, respectively. Although our experiments focus on low-bit integer stages, the RRQ formulation permits heterogeneous stage formats. The base stage can also be obtained from an independently quantized checkpoint. 4Table 2: Accumulated absolute error under two outlier-injected examples with zero-point quantization. In both settings, the inlier range is [−0.5, 0.5] . The two cases differ only in the outlier magnitude. Lower is better. Setting Method 2-bit 4-bit 6-bit 8-bit 
+
+K = 5 (10 r) RRQ + ZP 5.055 1.180 0.233 0.087 
+
+K = 5 (10 r) Fixed-bit + ZP 5.055 1.213 0.344 0.095 
+
+K = 5 (10 r) Error Ratio 1.000 0.973 0.677 0.917 
+
+K = 3 (6r) RRQ + ZP 4.160 1.474 0.511 0.135 
+
+K = 3 (6r) Fixed-bit + ZP 4.160 0.766 0.243 0.066 
+
+K = 3 (6r) Error Ratio 1.000 1.925 2.102 2.045 The corresponding prefill and decoding computations follow the same stage-wise decomposition. Higher effective precisions can be evaluated by summing the outputs of the base and residual-stage GEMMs. Appendix C provides the arithmetic details. 
+
+3.3 Numerical Example and Error Analysis 
+
+To build intuition for when recurrent residual layering can reduce outlier-induced error relative to direct uniform quantization, we analyze a simple zero-point quantization example with an injected outlier. The inlier region is clamped to [−0.5, 0.5] (so r = 0 .5), and a single outlier has magnitude 
+
+K. We consider two settings: K = 5 (10 r) and K = 3 (6r). As shown in Table 2, RRQ has lower accumulated absolute error for the larger outlier at 4 and 6 bits, while direct fixed-bit quantization has lower error for the milder outlier. This example illustrates that residual decomposition is beneficial only under sufficiently large local dynamic-range imbalance. 
+
+3.4 An Idealized Outlier Regime for RRQ 
+
+The crossover in Table 2 can be described with a simplified two-population model. Assume that most weights lie in an inlier interval [−r, r ], while a rare outlier expands the group range to [−r, K ],where K > r . For a fixed bit budget B = n1 + n2, we compare standard B-bit quantization with a two-stage RRQ variant consisting of an n1-bit base stage and an n2-bit residual stage. For a uniform quantizer spanning the expanded range [−r, K ], the step size scales linearly as: 
+
+∆direct = K + r
+
+2B − 1 , (9) yielding the approximate expected mean absolute error: 
+
+Edirect ≈ K + r
+
+4(2 B − 1) . (10) In the idealized RRQ case, the coarse first stage accounts for the large outlier, and the second stage quantizes a residual whose range is no longer determined by K. Assuming the residual lies within 
+
+[−r, r ], the second-stage step size is: 
+
+∆rrq = 2r
+
+2n2 − 1 . (11) In this idealized case, the residual-stage error is therefore approximated by: 
+
+Errq ≈ r
+
+2(2 n2 − 1) . (12) The condition Errq < E direct gives the following outlier threshold for RRQ to have lower error in this model: 
+
+K > r 
+
+
+
+2 · 2B − 12n2 − 1 − 1
+
+
+
+. (13) Using B = n1 + n2 and the approximation 2k − 1 ≈ 2k, the threshold becomes: 
+
+K ≳ r(2 n1+1 − 1) . (14) 5Applying Equation 13 with r = 0 .5 to a balanced 2-plus-2 bit split ( n1 = n2 = 2 ) gives the threshold 
+
+K > 4.5. The approximation in Equation 14 gives K > 3.5. This captures the stage-allocation trade-off: reducing n1 lowers the outlier threshold, while increasing n1 improves the base-stage representation but leaves fewer bits for residual correction. The two examples in Table 2 are consistent with this analysis: K = 5 lies above the exact threshold, whereas K = 3 does not. The same reasoning extends to settings with multiple outliers. Let K1 and K2 denote the largest and second-largest magnitudes ( K1 ≥ K2 > r ). Direct quantization is still governed by the range 
+
+[−r, K 1], but RRQ residuals may remain wider than [−r, r ] if additional outliers are not sufficiently captured by the base stage. Define an adaptive residual radius Br = max {r, ρ (K2)}, where ρ(K2)
+
+denotes the remaining contribution associated with the secondary outlier. Then the second-stage error is approximated by Errq ≈ Br  
+
+> 2(2 n2−1)
+
+, and the threshold becomes: 
+
+K1 > 2 · Br,n 1
+
+2B − 12n2 − 1 − r. (15) We use the notation Br,n 1 to emphasize that the residual radius depends on the base-stage bit-width. For a deeper T -stage RRQ representation with total budget B = PTt=1 nt, let Br,t denote the residual radius after stage t. Comparing direct quantization with the final residual stage gives the approximation E(T )rrq ≈ Br,T −1  
+
+> 2(2 nT−1)
+
+and the threshold: 
+
+K1 > 2 · Br,T −1
+
+2B − 12nT − 1 − r. (16) Thus, residual expansion is most useful when each stage substantially reduces the residual range. If many large values remain in the residual, dividing a fixed bit budget across many stages can reduce the benefit. Section 4 discusses these cases in more detail. 
+
+# 4 Outlier Threshold Analysis 
+
+Table 3 shows how the idealized outlier threshold changes across 4-bit decompositions when the residual radius is assumed to satisfy Br,n 1 ≈ r. Smaller n1 lowers the outlier magnitude required for RRQ to improve over direct quantization, while larger n1 allocates more bits to the base stage and fewer bits to residual correction. Table 3: Critical outlier threshold for different 4-bit decompositions. The threshold is computed from the exact condition K > r 
+
+
+
+2 · 2B −12n2 −1 − 1
+
+
+
+with B = 4 . Lower thresholds indicate that RRQ becomes preferable under milder outliers. Scheme First-stage bits n1 Critical threshold 1-bit + 3-bit 1 K > 3.29 r
+
+2-bit + 2-bit 2 K > 9r
+
+3-bit + 1-bit 3 K > 29 r
+
+Direct 4-bit 4 N/A These values illustrate the dependence on the stage split. In the single-outlier idealization with 
+
+Br,n 1 ≈ r, a 1-bit base plus a 3-bit residual has the lowest threshold. However, this assumption may not hold for realistic weight distributions with many large values. A very low-bit base can leave a wider residual range than a 2-bit base. Therefore, practical comparisons should use empirically estimated residual radii rather than the symmetric idealization: 
+
+K1 > 2 · Br,n 1
+
+2B − 12n2 − 1 − r. (17) For realistic 4-bit distributions, the crossover depends on the residual radii. Comparing the threshold  
+
+> 30 7
+
+B(1)  
+
+> r
+
+− r for a 1-plus-3 split with 10 B(2)  
+
+> r
+
+− r for a 2-plus-2 split gives the boundary 30 7 B(1)  
+
+> r
+
+=10 B(2)  
+
+> r
+
+. Thus, the 1-plus-3 split is preferable only if B(1)  
+
+> r
+
+< 73 B(2)  
+
+> r
+
+. If the 1-bit base leaves a substantially wider residual, the 2-plus-2 split can be preferable despite its higher idealized threshold. 6Table 4: Quantization efficiency comparison on Qwen3-8B. Times are measured on the same A100 setup.                               
+
+> Aspect MatGPTQ [13] RRQ (RTN) Target bit-widths {3,4,8}{2,4,6,8}
+> Quantization algorithm Custom multi-objective GPTQ RTN 2-bit base + RTN residual stages Group size 128 128 Quantization type Symmetric Symmetric Hessian computation Required None Calibration data Required None Cross-bit weighting ( λr)search Required None Custom kernel for quantization Required None (reuses existing) New bit-width support Requires new quantizer & kernel Configure per-stage format only Stages 1 (coupled) 4 (sequential) Standalone 2-bit base model Not supported Supported Measured construction scope (Qwen3-8B) Full MatGPTQ construction: 4239 s Full all-RTN 2-/4-/6-/8-bit package: 1293 s Speedup 1.0 ×3.3 ×
+> RRQ timing covers the complete all-RTN construction of the 2-bit base and three residual stages. The four 2-bit quantization passes account for 412 s; the remaining time comes from saving fake-quantized QDQ models, residual computation, stage orchestration, and I/O. RRQ provides four prefix operating points, while MatGPTQ reports three.
+
+For the experiments in this paper, we do not evaluate 1-plus-3 formats because a standalone 1-bit base is unlikely to be useful as a deployment operating point. A uniform 2-bit stage design provides a usable 2-bit base and simple 4-, 6-, and 8-bit prefixes. Conversely, 3-plus-1 splits allocate little capacity to the residual stage and would require very large isolated outliers to improve over direct fixed-bit quantization in the idealized model. 
+
+# 5 LLM Evaluation 
+
+5.1 Experimental Setup Models, Baselines, and Metrics. Following the protocol of MatGPTQ [13], we benchmark six LLM checkpoints (base and instruction-tuned): Llama-3.1-8B [4], Llama-3.1-8B-Instruct [4], Qwen3-8B-Base [3], Qwen3-8B [3], Qwen3-14B [3], and Phi-3-medium [27]. Baseline GPTQ and MatGPTQ metrics are taken from MatGPTQ under the same evaluation setting. We report Task Avg , the macro-average zero-shot accuracy over ARC-Challenge, ARC-Easy, HellaSwag, PIQA, and WinoGrande using the LM Evaluation Harness [28–32], as the primary evaluation metric. Following the common reporting practice for these tasks, we treat differences within 0.1 Task Avg points as ties. All RRQ evaluations use AutoRound’s fake-quantized QDQ models [9]. 
+
+Quantization Configuration. RRQ uses four calibration-free 2-bit RTN stages: one 2-bit RTN base and three 2-bit RTN residual stages, forming a 2+2+2+2 representation with group size 128 to match the MatGPTQ grouping layout [13, 9]. This all-RTN setting tests whether RRQ depends on a stronger 2-bit base quantizer. We additionally retain the previous SignRoundV2-base symmetric configuration as RRQ (sym) and analyze asymmetric variants in Appendix I. By replacing Hessian estimation and calibration data with RTN stages, RRQ reduces construction time in our measured setup. As summarized in Table 4, constructing the full all-RTN 2-/4-/6-/8-bit package on an A100 GPU takes 1,293 seconds for Qwen3-8B, with 412 seconds spent on the four 2-bit quantization passes. This is 3.3× faster than the 4,239-second MatGPTQ construction measured under the same setup. Package-size estimates and timing details are provided in Appendix G and Appendix H, respectively. 
+
+5.2 Main Evaluation Results 
+
+Table 5 reports Task Avg and WikiText-2 perplexity (PPL) for the six evaluated models. 7Table 5: Task Avg and PPL under the MatGPTQ Section 5 protocol. Task Avg averages ARC-Challenge, ARC-Easy, HellaSwag, PIQA, and WinoGrande; PPL is WikiText-2 perplexity. Bold marks the best single-checkpoint multi-precision method only when the gap exceeds 0.1 Task Avg points. 16-bit, GPTQ, and MatGPTQ results are from MatGPTQ [13]; RRQ results are our own. RRQ (RTN) uses RTN for both the base and residual stages, while RRQ (sym) uses the stronger SignRoundV2 2-bit base with symmetric RTN residual stages; asymmetric RRQ configurations are deferred to the ablation in Appendix I.                                                                                                                                                                                        
+
+> Bit Method Llama-3.1 -8B (PPL) Llama-3.1 -8B (Avg) Llama-3.1 -8B-I (PPL) Llama-3.1 -8B-I (Avg) Qwen3 -8B-B (PPL) Qwen3 -8B-B (Avg) Qwen3 -8B (PPL) Qwen3 -8B (Avg) Qwen3 -14B (PPL) Qwen3 -14B (Avg) Phi3 -Med (PPL) Phi3 -Med (Avg) 16 –6.27 74.52 7.23 74.00 7.01 73.55 9.73 71.54 8.64 74.95 4.32 77.04 8GPTQ 6.27 74.49 7.23 73.96 7.01 73.50 9.73 71.61 8.64 74.97 4.32 76.96 MatGPTQ 6.46 73.07 7.46 73.35 7.29 73.27 9.79 71.86 9.00 75.02 4.54 74.48 RRQ (RTN) 6.31 74.04 7.30 74.05 7.10 73.39 9.70 71.63 8.73 74.90 4.36 76.92 RRQ (sym) 6.28 74.28 7.23 73.91 7.04 73.53 9.77 71.65 8.74 75.06 4.37 77.04
+> 6GPTQ 6.27 74.05 7.23 73.28 7.04 73.62 9.71 71.42 8.66 74.80 4.34 77.00 MatGPTQ 6.57 72.74 7.55 73.11 7.49 73.56 9.87 71.35 9.09 74.96 5.06 73.66 RRQ (RTN) 6.45 73.87 7.38 74.46 7.22 73.27 9.73 71.45 8.77 74.83 4.43 76.43 RRQ (sym) 6.41 74.11 7.35 74.18 7.20 72.92 9.77 71.63 8.74 74.50 4.46 76.71
+> 4GPTQ 6.75 72.16 7.84 72.65 7.36 73.65 10.48 70.49 8.88 74.52 4.76 76.47 MatGPTQ 6.89 72.43 7.82 72.62 7.94 73.02 9.98 70.79 9.05 73.89 4.80 75.97 RRQ (RTN) 7.09 73.12 8.05 72.85 8.39 72.07 10.12 70.34 9.23 74.09 4.86 76.88 RRQ (sym) 7.18 72.32 8.18 72.87 7.99 72.84 10.59 70.87 9.38 75.22 4.92 76.92 2RRQ (RTN) 28.00 52.85 33.44 55.82 16.75 61.58 26.77 60.27 13.64 66.67 7.74 68.03 RRQ (sym) 15.98 63.29 16.36 64.70 11.29 65.73 20.20 63.79 9.38 75.22 7.11 70.45
+
+At 8 and 6 bits, MatGPTQ and both RRQ variants remain close to the unquantized 16-bit baselines. The all-RTN RRQ variant removes the possible effect of a stronger learned 2-bit base: despite relying only on RTN for all four stages, it closely tracks the SignRoundV2-base symmetric variant and remains competitive with MatGPTQ across the model suite. Using the 0.1-point threshold, the best RRQ configuration is ahead of MatGPTQ on four of the six tested models at both 8 and 6 bits, while the remaining cases are either MatGPTQ-favored or within the tie threshold. These results suggest that residual-stage construction can achieve competitive higher-bit prefixes without joint multi-bit optimization. At 4 bits, RRQ remains competitive but becomes more sensitive to the chosen first stage and the underlying outlier profile. The all-RTN variant improves Llama-3.1-8B relative to MatGPTQ, matches the SignRoundV2-base variant on Llama-3.1-8B-Instruct and Phi-3-medium within the 0.1-point threshold, and trails on Qwen3-8B-Base and Qwen3-14B. The SignRoundV2-base symmetric variant has the highest Task Avg on Qwen3-14B and ties the all-RTN variant on Phi-3-medium. These results indicate that calibration-free RTN stages can be competitive in some 4-bit settings, while first-stage quality remains important for specific weight distributions. Appendix F provides a model-specific analysis of outlier profiles and 4-bit behavior. Appendix I reports the symmetric/asymmetric ablation. The 2-bit rows isolate the standalone base-stage operating point. At this precision, the SignRoundV2-base RRQ variant consistently outperforms the all-RTN base across the six models, with Task Avg gains ranging from 2.42 points on Phi-3-medium to 10.44 points on Llama-3.1-8B. This shows that first-stage quality is important when the base checkpoint is used directly as a 2-bit model. The gap is much smaller after residual stages are added at 4, 6, and 8 bits, indicating that residual refinement can reduce, but not eliminate, sensitivity to the base quantizer. (Appendix E reports additional results on Llama-3.1-70B-Instruct, including MMLU.) 
+
+5.3 Ablation Insights 
+
+The ablation study examines group size and symmetric versus asymmetric residual quantization. The main results above already compare the all-RTN and SignRoundV2-base variants, including the standalone 2-bit operating point. Group size 64 improves the 2-bit operating point, while group size 128 gives similar results at higher accumulated precisions. Asymmetric residual quantization provides small gains in some 4-bit cases, but the symmetric configuration is generally sufficient. Appendix I provides the full results. 85.4 Discussion Multi-precision representation. RRQ stores a base stage and residual stages that can be used as precision prefixes. Under our default 2+2+2+2 structure, the base stage gives the 2-bit operating point, while adding one, two, or three residual stages gives the 4-, 6-, and 8-bit operating points. 
+
+Choice of stage quantizer. Our main experiments use RTN for the base and residual stages because RTN is fast, calibration-free, and isolates the construction-efficiency aspect of RRQ. This choice is not a restriction of the framework. RRQ can use a stronger quantizer for any stage, including GPTQ-style second-order quantization or SignRound-style learned rounding. The comparison between RRQ (RTN) and RRQ (sym) in Table 5 illustrates this flexibility: replacing only the 2-bit base quantizer changes the standalone 2-bit operating point substantially, while the residual-stage representation remains the same. More generally, RRQ should be viewed as a stage-wise representation that can trade construction cost for accuracy by selecting different quantizers for the base or residual stages. 
+
+Limitations. RRQ remains sensitive to the quality of the base quantizer: errors introduced in the base stage can limit the accuracy of later prefixes. Our evaluation focuses on quantization accuracy, package size, and construction time. End-to-end deployment with optimized hardware kernels remains future work. 
+
+# 6 Conclusion 
+
+This paper introduced Recurrent Residual Quantization (RRQ), a post-training framework that stores a low-bit base and a sequence of quantized residual corrections to provide multiple precision prefixes from one checkpoint. In our Qwen3-8B setup, constructing the all-RTN 2-/4-/6-/8-bit package takes 1,293 seconds, including 412 seconds for the four 2-bit quantization passes. This is 3.3× faster than the measured 4,239-second MatGPTQ construction under the same setup. Across six evaluated LLMs, the all-RTN RRQ package and the SignRoundV2-base symmetric variant are competitive with MatGPTQ at 6 and 8 bits under the MatGPTQ protocol. At 4 bits, the results are model-dependent and depend on both outlier structure and base-stage quality. The analysis and ablations suggest that residual refinement is most useful when early stages reduce the dynamic range of the remaining residuals. RRQ therefore provides a simple single-checkpoint multi-precision representation that avoids Hessian computation, calibration data, and joint multi-bit optimization in the evaluated all-RTN setting. Future work should integrate RRQ with optimized inference kernels and study end-to-end latency across hardware platforms. 
+
+# Acknowledgments and Disclosure of Funding 
+
+This draft is adapted from an internal invention disclosure. Funding, conflict-of-interest, and release details should be completed before camera-ready submission. 
+
+# References 
+
+[1] Josh Achiam, Steven Adler, Sandhini Agarwal, Lama Ahmad, Ilge Akkaya, Florencia Leoni Aleman, Diogo Almeida, Janko Altenschmidt, Sam Altman, Shyamal Anadkat, et al. GPT-4 technical report. arXiv preprint arXiv:2303.08774 , 2023. [2] Aixin Liu, Bei Feng, Bing Xue, Bingxuan Wang, Bochao Wu, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenyu Zhang, Chong Ruan, et al. Deepseek-v3 technical report. arXiv preprint arXiv:2412.19437 , 2024. [3] An Yang, A. Li, B. Yang, B. Zhang, B. Hui, B. Zheng, B. Yu, C. Gao, C. Huang, C. Lv, et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388 , 2025. [4] A. Dubey, A. Jauhri, A. Pandey, A. Kadian, et al. The Llama 3 herd of models. arXiv preprint arXiv:2407.21783 , 2024. 9[5] E. Frantar, S. Ashkboos, T. Hoefler, and D. Alistarh. Gptq: Accurate post-training quantization for generative pre-trained transformers. In ICLR , 2023. arXiv:2210.17323. [6] J. Lin, J. Tang, H. Tang, S. Yang, W.-M. Chen, W.-C. Wang, G. Xiao, X. Dang, C. Gan, and S. Han. Awq: Activation-aware weight quantization for on-device llm compression and acceleration. In MLSys , 2024. arXiv:2306.00978. [7] J. Chee, Y. Cai, V. Kuleshov, and C. De Sa. Quip: 2-bit quantization of large language models with guarantees. In NeurIPS , 2024. arXiv:2307.13304. [8] W. Shao, M. Chen, Z. Zhang, P. Xu, L. Zhao, Z. Li, K. Zhang, P. Gao, Y. Qiao, and P. Luo. Omniquant: Omnidirectionally calibrated quantization for large language models. In ICLR ,2024. arXiv:2308.13137. [9] Intel. Autoround: Advanced quantization algorithm for llms. GitHub repository, 2026. https: //github.com/intel/auto-round .[10] Y. Zhong, S. Liu, J. Chen, J. Hu, Y. Zhu, X. Liu, X. Jin, and H. Zhang. Distserve: Disaggregating prefill and decoding for goodput-optimized large language model serving. In OSDI , 2024. arXiv:2401.09670. [11] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with PagedAttention. In Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles , 2023. [12] P. Nair, P. Datta, J. Dean, P. Jain, and A. Kusupati. Matryoshka quantization. arXiv preprint arXiv:2502.06786 , 2025. [13] M. Kleinegger, E. Crncevic, and D. Alistarh. Matgptq: Accurate and efficient post-training matryoshka quantization. arXiv preprint arXiv:2504.20367 , 2025. [14] S. Kim, C. Hooper, A. Gholami, Z. Dong, X. Li, S. Shen, M. W. Mahoney, and K. Keutzer. SqueezeLLM: Dense-and-sparse quantization. In ICML , 2024. arXiv:2306.07629. [15] T. Dettmers, M. Lewis, Y. Belkada, and L. Zettlemoyer. Llm.int8(): 8-bit matrix multiplication for transformers at scale. In NeurIPS , 2022. arXiv:2208.07339. [16] G. Xiao, J. Lin, M. Seznec, H. Wu, C. Gan, and S. Han. SmoothQuant: Accurate and efficient post-training quantization for large language models. In ICML , 2023. arXiv:2211.10438. [17] Z. Liu, B. Oguz, C. Zhao, E. Chang, P. Stock, Y. Meber, R. Memisevic, Y. Shi, and R. Krish-namoorthi. Llm-qat: Data-free quantization aware training for large language models. In ACL Findings , 2024. arXiv:2305.17888. [18] Z. Dong, Z. Yao, A. Gholami, M. W. Mahoney, and K. Keutzer. HAWQ: Hessian aware quantization of neural networks with mixed-precision. In ICCV , 2019. arXiv:1905.03696. [19] Z. Dong, Z. Yao, Y. Cai, D. Arfeen, A. Gholami, M. W. Mahoney, and K. Keutzer. HAWQ-V2: Hessian aware trace-weighted quantization of neural networks. In NeurIPS , 2020. arXiv:1911.03852. [20] C. Lee, J. Jin, T. Kim, H. Kim, and E. Park. OWQ: Outlier-aware weight quantization for efficient fine-tuning and inference of large language models. In AAAI , 2024. arXiv:2306.02272. [21] B.-H. Juang and A. H. Gray. Multiple stage vector quantization for speech coding. In ICASSP ,1982. [22] J. Martinez, S. Zakhmi, H. H. Hoos, and N. de Vries. Permute, quantize, and fine-tune: Efficient compression of neural networks. In CVPR , 2021. arXiv:2012.09659. [23] J. Lee, S. Cho, and S.-K. Beack. Context-adaptive residual coding for image compression. In 
+
+CVPR , 2022. arXiv:2203.08862. 10 [24] H. Xi, S. Yang, Y. Zhao, M. Li, H. Cai, X. Li, Y. Lin, Z. Zhang, J. Zhang, X. Li, Z. Xu, J. Wu, C. Xu, I. Stoica, S. Han, and K. Keutzer. Quant videogen: Auto-regressive long video generation via 2-bit kv-cache quantization. arXiv preprint arXiv:2602.02958 , 2026. [25] M. Sun, X. Chen, J. Z. Kolter, and Z. Liu. Massive activations in large language models. In 
+
+COLM , 2024. arXiv:2402.17762. [26] T. Dettmers, R. Svirschevski, V. Egiazarian, D. Kuznetsov, E. Frantar, and D. Alistarh. Spqr: A sparse-quantized representation for near-lossless llm weight compression. In ICLR , 2024. arXiv:2306.03078. [27] M. Abdin, S. A. Jacobs, A. A. Awan, J. Aneja, A. Awadallah, et al. Phi-3 technical report: A highly capable language model locally on your phone. arXiv preprint arXiv:2404.14219 , 2024. [28] L. Gao, J. Tow, B. Abbasi, S. Biderman, S. Black, A. DiPofi, C. Foster, L. Golding, J. Hsu, A. Le Noac’h, H. Li, K. McDonell, N. Muennighoff, C. Ociepa, J. Phang, L. Reynolds, H. Schoelkopf, A. Skowron, L. Sutawika, E. Tang, A. Thite, B. Wang, K. Wang, and A. Zou. The language model evaluation harness. Zenodo, v0.4.3, July 2024. https://doi.org/10. 5281/zenodo.12608602 .[29] P. Clark, I. Cowhey, O. Etzioni, T. Khot, A. Sabharwal, C. Schoenick, and O. Tafjord. Think you have solved question answering? try arc, the ai2 reasoning challenge. arXiv preprint arXiv:1803.05457 , 2018. [30] R. Zellers, A. Holtzman, Y. Bisk, A. Farhadi, and Y. Choi. Hellaswag: Can a machine really finish your sentence? In ACL , 2019. arXiv:1905.07830. [31] Y. Bisk, R. Zellers, R. LeBras, J. Gao, and Y. Choi. Piqa: Reasoning about physical common-sense in natural language. In AAAI , 2020. arXiv:1911.11641. [32] K. Sakaguchi, R. L. Bras, C. Bhagavatula, and Y. Choi. Winogrande: An adversarial winograd schema challenge at scale. Communications of the ACM , 64(9):99–106, 2021. arXiv:1907.10641. 
+
+# A Broader Impacts and Asset Licenses 
+
+Broader impacts. RRQ may improve deployment efficiency and reduce inference cost, making it easier to serve and deploy large language models. However, it may also lower the barrier to deploying powerful LLMs, which could amplify misuse risks if models are applied irresponsibly. 
+
+Asset licenses. The models, codebases, and datasets used in this work are publicly available. Llama 3 models are released under the Llama 3 Community License. Qwen models are released under the Tongyi Qianwen License and Apache 2.0. Phi-3 models are subject to the MIT License. The lm-evaluation-harness framework and the standard evaluation datasets used here (ARC, HellaSwag, PIQA, WinoGrande, WikiText-2) are distributed under their respective licenses. 
+
+# B Mixed-Precision Prefill/Decode Motivation 
+
+To motivate mixed-precision deployment profiles, where prefill and decode use different precision settings, we report exploratory results on two instruction-tuned Qwen2.5 checkpoints. These experi-ments precede the main evaluations in Section 4 and should be interpreted as qualitative evidence for split-precision behavior rather than as primary benchmarks. Table 6 reports GSM8K accuracy for three policies: BF16 for both prefill and decode; low-bit quantization for both phases; and a mixed policy that keeps BF16 for prefill while using the low-bit setting for decode. The mixed policy recovers most of the BF16/BF16 accuracy while improving over the uniformly low-bit policy. On Qwen2.5-72B-Instruct, BF16-prefill with INT2-decode obtains 0.9045 accuracy, compared with 0.9037 for BF16/BF16 and 0.8666 for INT2/INT2. On Qwen2.5-7B-Instruct, BF16/INT4 obtains 0.7650, compared with 0.7665 for BF16/BF16 and 0.7544 for INT4/INT4. 11 Table 6: GSM8K accuracy under different prefill/decode precision policies. “Low-bit” denotes INT2 for Qwen2.5-72B-Instruct and INT4 for Qwen2.5-7B-Instruct.             
+
+> Model Low-bit BF16/BF16 Low/Low BF16/Low Qwen2.5-72B-Instruct INT2 0.9037 0.8666 0.9045 Qwen2.5-7B-Instruct INT4 0.7665 0.7544 0.7650
+
+# C Prefill/Decode Computation 
+
+RRQ represents weights as a sum of stage-wise quantized components. Following the framework in Section 3, a 4-bit effective deployment profile using a 2-bit base and one 2-bit residual stage is: 
+
+˜xj 
+
+> (1)
+
+= ˆ xj 
+
+> 0
+
++ ˆ rj
+
+> 1
+
+. (18) For a prefix with t residual stages, the reconstructed weight is: 
+
+˜W(t) = ˆW0 +
+
+> t
+
+X
+
+> k=1
+
+ˆRk. (19) Given an activation matrix A, the matrix multiplication decomposes as: 
+
+A ˜W(t) = A ˆW0 +
+
+> t
+
+X
+
+> k=1
+
+A ˆRk. (20) This linear decomposition means that different precision prefixes can be evaluated by summing the corresponding stage outputs. A 4-bit prefix uses the base and one residual stage; 6- and 8-bit prefixes add additional residual stages. This design can reuse low-bit stage operations, although efficient execution requires suitable kernel implementations. The performance trade-off differs between prefill and decode. Prefill usually processes many tokens in parallel and can be more compute intensive, while autoregressive decoding is often limited by weight movement. Adding residual stages increases the number of stage outputs that must be computed and accumulated, so the end-to-end benefit depends on hardware, kernel fusion, batching, and the chosen precision profile. RRQ’s separable structure is compatible with phase-aware policies, but optimized kernels are needed to quantify practical latency benefits. 
+
+# D Additional Models: Gemma-2 9B and Mistral 7B 
+
+To assess RRQ beyond the Llama-3.1 and Qwen3 series, we report Task Avg results on Gemma-2 9B and Mistral 7B under the same MatGPTQ Section 5 protocol used in Section 4. Task Avg is the average zero-shot accuracy over ARC-Challenge, ARC-Easy, HellaSwag, PIQA, and WinoGrande. We compare RRQ with MatGPTQ [13] and MatQuant [12]; MatGPTQ and MatQuant numbers are reproduced from MatGPTQ, while RRQ numbers are our own. Table 7 summarizes the results. On Gemma-2 9B and Mistral 7B, all evaluated multi-precision methods are close to the 16-bit baseline, with most differences within 0.1 to 0.5 Task Avg points. RRQ is within 0.1 to 0.2 points of the 16-bit baseline at both 8 and 6 bits and is comparable to MatQuant across the measured precisions. These results are consistent with the analysis in Section 3: when direct 4-bit quantization already has a small degradation relative to 16-bit, residual refinement has limited room to improve Task Avg. In this near-lossless regime, RRQ’s main advantages are its PTQ compatibility, reuse of low-bit stage operations, and support for a standalone low-bit base checkpoint. 
+
+# E Large-Model MMLU Robustness 
+
+To test RRQ on a larger model, we evaluate the 4-bit RRQ prefix on Llama-3.1-70B-Instruct and compare it with the 16-bit baseline. Table 8 reports the results. Averaged across the eight tasks, the 4-bit RRQ model obtains 77.96%, compared with 78.79% for 16-bit. On MMLU, RRQ obtains 80.19%, compared with 82.57% for 16-bit. The largest reported gap is below 2.4 percentage points, suggesting that the 4-bit RRQ prefix remains close to the 16-bit baseline on this model under the evaluated tasks. 12 Table 7: Task Avg on Gemma-2 9B and Mistral 7B under the MatGPTQ Section 5 protocol. Bold marks wins beyond the 0.1-point threshold. MatGPTQ and MatQuant results are reproduced from MatGPTQ [13]; RRQ results are our own.                         
+
+> Bit Method Gemma-2 9B Avg Mistral 7B Avg 16 –78.23 74.56 8MatGPTQ 78.18 74.65
+> MatQuant 77.78 74.37 RRQ 78.07 74.40 6MatGPTQ 78.12 74.79
+> MatQuant 77.76 74.35 RRQ 78.22 74.50 4MatGPTQ 77.93 74.24
+> MatQuant 77.20 73.92 RRQ 77.36 73.84
+
+Table 8: Llama-3.1-70B-Instruct accuracy (%) under RRQ 4-bit and 16-bit evaluation.                     
+
+> Task RRQ 4-bit 16-bit ARC-Challenge 61.52 62.37 ARC-Easy 82.24 83.42 HellaSwag 84.28 85.31 LAMBADA OpenAI 77.35 76.79 LAMBADA Standard 73.94 73.26 MMLU 80.19 82.57 PIQA 83.46 83.68 WinoGrande 80.66 82.95 Average 77.96 78.79
+
+# F Model-wise Outlier Analysis 
+
+Section 4 evaluates the 2+2 RRQ prefix against a direct RTN 4-bit baseline under the same W4G128 setting. Here we analyze both the all-RTN RRQ configuration and the SignRoundV2-base symmetric variant. The goal is to identify when residual reconstruction is preferable to direct 4-bit quantization and whether the result depends on first-stage quality. Because quantization differences are most visible at 4 bits, we focus on that setting. We compare Task Avg differences ( RRQ 2+2 −RTN 4 -bit )with two outlier indicators: the mean and maximum group-maximum K/ MAE. These tensor-level indicators summarize outlier severity but are not intended to directly predict group-wise reconstruction error. We omit direct 6- and 8-bit RTN comparisons because the evaluated methods are already close to the 16-bit baseline at those precisions, making small Task Avg differences difficult to interpret. Focusing on 4 bits highlights the setting where the 2+2 split is most likely to differ from direct RTN. The 6- and 8-bit RRQ results should therefore be interpreted mainly as showing that higher-precision prefixes can maintain near-baseline accuracy within a single package. Table 9 shows that the viability of residual decomposition is jointly shaped by intra-group outlier severity and first-stage quality. For models with a relatively flat and mild outlier profile—such as the Llama-3.1 family, where the maximum group-maximum K/ MAE is around 64—splitting a 4-bit budget into a 2+2 sequential decomposition can penalize the representation of inliers without providing enough outlier correction. Consequently, direct 4-bit approaches retain an advantage over the SignRoundV2-base RRQ variant on Llama-3.1-8B, although the all-RTN RRQ variant narrows that gap. Conversely, models such as the Qwen3 series and Phi-3-Medium have more skewed, outlier-heavy distributions, with peak group-maximum K/ MAE values in the 93 to 116 range. In these cases, the theoretical mechanism derived in Section 3 is more relevant, but the practical outcome depends on how well the coarse base stage captures the largest values. The SignRoundV2-base RRQ variant is 13 Table 9: Model-wise relationship between direct RTN 4-bit, RRQ 2+2, and outlier severity under W4G128. RRQ (RTN) uses RTN for all stages; RRQ (sym) uses a SignRoundV2 2-bit base with symmetric RTN residual stages.                                                               
+
+> Metric Llama-3.1-8B Llama-3.1-8B-Instruct Qwen3-8B-Base Qwen3-8B Qwen3-14B Phi-3-Med GPTQ 4-bit Avg 73.65 72.65 73.62 70.49 74.52 76.47 RTN 4-bit Avg 73.50 73.87 73.34 70.93 75.07 76.56 RRQ (RTN) 2+2 Avg 73.12 72.85 72.07 70.34 74.09 76.88 RRQ (RTN) −RTN 4-bit -0.38 -1.02 -1.27 -0.59 -0.98 0.32 RRQ (sym) 2+2 Avg 72.32 72.87 72.84 70.87 75.22 76.92 RRQ (sym) −RTN 4-bit -1.18 -1.00 -0.50 -0.06 0.15 0.36 Mean group-max K/ MAE 26.491 26.454 29.076 28.878 27.826 28.724 Max group-max K/ MAE 64.291 63.852 116.250 116.389 103.016 93.339 Outlier profile Mild Mild Severe Severe Severe Severe
+
+competitive with direct RTN on Qwen3-14B and Phi-3-Medium, while the all-RTN variant improves over direct RTN on Phi-3-Medium but trails on the Qwen3 models. This pattern suggests that a stronger first stage can be important for skewed distributions. Overall, RRQ’s 4-bit behavior is model-dependent rather than uniformly better or worse than direct fixed-bit quantization. RRQ is intended to provide a fast, unified multi-precision package, while 4-bit accuracy depends on how the base stage and residual stages interact with the model’s weight distribution. 
+
+# G Package Size Estimates 
+
+Following common GPTQ-style weight-only quantization practice, we quantize the main linear weight tensors and leave embeddings, the LM head, and normalization weights unquantized. Table 10 reports the corresponding 16-bit tensor-size breakdown for the two checkpoints used in the package-size comparison. The quantized tensors account for 84.8% of Qwen3-8B and 97.6% of Phi-3-Med by size. Table 10: 16-bit tensor-size breakdown in KB. Quantized tensors are the tensors included in the package-size comparison; embeddings, the LM head, and normalization weights are excluded following common GPTQ-style weight-only quantization practice. 
+
+Model 16-bit total LM head + emb. Norm Quantized Quantized share Qwen3-8B 16,013,268 2,430,976 584 13,581,708 84.8% Phi-3-Med 27,268,704 641,280 810 26,626,614 97.6% 
+
+Table 12 reports serialized package sizes for two representative checkpoints, measured with the du 
+
+command, and compares them with storing independent fixed-precision checkpoints for the same operating points. These sizes include only quantized tensors and exclude embeddings, the LM head, and normalization weights. The separate-checkpoint estimates are computed from the bit-size estimates reported in Table 11. RRQ’s 4-, 6-, and 8-bit operating points are prefixes that require the 2-bit base stage and therefore cannot be stored or used independently. The reported RRQ size is thus the full stage package, including the 2-bit base and all residual stages. As a fully symmetric configuration, RRQ does not store any zero-points. Compared with storing separate estimated checkpoints for the same operating points, the single-checkpoint MatGPTQ and RRQ packages substantially reduce storage. RRQ is about 4–5% larger than the MatGPTQ multi-bit package in these measurements. This size difference primarily arises because each RRQ residual stage saves its own independent scale data, compounding metadata overhead across stages. Furthermore, the underlying model relies on AutoRound’s native 2-bit format instead of the shared GPTQ layout, and RRQ supports four operating points (2 , 4, 6, 8) rather than three (3 , 4, 8) .Table 11 reports fixed-precision size estimates used as independent-checkpoint references in Table 12. The estimates include only quantized tensors and exclude embeddings, LM heads, and normalization weights. Symmetric quantization does not store zero-points. Using the measured 16-bit tensor sizes 14 as baselines, the estimated size for target precision b < 16 is: 
+
+Size b = Size 16 · b + 16 /128 16 , (21) where each group of 128 weights stores a 16-bit scale. Table 11: Bit-size-based fixed-precision checkpoint size estimates in KB, including only quantized tensors and excluding embeddings, the LM head, and normalization weights. Estimates assume purely symmetric quantization.               
+
+> Precision Qwen3-8B Phi-3-Med 16-bit measured 13,581,708 26,626,614 8-bit estimated 6,896,961 13,521,327 6-bit estimated 5,199,248 10,193,001 4-bit estimated 3,501,534 6,864,674 3-bit estimated 2,652,677 5,200,511 2-bit estimated 1,803,821 3,536,347
+
+Table 12: Single-checkpoint multi-precision package size in KB compared with storing separate estimated fixed-precision checkpoints for the same operating points. Sizes include only quantized tensors and exclude embeddings, the LM head, and normalization weights. MatGPTQ and RRQ rows are serialized packages measured with du ; “Separate est.” rows sum the corresponding bit-size estimates from Appendix G. RRQ size includes the 2-bit base because its 4-, 6-, and 8-bit prefixes depend on the base stage. The RRQ package uses purely symmetric quantization (no zero-points); its size overhead relative to MatGPTQ stems primarily from storing independent scale data for every residual stage, along with using AutoRound’s native 2-bit base format.           
+
+> Package Qwen3-8B Phi-3-Med Separate est. (3,4,8) 13,051,172 25,586,512 MatGPTQ (3,4,8) 6,996,980 13,729,296 Separate est. (2,4,6,8) 17,401,564 34,115,349 RRQ (2,4,6,8) 7,322,960 14,265,176
+
+# H Quantization Efficiency Details 
+
+RRQ reduces construction cost in the evaluated setting because the all-RTN version uses a 2-bit RTN base plus three RTN residual stages and does not require Hessian estimation or calibration data. On Qwen3-8B, constructing the full 2-/4-/6-/8-bit package takes 1,293 seconds, compared with 4,239 seconds for MatGPTQ under the same setup, corresponding to a 3.3× speedup. The four 2-bit RTN quantization passes take 412 seconds; the remaining time comes from saving fake-quantized QDQ models, residual computation, orchestration, and I/O. This timing uses the all-RTN configuration, so the speedup is not due to starting from a pre-bundled SignRoundV2 base. RRQ also separates the choice of stage format from the overall multi-precision representation. Adding a new prefix requires configuring stage formats rather than changing a joint multi-bit objective. Further engineering, including parallelization and optimized serialization, could reduce the non-quantization overheads. 
+
+# I Ablation Study 
+
+We ablate two additional RRQ design choices across six models: (1) group size and (2) symmetric versus asymmetric residual quantization. The tables report Task Avg, the same five-task average used in Section 4. The effect of first-stage quantizer quality is discussed in the main results using the RRQ (RTN) and RRQ (sym) rows in Table 5. 
+
+Group size ablation. Table 13 compares group size 64 with group size 128, the setting used in the main MatGPTQ-aligned evaluation. At INT2, group size 64 consistently outperforms 128, suggesting 15 Table 13: Ablation study on group size. All results use SignRoundV2 2-bit base + RTN 2-bit residual.                                                            
+
+> Model Group INT8 INT6 INT4 INT2 Qwen3-8B 64 71.51 71.28 70.94 64.66 128 71.58 71.68 70.65 63.79 Qwen3-8B-Base 64 73.32 73.04 73.29 66.21 128 73.84 73.56 72.99 65.73 Llama-3.1-8B-Ins 64 73.76 73.76 73.18 65.37 128 73.80 73.73 73.08 64.70 Llama-3.1-8B 64 74.31 74.21 73.09 63.92 128 74.23 73.96 72.39 63.29 Qwen3-14B 64 75.31 75.18 74.53 68.18 128 74.84 74.72 75.02 67.91 Phi-3-medium 64 75.85 76.02 75.54 70.63 128 75.69 75.69 76.35 69.95
+
+that finer-grained scaling helps at very low bit-widths. At INT4 and above, the gap narrows and the two group sizes are comparable, with small differences likely due to evaluation noise. 
+
+Symmetric vs. Asymmetric Quantization. Table 14 compares asymmetric and symmetric residual quantization, using SignRoundV2 2-bit bases and group size 128 for both variants. GPTQ and MatGPTQ are included as calibration-based references, and bold entries mark cases where the symmetric RRQ variant exceeds MatGPTQ beyond the 0.1-point threshold. The results show near-parity between asymmetric and symmetric residual quantization across 4-, 6-, and 8-bit evaluations. At INT4, asymmetric quantization slightly helps selected Llama-3.1 and Qwen3-8B-Base cases, while the symmetric variant is stronger on Qwen3-8B, Qwen3-14B, and Phi-3-medium. Together with the all-RTN main results, this supports reporting a simple symmetric configuration while treating asymmetric residuals as an optional refinement. 
+
+Implication for deployment. These results suggest a simplified configuration. Because sym-metric residual quantization is close to asymmetric performance at most bit-widths, the symmetric configuration provides a simple unified structure. A strong 2-bit base model remains useful for memory-constrained serving and benefits from a high-quality first stage (e.g., SignRoundV2) and group size 64. If the target is accumulated 4-, 6-, or 8-bit inference, a unified symmetric configuration closely tracks GPTQ baselines. 16 Table 14: Symmetric vs. asymmetric residual quantization, with MatGPTQ and native GPTQ as calibration-based references. All RRQ entries use SignRoundV2 2-bit base at group size 128.                                                                             
+
+> Model Method INT8 INT6 INT4 Qwen3-8B RRQ asym 71.58 71.68 70.65 RRQ sym 71.65 71.63 70.87 MatGPTQ (sym) 71.86 71.35 70.79 GPTQ 71.61 71.42 70.49 Qwen3-8B-Base RRQ asym 73.84 73.03 72.99 RRQ sym 73.53 72.92 72.84 MatGPTQ (sym) 73.27 73.56 73.02
+> GPTQ 73.50 73.62 73.65 Llama-3.1-8B-Ins RRQ asym 73.80 73.73 73.08 RRQ sym 73.91 74.18 72.87
+> MatGPTQ (sym) 73.35 73.11 72.62 GPTQ 73.96 73.28 72.65 Llama-3.1-8B RRQ asym 74.23 73.96 72.39 RRQ sym 74.28 74.11 72.32 MatGPTQ (sym) 73.07 72.74 72.43
+> GPTQ 74.49 74.05 72.16 Qwen3-14B RRQ asym 74.84 74.72 75.02 RRQ sym 75.06 74.50 75.22
+> MatGPTQ (sym) 75.02 74.96 73.89 GPTQ 74.97 74.80 74.52 Phi-3-medium RRQ asym 77.10 77.14 76.83 RRQ sym 77.04 76.71 76.92
+> MatGPTQ (sym) 74.48 73.66 75.97 GPTQ 76.96 77.00 76.47
+
+# NeurIPS Paper Checklist 
+
+1. Claims 
+
+Question: Do the main claims made in the abstract and introduction accurately reflect the paper’s contributions and scope? Answer: [Yes] Justification: The abstract and introduction state the main contributions and scope of the paper, including the unified multi-precision representation, post-training applicability, reuse of an existing 2-bit base checkpoint, construction-time advantages, and the limitation that RRQ is not intended to replace the strongest single-precision quantizer at every bit-width; see the Abstract and Section 1. Guidelines: • The answer [N/A] means that the abstract and introduction do not include the claims made in the paper. • The abstract and/or introduction should clearly state the claims made, including the contributions made in the paper and important assumptions and limitations. A [No] or [N/A] answer to this question will not be perceived well by the reviewers. • The claims made should match theoretical and experimental results, and reflect how much the results can be expected to generalize to other settings. • It is fine to include aspirational goals as motivation as long as it is clear that these goals are not attained by the paper. 2. Limitations 
+
+Question: Does the paper discuss the limitations of the work performed by the authors? Answer: [Yes] 17 Justification: The paper explicitly discusses limitations, including model-dependent INT4 behavior, the fact that calibration-free RTN residual stages do not uniformly match optimized single-precision quantizers, the restricted empirical scope for non-integer and floating-point stages, and the lack of optimized stage accumulation or end-to-end serving metrics; see the Discussion section and Appendix I. Guidelines: • The answer [N/A] means that the paper has no limitation while the answer [No] means that the paper has limitations, but those are not discussed in the paper. • The authors are encouraged to create a separate “Limitations” section in their paper. • The paper should point out any strong assumptions and how robust the results are to violations of these assumptions (e.g., independence assumptions, noiseless settings, model well-specification, asymptotic approximations only holding locally). The authors should reflect on how these assumptions might be violated in practice and what the implications would be. • The authors should reflect on the scope of the claims made, e.g., if the approach was only tested on a few datasets or with a few runs. In general, empirical results often depend on implicit assumptions, which should be articulated. • The authors should reflect on the factors that influence the performance of the approach. For example, a facial recognition algorithm may perform poorly when image resolution is low or images are taken in low lighting. Or a speech-to-text system might not be used reliably to provide closed captions for online lectures because it fails to handle technical jargon. • The authors should discuss the computational efficiency of the proposed algorithms and how they scale with dataset size. • If applicable, the authors should discuss possible limitations of their approach to address problems of privacy and fairness. • While the authors might fear that complete honesty about limitations might be used by reviewers as grounds for rejection, a worse outcome might be that reviewers discover limitations that aren’t acknowledged in the paper. The authors should use their best judgment and recognize that individual actions in favor of transparency play an impor-tant role in developing norms that preserve the integrity of the community. Reviewers will be specifically instructed to not penalize honesty concerning limitations. 3. Theory assumptions and proofs 
+
+Question: For each theoretical result, does the paper provide the full set of assumptions and a complete (and correct) proof? Answer: [Yes] Justification: Section 3 provides an idealized analytical derivation of the condition un-der which RRQ can outperform direct quantization, including the two-population model, uniform-bin approximation, inlier range [−r, r ], outlier magnitude K, step-size equations, and the threshold condition. Section 4 further discusses multiple outliers, deeper RRQ stages, and split-dependent residual radii. Guidelines: • The answer [N/A] means that the paper does not include theoretical results. • All the theorems, formulas, and proofs in the paper should be numbered and cross-referenced. • All assumptions should be clearly stated or referenced in the statement of any theorems. • The proofs can either appear in the main paper or the supplemental material, but if they appear in the supplemental material, the authors are encouraged to provide a short proof sketch to provide intuition. • Inversely, any informal proof provided in the core of the paper should be complemented by formal proofs provided in appendix or supplemental material. • Theorems and Lemmas that the proof relies upon should be properly referenced. 4. Experimental result reproducibility 
+
+18 Question: Does the paper fully disclose all the information needed to reproduce the main ex-perimental results of the paper to the extent that it affects the main claims and/or conclusions of the paper (regardless of whether the code and data are provided or not)? Answer: [No] Justification: The paper reports the model checkpoints, benchmark suite, evaluation metrics, group size, stage decomposition, quantizers, hardware, and the relationship to MatGPTQ’s protocol. However, it does not yet provide public code, exact commands, package versions, or all implementation details needed for independent reproduction of every reported result. Guidelines: • The answer [N/A] means that the paper does not include experiments. • If the paper includes experiments, a [No] answer to this question will not be perceived well by the reviewers: Making the paper reproducible is important, regardless of whether the code and data are provided or not. • If the contribution is a dataset and/or model, the authors should describe the steps taken to make their results reproducible or verifiable. • Depending on the contribution, reproducibility can be accomplished in various ways. For example, if the contribution is a novel architecture, describing the architecture fully might suffice, or if the contribution is a specific model and empirical evaluation, it may be necessary to either make it possible for others to replicate the model with the same dataset, or provide access to the model. In general. releasing code and data is often one good way to accomplish this, but reproducibility can also be provided via detailed instructions for how to replicate the results, access to a hosted model (e.g., in the case of a large language model), releasing of a model checkpoint, or other means that are appropriate to the research performed. • While NeurIPS does not require releasing code, the conference does require all submis-sions to provide some reasonable avenue for reproducibility, which may depend on the nature of the contribution. For example (a) If the contribution is primarily a new algorithm, the paper should make it clear how to reproduce that algorithm. (b) If the contribution is primarily a new model architecture, the paper should describe the architecture clearly and fully. (c) If the contribution is a new model (e.g., a large language model), then there should either be a way to access this model for reproducing the results or a way to reproduce the model (e.g., with an open-source dataset or instructions for how to construct the dataset). (d) We recognize that reproducibility may be tricky in some cases, in which case authors are welcome to describe the particular way they provide for reproducibility. In the case of closed-source models, it may be that access to the model is limited in some way (e.g., to registered users), but it should be possible for other researchers to have some path to reproducing or verifying the results. 5. Open access to data and code 
+
+Question: Does the paper provide open access to the data and code, with sufficient instruc-tions to faithfully reproduce the main experimental results, as described in supplemental material? Answer: [No] Justification: The paper does not provide public code or an anonymized release at submission time. The authors plan to release code and supporting materials after acceptance. Guidelines: • The answer [N/A] means that paper does not include experiments requiring code. • Please see the NeurIPS code and data submission guidelines ( https://neurips.cc/ public/guides/CodeSubmissionPolicy ) for more details. • While we encourage the release of code and data, we understand that this might not be possible, so [No] is an acceptable answer. Papers cannot be rejected simply for not including code, unless this is central to the contribution (e.g., for a new open-source benchmark). 19 • The instructions should contain the exact command and environment needed to run to reproduce the results. See the NeurIPS code and data submission guidelines ( https: //neurips.cc/public/guides/CodeSubmissionPolicy ) for more details. • The authors should provide instructions on data access and preparation, including how to access the raw data, preprocessed data, intermediate data, and generated data, etc. • The authors should provide scripts to reproduce all experimental results for the new proposed method and baselines. If only a subset of experiments are reproducible, they should state which ones are omitted from the script and why. • At submission time, to preserve anonymity, the authors should release anonymized versions (if applicable). • Providing as much information as possible in supplemental material (appended to the paper) is recommended, but including URLs to data and code is permitted. 6. Experimental setting/details 
+
+Question: Does the paper specify all the training and test details (e.g., data splits, hyperpa-rameters, how they were chosen, type of optimizer) necessary to understand the results? Answer: [Yes] Justification: The paper specifies the evaluated model checkpoints, baselines, target bit-widths, 2+2+2+2 RRQ decomposition, group size, SignRoundV2 base, RTN residual quantizer, symmetric main configuration, evaluation tasks, reported metrics, fake-format QDQ representation, hardware, and the use of MatGPTQ’s Section 5 protocol. These details are sufficient to understand the reported comparisons, although exact reproduction commands and public code are not yet provided. Guidelines: • The answer [N/A] means that the paper does not include experiments. • The experimental setting should be presented in the core of the paper to a level of detail that is necessary to appreciate the results and make sense of them. • The full details can be provided either with the code, in appendix, or as supplemental material. 7. Experiment statistical significance 
+
+Question: Does the paper report error bars suitably and correctly defined or other appropriate information about the statistical significance of the experiments? Answer: [No] Justification: The reported results are based on single evaluation runs and the paper does not report error bars, confidence intervals, or statistical significance tests. Guidelines: • The answer [N/A] means that the paper does not include experiments. • The authors should answer [Yes] if the results are accompanied by error bars, confidence intervals, or statistical significance tests, at least for the experiments that support the main claims of the paper. • The factors of variability that the error bars are capturing should be clearly stated (for example, train/test split, initialization, random drawing of some parameter, or overall run with given experimental conditions). • The method for calculating the error bars should be explained (closed form formula, call to a library function, bootstrap, etc.) • The assumptions made should be given (e.g., Normally distributed errors). • It should be clear whether the error bar is the standard deviation or the standard error of the mean. • It is OK to report 1-sigma error bars, but one should state it. The authors should preferably report a 2-sigma error bar than state that they have a 96% CI, if the hypothesis of Normality of errors is not verified. • For asymmetric distributions, the authors should be careful not to show in tables or figures symmetric error bars that would yield results that are out of range (e.g., negative error rates). 20 • If error bars are reported in tables or plots, the authors should explain in the text how they were calculated and reference the corresponding figures or tables in the text. 8. Experiments compute resources 
+
+Question: For each experiment, does the paper provide sufficient information on the com-puter resources (type of compute workers, memory, time of execution) needed to reproduce the experiments? Answer: [Yes] Justification: The paper reports that RRQ quantization and evaluation are performed on one A100 80GB GPU with CUDA 12.8. For Qwen3-8B, it reports 1118 seconds to construct the three RTN residual stages from an available 2-bit base checkpoint, 4239 seconds for MatGPTQ’s full multi-bit construction on the same hardware, about 153 seconds per RTN quantization pass, and 383 seconds for QDQ-model preservation plus residual computation; see Section 4.1 and Appendix H. Guidelines: • The answer [N/A] means that the paper does not include experiments. • The paper should indicate the type of compute workers CPU or GPU, internal cluster, or cloud provider, including relevant memory and storage. • The paper should provide the amount of compute required for each of the individual experimental runs as well as estimate the total compute. • The paper should disclose whether the full research project required more compute than the experiments reported in the paper (e.g., preliminary or failed experiments that didn’t make it into the paper). 9. Code of ethics 
+
+Question: Does the research conducted in the paper conform, in every respect, with the NeurIPS Code of Ethics https://neurips.cc/public/EthicsGuidelines ?Answer: [Yes] Justification: The work studies post-training quantization methods for already available language models, does not involve human subjects or sensitive personal data collection, and the authors are not aware of any aspect that would conflict with the NeurIPS Code of Ethics. Guidelines: • The answer [N/A] means that the authors have not reviewed the NeurIPS Code of Ethics. • If the authors answer [No], they should explain the special circumstances that require a deviation from the Code of Ethics. • The authors should make sure to preserve anonymity (e.g., if there is a special consid-eration due to laws or regulations in their jurisdiction). 10. Broader impacts 
+
+Question: Does the paper discuss both potential positive societal impacts and negative societal impacts of the work performed? Answer: [Yes] Justification: We discuss broader impacts in Appendix A. Guidelines: • The answer [N/A] means that there is no societal impact of the work performed. • If the authors answer [N/A] or [No], they should explain why their work has no societal impact or why the paper does not address societal impact. • Examples of negative societal impacts include potential malicious or unintended uses (e.g., disinformation, generating fake profiles, surveillance), fairness considerations (e.g., deployment of technologies that could make decisions that unfairly impact specific groups), privacy considerations, and security considerations. 21 • The conference expects that many papers will be foundational research and not tied to particular applications, let alone deployments. However, if there is a direct path to any negative applications, the authors should point it out. For example, it is legitimate to point out that an improvement in the quality of generative models could be used to generate Deepfakes for disinformation. On the other hand, it is not needed to point out that a generic algorithm for optimizing neural networks could enable people to train models that generate Deepfakes faster. • The authors should consider possible harms that could arise when the technology is being used as intended and functioning correctly, harms that could arise when the technology is being used as intended but gives incorrect results, and harms following from (intentional or unintentional) misuse of the technology. • If there are negative societal impacts, the authors could also discuss possible mitigation strategies (e.g., gated release of models, providing defenses in addition to attacks, mechanisms for monitoring misuse, mechanisms to monitor how a system learns from feedback over time, improving the efficiency and accessibility of ML). 11. Safeguards 
+
+Question: Does the paper describe safeguards that have been put in place for responsible release of data or models that have a high risk for misuse (e.g., pre-trained language models, image generators, or scraped datasets)? Answer: [N/A] Justification: The paper does not release a new pre-trained language model, image generator, or scraped dataset. It studies a quantization method applied to existing publicly available models. Guidelines: • The answer [N/A] means that the paper poses no such risks. • Released models that have a high risk for misuse or dual-use should be released with necessary safeguards to allow for controlled use of the model, for example by requiring that users adhere to usage guidelines or restrictions to access the model or implementing safety filters. • Datasets that have been scraped from the Internet could pose safety risks. The authors should describe how they avoided releasing unsafe images. • We recognize that providing effective safeguards is challenging, and many papers do not require this, but we encourage authors to take this into account and make a best faith effort. 12. Licenses for existing assets 
+
+Question: Are the creators or original owners of assets (e.g., code, data, models), used in the paper, properly credited and are the license and terms of use explicitly mentioned and properly respected? Answer: [Yes] Justification: We briefly acknowledge the relevant licenses in Appendix A. Guidelines: • The answer [N/A] means that the paper does not use existing assets. • The authors should cite the original paper that produced the code package or dataset. • The authors should state which version of the asset is used and, if possible, include a URL. • The name of the license (e.g., CC-BY 4.0) should be included for each asset. • For scraped data from a particular source (e.g., website), the copyright and terms of service of that source should be provided. • If assets are released, the license, copyright information, and terms of use in the package should be provided. For popular datasets, paperswithcode.com/datasets 
+
+has curated licenses for some datasets. Their licensing guide can help determine the license of a dataset. 22 • For existing datasets that are re-packaged, both the original license and the license of the derived asset (if it has changed) should be provided. • If this information is not available online, the authors are encouraged to reach out to the asset’s creators. 13. New assets 
+
+Question: Are new assets introduced in the paper well documented and is the documentation provided alongside the assets? Answer: [N/A] Justification: The submission does not include a public release of new datasets, code packages, or model checkpoints at this stage. Guidelines: • The answer [N/A] means that the paper does not release new assets. • Researchers should communicate the details of the dataset/code/model as part of their submissions via structured templates. This includes details about training, license, limitations, etc. • The paper should discuss whether and how consent was obtained from people whose asset is used. • At submission time, remember to anonymize your assets (if applicable). You can either create an anonymized URL or include an anonymized zip file. 14. Crowdsourcing and research with human subjects 
+
+Question: For crowdsourcing experiments and research with human subjects, does the paper include the full text of instructions given to participants and screenshots, if applicable, as well as details about compensation (if any)? Answer: [N/A] Justification: The paper does not involve crowdsourcing experiments or research with human subjects. Guidelines: • The answer [N/A] means that the paper does not involve crowdsourcing nor research with human subjects. • Including this information in the supplemental material is fine, but if the main contribu-tion of the paper involves human subjects, then as much detail as possible should be included in the main paper. • According to the NeurIPS Code of Ethics, workers involved in data collection, curation, or other labor should be paid at least the minimum wage in the country of the data collector. 15. Institutional review board (IRB) approvals or equivalent for research with human subjects 
+
+Question: Does the paper describe potential risks incurred by study participants, whether such risks were disclosed to the subjects, and whether Institutional Review Board (IRB) approvals (or an equivalent approval/review based on the requirements of your country or institution) were obtained? Answer: [N/A] Justification: The paper does not involve crowdsourcing or research with human subjects. Guidelines: • The answer [N/A] means that the paper does not involve crowdsourcing nor research with human subjects. • Depending on the country in which research is conducted, IRB approval (or equivalent) may be required for any human subjects research. If you obtained IRB approval, you should clearly state this in the paper. • We recognize that the procedures for this may vary significantly between institutions and locations, and we expect authors to adhere to the NeurIPS Code of Ethics and the guidelines for their institution. 23 • For initial submissions, do not include any information that would break anonymity (if applicable), such as the institution conducting the review. 16. Declaration of LLM usage 
+
+Question: Does the paper describe the usage of LLMs if it is an important, original, or non-standard component of the core methods in this research? Note that if the LLM is used only for writing, editing, or formatting purposes and does not impact the core methodology, scientific rigor, or originality of the research, declaration is not required. Answer: [N/A] Justification: LLMs are the subject of evaluation in this work rather than an important, original, or non-standard component of the proposed method itself. Guidelines: • The answer [N/A] means that the core method development in this research does not involve LLMs as any important, original, or non-standard components. • Please refer to our LLM policy in the NeurIPS handbook for what should or should not be described. 24

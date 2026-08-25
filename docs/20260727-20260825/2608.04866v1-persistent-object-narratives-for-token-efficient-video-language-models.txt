@@ -1,0 +1,1853 @@
+Persistent Object Narratives for Token-Efficient Video Language Models
+Junzhe Chen∗, Siyuan Meng†, Xiaojie Guo‡
+Tianjin University
+junzhec@tju.edu.cn, siyuan_meng@tju.edu.cn, xj.max.guo@gmail.com
+Abstract
+Video large language models (Video-LLMs) have made strong
+progress in open-ended video understanding. However, their
+visual interfaces remain token-intensive and provide limited
+explicit structure for linking recurring object evidence across
+time. We introduce SlotNarrative, a slot-based interface
+that organizes a video into persistent object narratives repre-
+sented by compact object-state tokens. Rather than compress-
+ing frame-wise features before establishing temporal corre-
+spondence, SlotNarrative first groups visual features into
+object-like slots and then associates recurring observations
+with clip-level object entries through a lightweight, parameter-
+free memory that integrates multiple complementary match-
+ing cues. Each retained entry is serialized into two token types:
+an identity token that summarizes persistent object appearance
+and a set of state tokens that encode segment-level appear-
+ance, geometry, visibility, and trajectory information. This
+design yields an interface of only 144 allocated visual-token
+positions for a frozen Video-LLM, independent of the num-
+ber of sampled frames. Across multiple datasets, SlotNar-
+rative achieves a favorable accuracy–visual-token trade-off
+compared with prior compact Video-LLM interfaces. Exper-
+imental results establish persistent object narratives as a com-
+pact, structured, and temporally organized visual interface for
+Video-LLMs. Our code will be made publicly available.
+1
+Introduction
+Video large language models (Video-LLMs) have advanced
+open-ended video understanding by extending pretrained
+image–language models to temporal inputs. Representative
+systems include Video-ChatGPT (Maaz et al. 2024), Video-
+LLaVA (Lin et al. 2024), VideoLLaMA 2 (Cheng et al. 2024),
+and LLaVA-OneVision (Li et al. 2024). Most Video-LLMs
+sample video frames, encode each frame with a visual back-
+bone, and project the resulting features into visual tokens.
+This visual interface determines both the input length and
+how video content is structured for language-model reason-
+ing.
+This frame-wise construction has two related limitations.
+First, the number of visual tokens grows with temporal and
+spatial resolution; models such as LLaVA-OneVision and
+∗First author.
+†Second author.
+‡Corresponding author.
+LLaVA-Video (Li et al. 2024; Zhang et al. 2024) may re-
+tain thousands of tokens for one video. Second, these tokens
+provide little explicit object-level structure when the same
+objects recur across frames. LLaMA-VID (Li, Wang, and Jia
+2024), MovieChat (Song et al. 2024), and LongVU (Shen
+et al. 2025b) reduce this cost through per-frame tokens,
+sparse memory, and adaptive spatiotemporal compression.
+However, their compression units are not explicitly organized
+around persistent objects. The issue is therefore not only how
+many tokens are retained, but also what they represent: with-
+out binding recurring observations to the same object, the
+language model must infer both object correspondence and
+state evolution from the compressed sequence.
+Object-centric learning offers a natural basis for address-
+ing this problem by grouping visual features into object-like
+slots (Locatello et al. 2020). Video slot models have improved
+object discovery and temporal consistency (Kipf et al. 2022;
+Zadaianchuk, Seitzer, and Martius 2023; Manasyan et al.
+2025), while Slot-VLM (Xu et al. 2024) uses object and event
+slots as a compact input to a Video-LLM. However, slot as-
+signments are typically local and exchangeable, so recurring
+observations are not explicitly associated with persistent ob-
+ject instances. VideoOrion (Feng et al. 2025), in contrast,
+obtains object tokens via external detection, segmentation,
+and tracking models. These limitations motivate a compact
+learned interface that discovers object-like units directly from
+visual features, associates recurring observations with per-
+sistent clip-level entries even across missing intervals, and
+retains both stable object information and time-varying state.
+As shown in Figure 1, dense frame tokens in (a) repeat
+similar content while leaving object identity implicit. Per-
+frame object slots in (b) reduce redundancy but lack tempo-
+ral correspondence. In contrast, SlotNarrative in (c) links
+recurring observations into persistent clip-level entries rep-
+resented by identity and state tokens.
+To this end, we propose SlotNarrative, a slot-based
+object-centric interface for Video-LLMs. Slot attention
+first groups frame features into object-like observations.
+A lightweight, parameter-free memory then links recur-
+ring observations to clip-level entries using complemen-
+tary slot-feature, pooled-appearance, trajectory-state, recent-
+observation, and position cues. It retains entries through tem-
+porary absence and recovers them upon reappearance. The
+observations assigned to each entry form a persistent object
+arXiv:2608.04866v1  [cs.CV]  5 Aug 2026
+
+
+Figure 1: Visual interfaces for Video-LLMs. (a) Dense frame tokens are costly and leave object identity implicit. (b) Per-frame
+object slots reduce redundancy but lack temporal correspondence. (c) SlotNarrative associates recurring observations and
+represents each object with identity and state tokens.
+narrative. Each retained entry is serialized into an identity to-
+ken that summarizes persistent appearance and state tokens
+that preserve segment-level appearance, geometry, visibility,
+and trajectory information. This separation avoids repeatedly
+encoding stable information while retaining evidence of how
+an object changes. The resulting interface allocates only 144
+visual-token positions for an entire video. During VideoQA
+adaptation, the upstream visual modules and language model
+remain frozen; the memory has no trainable parameters. Only
+the identity and state projectors, their layer normalizations,
+and the typed embeddings are trained to map the object-state
+representation into the language-model embedding space.
+Across standard open-ended VideoQA benchmarks, Slot-
+Narrative provides a favorable reported accuracy–visual-
+token trade-off among compact Video-LLM interfaces.
+Our contributions are summarized as follows:
+• We introduce a slot-based and object-centric interface that
+organizes video evidence around persistent clip-level ob-
+ject entries rather than independent frames or exchange-
+able per-frame slots. A parameter-free memory associates
+recurring observations without relying on an external
+detect–segment–track pipeline.
+• We propose a typed object-state representation that sep-
+arates persistent object appearance from time-varying
+state. Each retained entry is serialized into one identity
+token and multiple segment-level state tokens, yielding
+a fixed interface of only 144 allocated visual-token posi-
+tions for a frozen Video-LLM.
+• We demonstrate a favorable reported accuracy–visual-
+token trade-off on three open-ended VideoQA bench-
+marks and analyze the effects of persistent association,
+identity and state token content, and visual-token budget.
+2
+Related Work
+Video-LLMs and compact visual interfaces.
+Video-
+ChatGPT, Video-LLaMA, Video-LLaVA, and Chat-UniVi
+established general-purpose video instruction following
+(Maaz et al. 2024; Zhang, Li, and Bing 2023; Lin et al.
+2024; Jin et al. 2024); VideoLLaMA 2, LLaVA-OneVision,
+LLaVA-Video, and Qwen2-VL later strengthened the under-
+lying models (Cheng et al. 2024; Li et al. 2024; Zhang et al.
+2024; Wang et al. 2024). Most build visual sequences from
+sampled-frame features, so their length grows with temporal
+and spatial resolution. Query bottlenecks (Li et al. 2023; Dai
+et al. 2023), token selection or merging (Ryoo et al. 2021;
+Bolya et al. 2023; Chen et al. 2024; Yang et al. 2025), and
+video-specific compression (Li, Wang, and Jia 2024; Xu et al.
+2025; Song et al. 2024; He et al. 2024; Lan et al. 2024; Shen
+et al. 2025b; Jiang et al. 2025; Zhang and Fu 2025; Shen
+et al. 2025a; Shao et al. 2025; Du et al. 2026) reduce this
+cost, but generally leave recurring object evidence unlinked.
+SlotNarrative instead organizes the video into persistent
+object entries before serialization.
+Object-centric image and video learning.
+MONet, IO-
+DINE, and Slot Attention establish object-centric decompo-
+sition through iterative grouping (Burgess et al. 2019; Greff
+et al. 2019; Locatello et al. 2020); later work extends slots
+to compositional generation and real-image features (Singh,
+Deng, and Ahn 2022; Seitzer et al. 2023). Video methods
+propagate slots, model object dynamics, and improve tem-
+poral consistency (Kipf et al. 2022; Elsayed et al. 2022; Wu
+et al. 2023; Zadaianchuk, Seitzer, and Martius 2023; Man-
+asyan et al. 2025; Grigore et al. 2025). Their main targets
+are discovery, segmentation, or prediction. Because slots are
+exchangeable, recurrent propagation supports local continu-
+ity but does not by itself restore identity after disappearance
+
+
+Figure 2: Overview of SlotNarrative. A slot encoder groups SigLIP features into temporally propagated observations.
+Parameter-free memory links observations across missing intervals, a fixed inventory retains clip-level entries, and trainable
+typed projectors represent each entry with one identity token and multiple segment-level state tokens.
+or slot reassignment. Dual-State Slot Attention (Tran et al.
+2026) separates appearance and identity, but does not build
+a compact VideoQA interface. We add clip-level association
+and language-model tokenization to learned slot grouping.
+Object-aware video-language interfaces.
+Slot-VLM (Xu
+et al. 2024), the closest slot-based VideoQA method, ag-
+gregates object and event slots but does not explicitly re-
+link recurring slots through persistent memory. VideoOrion
+(Feng et al. 2025) obtains object tokens from detection, seg-
+mentation, and tracking outputs, while One Trajectory, One
+Token (Zheng et al. 2025) constructs panoptic sub-object
+trajectories and TrajTok (Zheng et al. 2026) learns trajectory
+tokens without an external tracker. SlotNarrative instead
+associates learned slots into clip-level entries without train-
+able memory and decomposes each entry into identity/state
+tokens for a frozen language model.
+3
+Method
+3.1
+Framework Overview
+Given a video V and a question q, SlotNarrative converts
+the video into a compact visual sequence Z(V ) organized
+around objects rather than frames. As shown in Figure 2, the
+framework has three functional modules. First, an object-
+centric encoder groups frame features into object-like slot
+observations and summarizes their local state. Second, per-
+sistent object memory associates recurring observations with
+clip-level object entries. Third, a typed tokenizer represents
+each retained entry with one identity token and multiple
+state tokens. Thus, slots group evidence, memory associates
+observations, and typed tokens expose the resulting object
+narratives to the language model.
+3.2
+Object-Centric Video Representation
+A frozen SigLIP encoder (Zhai et al. 2023) extracts patch
+features Xt from frame t. A feature adapter ϕ and recurrent
+slot encoder C produce K = 11 slot vectors St and patch-
+normalized attention maps At:
+(St, At) = C(ϕ(Xt); eSt−1),
+eSt = Ψ(St).
+Here, eSt−1 is the predicted initialization from the preceding
+frame, and Ψ provides short-range continuity within a shot.
+Each attention map pools appearance and provides geome-
+try statistics, while mask-weighted patch matching estimates
+local motion without object annotations. A causal trajectory
+encoder summarizes recent descriptors, and a presence head
+predicts existence and visibility.
+Recurrent initialization cannot guarantee clip-level iden-
+tity: an object may disappear, return under another index, or
+encounter a scene boundary. At each detected cut, we reset
+slot recurrence and local trajectory history so that an edit
+is not treated as extreme object motion, while retaining the
+clip-level memory. Supplementary Sections A.1–A.2 give di-
+mensions and signal definitions, Section A.4 gives cut/reset
+rules, and Supplementary Figure S1 shows the eight-frame,
+11-slot decomposition.
+3.3
+Persistent Object Memory
+The memory module converts frame-local slot observations
+into persistent object entries. A slot mask first pools raw
+
+
+Figure 3: Persistent association across missing observations. The colored regions show SlotNarrative slot-attention masks
+for the gymnast. The object is assigned to raw slot S5, becomes unobserved at 10–11% of the video, and returns under raw slot
+S6 while retaining persistent ID 2.
+SigLIP features to obtain a semantic appearance observation.
+Each entry maintains running summaries of slot features,
+pooled appearance, trajectory state, recent observations, and
+position, and remains available while its object is not vis-
+ible. For a reappearing slot (t, k) and an inactive entry u,
+let γℓ(t, k, u) be cue ℓand wℓ≥0 its fixed weight. The
+parameter-free matching score is
+ρt,k,u =
+P
+ℓ∈C wℓγℓ(t, k, u)
+max(P
+ℓ∈C wℓ, ε) ,
+where C contains slot-feature, pooled-appearance, trajectory-
+state, recent-observation, and position cues, and ε > 0 pre-
+vents division by zero. Re-identification is triggered by an
+invisible-to-visible transition. One setting is used through-
+out: the cue weights are (0.3, 0.2, 0.2, 0.1, 0.2) in the order
+above and the threshold is 0.3. Greedy one-to-one matching
+prevents duplicate claims; a match restores its entry, an un-
+matched visible and existing slot starts a new entry, and a
+missing entry is retained without update.
+Scene cuts require special handling because position and
+motion no longer provide meaningful continuity. SlotNar-
+rative resets local motion at a detected cut but keeps the clip-
+level memory; if re-identification is triggered at the boundary,
+matching relies on slot-feature and pooled-appearance cues.
+The resulting map πt,k = u associates slot k in frame t with
+persistent entry u and can recover an entry under a differ-
+ent slot index. These IDs are algorithmic associations rather
+than ground-truth tracks. Supplementary Sections A.3–A.4
+specify entry transfer, update, invalidation, and exact cut be-
+havior.
+Figure 3 illustrates association across a missing interval
+using the model’s slot-attention masks. The gymnast maps
+from raw slot S5 topersistentID 2,disappears at10–11%,and
+returns under raw slot S6 with the same ID. The changing raw
+index shows that frame-local slots are not stable identities,
+while memory preserves the association across the missing
+interval. Section 4.3 tests the downstream effect of this stage
+under matched settings on all three benchmarks.
+3.4
+Typed Object-State Tokenization
+As illustrated in Figure 4, the association map groups obser-
+vations by object, but the language model needs a fixed-size
+input. We rank entries by visible duration, state change, and
+slot objectness, retaining at most M in a fixed inventory and
+masking unused entries.
+For each retained entry u, ru aggregates attention-pooled
+backbone features over its visible observations. We use this
+time-aggregated identity summary instead of the raw slot
+vector: slot masks group observations, while pooled back-
+bone features provide semantics without per-frame repeti-
+tion.
+The video is divided into J temporal segments. For
+each object and segment, a state summary ¯gu,j aggre-
+gates appearance, geometry, visibility, trajectory state, and
+re-identification events, preserving when evidence occurs.
+Let ˆru = LNid(ru) and ˆgu,j = LNst(¯gu,j) denote sepa-
+rately normalized features. Two projectors map them into
+the language-model space:
+zid
+u = fid(ˆru)+eid+eu,
+zst
+u,j = fst(ˆgu,j)+est+eu+ej.
+Here, eid and est mark token type, eu binds both types to
+one object, and ej preserves segment order. Identity tokens
+summarize what each object is, while state tokens provide
+ordered evidence about what happens to it. With M = 16
+and J = 8, the interface allocates M(1 + J) = 144 posi-
+tions independent of sampled-frame count; unused positions
+are masked. Supplementary Sections B.1–B.3 give inventory
+ranking, exact features, pooling, masking, and serialization.
+This decomposition balances stability and temporal de-
+tail. A single averaged object token can blur state changes;
+separate observation tokens preserve change but repeat ap-
+pearance and weaken object binding. Separate projectors pre-
+serve the distinction between the two forms, while the shared
+object embedding binds them to the same entry.
+3.5
+Training Strategy
+We train SlotNarrative sequentially on the ActivityNet
+videos underlying VideoInstruct-100K (Maaz et al. 2024).
+
+
+Figure 4: Typed object-state tokenization. Slot masks pool backbone appearance along observations linked by persistent memory.
+One identity token summarizes an object’s appearance, while J state tokens preserve segment-level appearance, geometry,
+visibility, trajectory state, and association events. The resulting M(1 + J) allocated visual-token positions form the compact
+input to the frozen language model. Here, At,u denotes the slot mask linked to entry u, while Dv and DL denote the backbone
+and language-model feature dimensions.
+Stage 1 learns object-like grouping and local consistency
+from unlabeled within-shot clips using feature reconstruc-
+tion, SlotContrast, and Synergistic Representation Learning
+(Seitzer et al. 2023; Manasyan et al. 2025; Seong, Moon, and
+Heo 2026). Stage 2 freezes the slot encoder and trains trajec-
+tory and presence modules by future-observation prediction
+and confidence-derived targets. Stage 3 freezes the visual
+modules and Qwen2-7B-Instruct (Yang et al. 2024); mem-
+ory and inventory remain fixed, and only typed projectors,
+layer normalizations, and embeddings learn from instruction
+conversations. Supplementary Section C tabulates stage data
+and optimized modules and gives the objectives, schedules,
+freezing, hardware, seed, and inference settings.
+4
+Experiments
+4.1
+Experimental Setup
+Data and benchmarks.
+Stages 1–2 use the ActivityNet
+videos underlying VideoInstruct-100K without text, and
+Stage 3 uses its instruction conversations. We evaluate on
+MSVD-QA, MSRVTT-QA (Xu et al. 2017), and ActivityNet-
+QA (Yu et al. 2019); their QA annotations are never used for
+training or model selection. After ID normalization, none
+of the 800 ActivityNet-QA test videos overlaps the train-
+ing videos. Supplementary Section C.1 tabulates stage data
+and supervision. MSVD-QA and MSRVTT-QA cover short
+and diverse web clips, whereas ActivityNet-QA emphasizes
+longer, untrimmed activities.
+Evaluation metrics.
+Following Video-ChatGPT (Maaz
+et al. 2024), GPT-3.5-Turbo returns binary accuracy (Acc.)
+and answer quality from 0 to 5 (Score). Our variants share
+videos, generation, prompts, and evaluator; baseline values
+come from their papers. Supplementary Section C.5 gives
+deterministic decoding, the judge prompt and settings, seed,
+and single-run status.
+Model configuration.
+We sample 100 frames at 384×384
+and use the 144-position layout in Section 3.4; the typed
+interface has 34.39M trainable parameters. Supplementary
+Sections A.3, B.3, and C give the memory lifecycle, masking,
+optimization, and hardware settings.
+4.2
+Main Results and Token Efficiency
+We compare with earlier Video-LLMs (Maaz et al. 2024; Lin
+et al. 2024), the compact LLaMA-VID interface (Li, Wang,
+and Jia 2024), object-centric Slot-VLM and VideoOrion+
+(Xu et al. 2024; Feng et al. 2025), the motion-aware EMA
+and ReMoRa models (Zhao et al. 2025; Yashima et al. 2026),
+and Qwen2-based LLaVA-ST, LLaVA-Video, and LLaVA-
+OneVision (Li et al. 2025; Zhang et al. 2024; Li et al. 2024).
+Table 1 places accuracy beside the visual positions de-
+livered to the LLM. With 144 allocated positions, Slot-
+Narrative obtains 75.6%, 69.8%, and 50.3% accuracy on
+MSVD-QA, MSRVTT-QA, and ActivityNet-QA. Compared
+with the closest object-centric baseline, Slot-VLM, it uses
+25% fewer positions while improving the reported accura-
+cies by 0.7, 0.2, and 2.0 points; answer-quality scores are
+matched on the short-video datasets and improve from 3.4 to
+3.5 on ActivityNet-QA.
+This is an operating-point comparison rather than a
+controlled training study. Our language alignment uses
+VideoInstruct-100K and no benchmark QA annotations; sev-
+eral higher-accuracy systems report 200K to million-scale
+
+
+MSVD-QA MSRVTT-QA ActivityNet-QA
+Method
+Year Size
+#Tok Acc. Score Acc.
+Score
+Acc.
+Score
+ReMoRa‡
+2026
+7B
+729/GOP 73.1
+4.0
+–
+–
+60.5
+3.7
+LLaMA-VID
+2024
+7B
+2/frame 69.7
+3.7
+57.7
+3.2
+47.4
+3.3
+LLaVA-OneVision
+2024
+7B
+6,272
+–
+–
+–
+–
+56.6
+–
+LLaVA-Video†
+2024
+7B
+5,396
+–
+–
+–
+–
+56.5
+–
+LLaVA-ST‡
+2025
+7B
+2,520 75.9
+4.1
+59.0
+3.5
+–
+–
+Video-LLaVA
+2024
+7B
+2,048 70.7
+3.9
+59.2
+3.5
+45.3
+3.3
+EMA
+2025
+7B
+648 75.8
+4.1
+58.5
+3.5
+52.1
+3.5
+VideoOrion+
+2025
+7B
+≤640
+–
+–
+–
+–
+60.3
+3.7
+Video-ChatGPT
+2024
+7B
+356 64.9
+3.3
+49.3
+2.8
+35.2
+2.7
+Slot-VLM
+2024
+7B
+192 74.9
+3.8
+69.6
+3.4
+48.3
+3.4
+SlotNarrative (Ours) 2026
+7B
+144 75.6
+3.8
+69.8
+3.4
+50.3
+3.5
+Table 1: Open-ended VideoQA results. Year is the release year, Size is the model scale, and #Tok is the visual-token count
+supplied to the LLM; – is unreported. Rate-based methods are listed first, followed by fixed allocations in descending order. †
+marks benchmark-related training data and ‡ a derived count. Cross-paper settings differ; 144 denotes our pre-mask allocation.
+Figure 5: Reported ActivityNet-QA accuracy versus per-
+video visual-token positions. VideoOrion+ is shown at its up-
+per bound; the dashed segment joins the two non-dominated
+plotted points. Cross-paper protocols differ.
+adaptation sets. Slot-VLM is the closest data-scale reference,
+also using 100K video instructions. SlotNarrative comes
+within 0.3 points of LLaVA-ST and EMA on MSVD-QA and
+exceeds both on MSRVTT-QA with far fewer positions.
+This pattern is consistent with the interface: shorter
+MSVD-QA and MSRVTT-QA clips often admit answers
+from localized object, attribute, and action evidence, whereas
+ActivityNet-QA contains longer untrimmed activities. There,
+eight-segment summaries and the weak linearly decodable
+temporal-order signal identified by our diagnostics leave a
+larger gap to dense, more heavily adapted models. The gap
+reflects a current temporal limitation, not token count alone.
+Figure 5 places SlotNarrative above Slot-VLM at the
+lowest budget. EMA and VideoOrion+ are more accurate
+at roughly 4.5× the budget. This comparison measures
+language-model context length rather than vision-side com-
+Variant
+Traj. Mem. MSVD MSRVTT ANet
+Slot observations
+71.0
+65.0
+45.4
+Trajectory only
+√
+72.8
+65.6
+47.5
+Memory only
+√
+74.2
+67.1
+47.9
+Full SlotNarrative
+√
+√
+75.6
+69.8
+50.3
+Table 2: Trajectory and memory ablation in accuracy (%).
+putation or end-to-end latency.
+Supplementary Section D.2 compares compact 7B inter-
+faces, our 80–216-position variants, and four compression
+methods evaluated within one LLaVA-OneVision setup near
+125 positions. Because training recipes differ, this establishes
+near-budget context rather than a controlled gain.
+4.3
+Ablation Studies
+We examine persistent association and typed tokenization
+with the language model, evaluator, frames, and adaptation
+data fixed. Supplementary Section D.3 also ablates Stage
+1 and varies M and J: at nearby budgets, reducing object
+coverage is costlier than reducing temporal resolution, while
+larger settings yield modest gains.
+Concretely, reducing M from 16 to 8 yields 46.3% ac-
+curacy with 72 positions, whereas reducing J from 8 to 4
+retains 49.0% with 80 positions. Increasing M to 24 or J to
+16 reaches 50.9% and 50.6%, respectively, indicating dimin-
+ishing returns beyond the 144-position setting.
+Effect of trajectory and memory.
+Table 2 shows that
+both components improve over slot observations on all three
+benchmarks. Across the datasets, trajectory alone adds 1.8,
+0.6, and 2.1 points, while memory alone adds 3.2, 2.1, and
+2.5. Their combination performs best, adding a further 1.4,
+2.7, and 2.4 points over memory alone.
+Effect of typed object-state tokens.
+Table 3 shows that
+neither an object summary nor segment-level state evidence
+is sufficient on its own. Their combination is substantially
+stronger, supporting the identity/state decomposition rather
+
+
+Figure 6: Successful ActivityNet-QA examples. Each row pairs six event-aligned frames with the question, reference, and
+SlotNarrative answer; green borders mark answer-relevant evidence. The rows cover long-range transition, object-state
+change, pre-action motion, and object-specific outcome.
+Variant
+#Tok
+Acc.
+∆
+Identity only
+16
+44.1
+-6.2
+State only
+128
+42.4
+-7.9
+Raw-slot identity
+144
+48.7
+-1.6
+No state appearance
+144
+49.1
+-1.2
+Full typed interface
+144
+50.3
+–
+Table 3: Typed-token ablation on ActivityNet-QA. ∆is mea-
+sured from the full identity/state interface.
+than a single homogeneous token set. At 144 positions, raw-
+slot identity loses 1.6 points and removing state appearance
+loses 1.2. The larger drops from identity-only and state-only
+variants show that persistent object organization and typed
+content provide complementary evidence.
+Complementary roles.
+These components operate at dif-
+ferent levels rather than acting as interchangeable compres-
+sion modules. The trajectory encoder enriches each slot
+observation with local state, memory decides which sepa-
+rated observations form one persistent object narrative, and
+typed tokenization controls how stable identity and tempo-
+ral change reach the language model. A later projector can-
+not recover a narrative lost upstream. The compact interface
+therefore depends on association before serialization, rather
+than token projection alone.
+4.4
+Qualitative Results
+Figure 6 links activity stages, temporal order, and object-
+specific evidence but does not measure association accuracy.
+Supplementary Sections D.4–D.6 report fragmentation, ap-
+pearance and temporal probes, question-type results, and four
+failure modes. Together, these diagnostics separate two ef-
+fects hidden by aggregate VideoQA accuracy. A correct an-
+swer alone cannot establish stable association throughout a
+clip.
+Slot content retains appearance information after remov-
+ing the shared clip direction, supporting attention-pooled
+backbone features as token content; weak linear velocity and
+frame-order readouts suggest that the temporal-state pathway
+remains a bottleneck under these probes.
+The downstream ablation measures the QA value of as-
+sociation, while the fragmentation analysis tests grouping
+quality and the same-entry appearance probe measures con-
+sistency among model-assigned associations. Together they
+characterize the behavior of persistent association without
+implying detector-level tracking; similar objects or weak slot
+evidence can still merge or split entries.
+5
+Conclusion
+SlotNarrative organizes a Video-LLM’s visual interface
+around persistent object narratives rather than repeated frame
+evidence. Slot attention extracts object-like observations,
+parameter-free memory associates them across missing in-
+tervals, and typed tokens expose identity and segment-
+level change. With 144 positions, this interface achieves
+a favorable reported accuracy–token trade-off across three
+VideoQA benchmarks. Component ablations support asso-
+ciating observations before serialization and separating iden-
+tity from change. Slot fragmentation and weak temporal en-
+coding on long videos remain open limitations. Addressing
+them with richer object discovery and motion cues, with-
+out restoring long frame-token sequences, is an important
+direction for object-centric Video-LLMs.
+
+
+Supplementary Material
+Persistent Object Narratives for Token-Efficient Video Language Models
+This supplementary material follows the model and evaluation flow of the main paper. Appendix A specifies slot observations,
+trajectory state, persistent memory, and scene-cut handling. Appendix B defines object selection and identity/state tokenization.
+Appendix C gives the three-stage training and inference settings. Appendix D reports near-budget comparisons, controlled
+ablations, representation diagnostics, question-type results, and failure cases.
+A
+Object Representation and Persistent
+Association
+This section specifies the object representation and persistent
+memory used by the first two functional blocks in Figure 2
+of the main paper.
+The computation follows the temporal order of the video.
+Slot attention first produces object-like observations within
+each frame; the trajectory and presence modules describe
+their local evolution; persistent memory then assigns visible
+observations to clip-level object entries. The resulting iden-
+tifiers are internal associations rather than semantic class la-
+bels. They determine which observations are pooled together
+by the typed tokenizer in Appendix B.
+A.1
+Feature Extraction and Slot Attention
+For a sequence of T sampled frames, the frozen SigLIP en-
+coder produces raw patch features Xt ∈RP ×Dv at each
+frame t, with Dv = 1152. Here, R denotes the real numbers
+and P = 729 at the 384 × 384 input resolution. A two-
+layer feature adapter maps these features to the input space
+of the recurrent slot encoder, which produces K = 11 slots
+of dimension Ds = 256. The adapted features are used for
+grouping, whereas the raw SigLIP features are retained for
+appearance pooling. This separation is important: slot atten-
+tion determines which patches belong together, and the raw
+backbone features preserve what those patches depict.
+We retain two normalizations of the slot-attention weights.
+For frame t, slot k ∈{1, . . . , K}, and patch p ∈{1, . . . , P},
+we write At, Bt ∈[0, 1]K×P for the patch-normalized and
+slot-competitive forms, respectively:
+P
+X
+p=1
+At,k,p = 1,
+K
+X
+k=1
+Bt,k,p = 1.
+At is used for centroids, moments, appearance pooling, and
+object-state descriptors. Bt estimates the fraction of the im-
+age assigned to a slot, µt,k = P −1 P
+p Bt,k,p. At a detected
+scene cut, recurrent slot initialization is reset to the learned
+initial slots.
+Figure S1 visualizes the complete slot set rather than se-
+lecting only the most object-like masks. Each panel reveals
+the patches for which that slot has the largest competitive
+weight. The recurrent initialization encourages stable group-
+ing within the shot, while the scattered background patches
+illustrate why downstream selection and persistent memory
+are still needed.
+A.2
+Observation, Trajectory, and Presence
+The parameter-free observation extractor forms ot,k ∈RDo
+with Do = 25 from three complementary groups:
+• Spatial statistics (12 dimensions): centroid, slot-
+competitive area µt,k, three second moments, peak re-
+sponse, normalized entropy, and the attention mass touch-
+ing the four image borders.
+• Motion statistics (5 dimensions): horizontal and vertical
+displacement, displacement variance, displacement mag-
+nitude, and feature change energy. Patch displacement is
+estimated by nearest-neighbor cosine matching between
+consecutive raw SigLIP feature grids and then pooled
+with the slot mask.
+• Shape statistics (8 dimensions): horizontal and vertical
+skewness and kurtosis, aspect ratio, horizontal and verti-
+cal profile peaks, and the ratio between the horizontal and
+vertical profile entropies. The profile peaks are log-scaled
+relative to a uniform profile.
+The trajectory encoder receives the current observa-
+tion together with its one- and two-frame lag differences,
+[ot,k; ot,k −ot−1,k; ot,k −ot−2,k] ∈R75, and maps them to
+ht,k ∈RDh with Dh = 64 using a three-layer causal tempo-
+ral convolution. Missing lag differences are set to zero. Each
+shot is encoded independently, so the differences and causal
+history restart at a scene boundary.
+The presence estimator takes the slot vector and spatial
+statistics and predicts existence and visibility. Because the
+real-video training data have no object masks, we derive
+confidence labels from attention concentration. Let mt,k =
+maxp At,k,p be peak attention. The normalized entropy is
+Ht,k = −(log P)−1 X
+p
+At,k,p log At,k,p,
+with the standard convention 0 log 0 = 0. We compute
+ct,k = (1 −Ht,k)(Pmt,k),
+and use 1[ct,k > 3] and 1[ct,k > 5] as existence and visi-
+bility labels, respectively, where 1[·] is the binary indicator
+function.
+A.3
+Parameter-Free Persistent Memory
+Each memory entry stores an exponential moving average of
+the slot feature, the attention-pooled SigLIP appearance, and
+the trajectory state; a five-frame observation summary; the
+latest centroid and velocity; the last visible frame; and the
+model-assigned persistent object identifier. These quantities
+
+
+Figure S1: Spatial slot-attention masks over eight uniformly sampled frames from one shot. The first column shows the input
+frames; the remaining 11 columns reveal patches assigned to each slot by the competitive attention Bt. Different slots consistently
+capture individual people, the sandcastle, and complementary shoreline regions. These masks are learned grouping outputs rather
+than ground-truth segmentations, and slot indices are unordered across independent sequences.
+are derived from the frozen representation and introduce no
+trainable parameters.
+Re-identification is triggered when a slot changes from in-
+visible to visible; a continuously visible slot keeps its current
+assignment. For such a reappearing slot, five matching sig-
+nals compare the current observation with an inactive mem-
+ory entry: slot-feature cosine similarity, pooled-appearance
+cosine similarity, trajectory-state cosine similarity, recent-
+observation cosine similarity, and Gaussian proximity to the
+velocity-predicted centroid. Let C index these five signals,
+γℓ(t, k, u) denote the value of signal ℓbetween current slot
+(t, k) and memory entry u, and wℓ≥0 its weight. Cosine
+cues lie in [−1, 1], while the Gaussian position cue lies in
+[0, 1]. The matching score is
+ρt,k,u =
+P
+ℓ∈C wℓγℓ(t, k, u)
+max
+ P
+ℓ∈C wℓ, ε
+ ,
+ε = 10−8.
+For ordinary frames, the weights for slot feature, pooled
+appearance, trajectory state, recent observation, and position
+are (0.3, 0.2, 0.2, 0.1, 0.2). The score above normalizes these
+raw weights by their sum. The position signal uses a Gaussian
+bandwidth of 0.1. If re-identification is triggered at a scene
+cut, motion cues are discarded and the score gives equal
+weight to slot-feature and pooled-appearance similarity. The
+acceptance threshold is 0.3.
+Greedy one-to-one matching prevents one stored entry
+from being assigned to multiple reappearing slots in the same
+step. A matched entry transfers its persistent identifier and
+state to the current slot; the source entry is then invalidated
+when a cross-slot transfer occurs, preventing duplicate ac-
+tive IDs. An unmatched visible and existing slot starts a new
+identifier. Visible observations update memory with EMA
+momentum 0.9, while invisible states are held. The resulting
+map πt,k ∈{−1, 0, . . . , U −1} is recorded only for visible
+observations, where U is the number of distinct persistent
+identifiers produced in the clip and −1 denotes no assign-
+ment. It is the sole source of object membership used by the
+typed tokenizer.
+Existence and visibility play different roles in this life-
+cycle. Visibility gates memory updates, while existence de-
+
+
+termines whether an unmatched visible observation starts
+a new identifier. When visibility drops, the stored entry is
+retained but does not absorb the uncertain observation; a
+later visible slot can recover it through the matching score.
+Thus a missing interval does not itself create another object
+token. A duplicate entry appears only when the returning
+observation fails the acceptance rule, and the fixed inventory
+ranking in Appendix B limits the effect of such failures on
+the language-model input.
+A.4
+Scene-Cut Handling
+Scene cuts are detected with HSV-histogram Bhattacharyya
+distance using a threshold of 0.35. The same cut mask is used
+throughout the pipeline:
+• recurrent slot initialization is reset at the first frame of
+each shot;
+• cross-shot patch displacement is zeroed;
+• trajectory differences and causal-convolution history
+restart;
+• future-prediction targets crossing a cut are removed; and
+• re-identification triggered at the cut uses only slot-feature
+and pooled-appearance cues and resets velocity.
+The cut mask does not force every continuously visible slot
+to be rematched. It changes the matching cues only when
+a slot triggers re-identification and otherwise preserves its
+current memory assignment while resetting local motion.
+This separation prevents a hard cut from being interpreted
+as extreme object motion. Appearance-only recovery is pos-
+sible when the boundary also contains an invisible-to-visible
+transition, but the cut rule alone does not establish cross-edit
+identity. Videos without a detected cut follow the ordinary
+motion-aware matching rule throughout.
+B
+Typed Object-State Tokenization
+This section specifies the inventory selection and typed tok-
+enization shown in Figure 4 of the main paper.
+An inventory entry is a clip-level container for observa-
+tions assigned the same persistent identifier. Its identity token
+summarizes evidence across all visible frames, whereas its
+state tokens retain segment-local evidence. Object-index em-
+beddings bind these two token types to the same entry, and
+segment-index embeddings preserve coarse temporal order
+without repeating an identity summary at every frame.
+B.1
+Object Inventory Selection
+The memory map may contain more persistent identifiers
+than the fixed object budget M. To reduce the effect of diffuse
+slot fragments, we define a soft objectness score from the
+slot-competitive area µt,k defined in Appendix A.1 and the
+normalized patch entropy Ht,k. Let st,k = µt,k(1 −Ht,k),
+and let smin and smax be the minimum and maximum over
+all (t, k) in the same clip. We use
+ηt,k =
+st,k −smin
+max(smax −smin, ε),
+ε = 10−6.
+Thus ηt,k ∈[0, 1] measures objectness relative to the
+other slots in the clip. During feature aggregation, we use
+eηt,k = max(ηt,k, 0.1) and αt,k = pvis
+t,keηt,k, where pvis
+t,k is
+the visibility probability. For a candidate persistent identi-
+fier v ∈{0, . . . , U −1}, where U is the number of distinct
+identifiers produced in the clip, let Ov = {(t, k) : πt,k = v}
+be its visible observations and Fv = {t : ∃k, (t, k) ∈Ov}
+its distinct visible frames. We set nvis
+v
+= |Fv|, where | · |
+denotes set cardinality. Let bht,v be the visibility–objectness
+weighted trajectory state pooled over all slots assigned to v in
+frame t. The state-change term is averaged only over adjacent
+visible-frame pairs:
+∆hv =
+PT −1
+t=1 1[{t, t + 1} ⊆Fv]∥bht+1,v −bht,v∥2
+max(PT −1
+t=1 1[{t, t + 1} ⊆Fv], 1)
+.
+We also define ¯ηv as the mean ηt,k over Ov, floored at 0.1.
+Its inventory score is
+Impv =
+ nvis
+v
++ 0.5 ∆hv
+
+¯ηv.
+If more than M identifiers are present, the M objects with
+largest Impv are retained and remapped to inventory indices
+u ∈{1, . . . , M}; as in the main paper, we reuse π for the
+remapped association. The remaining positions are padded
+and masked. This ranking is a fixed rule on the model’s native
+feature scales rather than a learned detector; the coefficient is
+unchanged across datasets and variants. If no valid identifier
+remains, the most-visible slot forms a single entry.
+B.2
+Identity and State Construction
+For slot k in frame t, its patch-normalized mask pools the
+raw SigLIP features into
+xt,k =
+P
+X
+p=1
+At,k,pXt,p ∈RDv.
+The identity prototype of retained entry u is the visibility-
+and objectness-weighted average
+ru =
+P
+t,k: πt,k=u αt,kxt,k
+max
+P
+t,k: πt,k=u αt,k, ε
+,
+ε = 10−8.
+For each visible observation, let bt,k ∈{0, 1}2 mark re-
+identification and a change in binary visibility, where visi-
+bility is thresholded at pvis
+t,k > 0.5. The state feature is
+gt,k = [ht,k; ot,k; pvis
+t,k; bt,k; xt,k] ∈RDg.
+Here, Dg = Dh + Do + 3 + Dv = 1244, and [ · ; · ] denotes
+concatenation. Thus, the state includes trajectory, geome-
+try and mask statistics, visibility, two event indicators, and
+pooled appearance.
+The video is divided uniformly into J temporal segments,
+and Ij denotes the frame-index set of segment j. For segment
+j, define Ωt,u = {k : πt,k = u} as the slots assigned to
+object u in frame t. One-to-one matching makes Ωt,u either
+empty or a singleton. For any per-slot feature yt,k, if Ωt,u =
+{k(t, u)}, define byt,u = yt,k(t,u). For the state feature gt,k
+above, let Tu,j = {t ∈Ij : Ωt,u̸ = ∅} be the valid frames of
+object u in segment j. Segment pooling is
+¯gu,j =
+1
+|Tu,j|
+X
+t∈Tu,j
+bgt,u.
+
+
+An object absent from a segment receives a masked state
+position, so this average is evaluated only when |Tu,j| > 0.
+Let DL = 3584 be the Qwen2 embedding dimension. The
+exact typed projections are
+zid
+u = fid(LNid(ru)) + eid + eu,
+zst
+u,j = fst(LNst(¯gu,j)) + est + eu + ej.
+Here, fid : RDv →RDL and fst : RDg →RDL are sep-
+arate two-layer MLPs with 3584-dimensional hidden layers
+and GELU activations. LNid and LNst are separate layer
+normalizations. The embeddings eid, est, eu, and ej encode
+token type, object index, and segment index in RDL. To-
+gether, the two projectors, layer normalizations, and typed
+embedding tables contain 34,389,688 trainable parameters,
+forming the complete Stage 3 trainable set.
+The two projection paths are intentionally not shared. Iden-
+tity inputs contain only pooled backbone appearance, while
+state inputs combine appearance with trajectory, geometry,
+visibility, and event indicators on a different scale. Separate
+normalization and projection let each type enter the LLM em-
+bedding space without requiring these heterogeneous inputs
+to share one feature distribution. The shared object-index
+embedding restores their common binding after projection.
+B.3
+Serialization and Attention Masking
+With M = 16 objects and J = 8 segments, the interface
+allocates
+M(1 + J) = 16 + 16 × 8 = 144
+token positions. They are serialized as 16 identity positions
+followed by eight segment-major blocks of 16 state posi-
+tions. The attention mask disables unused objects and object-
+segment pairs, so the LLM attends only to valid positions; the
+fixed layout keeps token-type and segment roles structurally
+consistent across clips. The complete sequence replaces the
+visual input position before the question tokens.
+The count of 144 therefore denotes the fixed interface
+capacity. A clip with fewer than 16 retained entries, or an
+entry absent from a temporal segment, uses fewer active
+positions because the corresponding padding positions are
+masked. We nevertheless report the allocated capacity so
+that token counts do not depend on video content.
+C
+Training and Reproducibility
+The first two stages use the ActivityNet videos underly-
+ing VideoInstruct-100K without segmentation or QA labels.
+Stage 3 uses the instruction conversations paired with the
+same video collection.
+The staged design separates three learning problems. Stage
+1 learns visual grouping, Stage 2 adds local dynamics and
+presence prediction without language supervision, and Stage
+3 aligns the completed object-state interface with the lan-
+guage model. Freezing each completed stage prevents the
+answer loss from changing the object associations used to
+define the downstream token inventory.
+No
+question–answer
+annotation
+from
+MSVD-QA,
+MSRVTT-QA, or ActivityNet-QA is used for optimiza-
+tion or model selection. Their annotated splits are accessed
+only when generating the reported answers. The ActivityNet
+videos used in the first two stages provide unlabeled vi-
+sual sequences, while Stage 3 receives only the VideoIn-
+struct conversations specified above. After normalizing the
+optional v_ prefix in video identifiers, the 800 ActivityNet-
+QA test videos have zero overlap with the 13,303 unique
+VideoInstruct-100K training videos.
+C.1
+Training Overview
+Table S1 summarizes the sequential recipe and the modules
+updated at each stage.
+The table lists every trainable module in each stage. Com-
+ponents not named in a row are frozen, and the parameter-free
+memory has no optimizer state in any stage. Consequently,
+the VideoQA objective learns how to present the established
+persistent object narratives to the language model rather than
+relearning the visual backbone or the association rule.
+C.2
+Stage 1: Object Slot Representation
+At optimization step n, the Stage 1 objective is
+L(1)(n) = Lrec + λSC(n)LSC + λSRL(n)LSRL.
+Lrec is mean-squared reconstruction of frozen SigLIP patch
+features. LSC is the SlotContrast objective over adjacent
+frames in the same shot. LSRL denotes the scheduled
+SRL component: early redundancy regularization or later
+encoder/decoder consistency. The functions λSC(n) and
+λSRL(n) are their step-dependent weights and are zero when
+the corresponding component is inactive.
+Feature reconstructionhas unitweight throughouttraining.
+SlotContrast has target weight 0.05, starts at step 1,500, and
+uses a 1,500-step linear warm-up. Redundancy regularization
+is active during the first 5,000 steps with phase weight 0.3
+and internal weight 0.05. Encoder/decoder consistency starts
+at step 10,000 with a 1,000-step warm-up and target weight
+0.05. Temporal pairs crossing scene cuts are removed from
+all temporal objectives. The Stage 1 representation is then
+frozen for the downstream stages.
+C.3
+Stage 2: Trajectory and Presence
+Let fδ : RDh →RDo be the prediction head for temporal
+offset δ ∈{1, 3}, and let Vδ contain minibatch source-slot
+triples (b, t, k) for which t + δ ≤T and the interval from
+t to t + δ does not cross a scene cut. We use the same
+future slot index because recurrent initialization provides
+local slot-index continuity within a shot; persistent cross-slot
+association is introduced only after the trajectory encoder. We
+use the reliability ξb,t,k = µb,t,k(1 −Hb,t,k) and optimize
+Lδ
+pred =
+P
+(b,t,k)∈Vδ ξb,t,k ∥fδ(hb,t,k) −sg(ob,t+δ,k)∥2
+2
+Do max
+P
+(b,t,k)∈Vδ ξb,t,k, ε
+
+,
+where Do = 25, ε = 10−8 prevents division by zero, ∥· ∥2
+is the Euclidean norm, and sg stops gradients through the
+target observation. For presence supervision, the confidence
+ct,k from Appendix A.2 gives ye
+t,k = 1[ct,k > 3] and yv
+t,k =
+
+
+Stage
+Data and sampling
+Trainable modules
+Optimization and objectives
+1
+ActivityNet videos; 100 sam-
+pled frames; preferentially
+within-shot
+8-frame
+clips;
+384 × 384 input
+Feature adapter, recurrent slot en-
+coder, slot predictor, feature de-
+coder
+50K steps; AdamW, 1.5 × 10−4; feature
+reconstruction, scheduled SlotContrast, and
+scheduled SRL
+2
+Same unlabeled videos; full
+sampled sequence
+Trajectory encoder, two future-
+prediction heads, presence estima-
+tor
+20 epochs; Adam, 2 × 10−4; trajectory-
+prediction weight 0.5 and presence weight
+0.2
+3
+VideoInstruct-100K conver-
+sations; same video sampling
+Identity and state projectors, layer
+normalizations, and typed embed-
+dings
+3 epochs; projector learning rate 2 × 10−5;
+answer-only autoregressive cross-entropy
+Table S1: Training configuration. Modules learned in an earlier stage are frozen before the next stage.
+1[ct,k > 5]. With binary cross-entropy losses Lexist and
+Lvisible, the complete Stage 2 objective is
+L(2) = 0.5
+
+1
+2
+X
+δ∈{1,3}
+Lδ
+pred
+
++ 0.2
+ Lexist + 0.5Lvisible
+
+.
+Persistent object memory is applied after these modules and
+has no optimization objective or learnable parameters.
+Accordingly, Stage 2 learns cues that memory can com-
+pare, but it is not trained through a discrete matching de-
+cision. The future-prediction terms encourage the trajectory
+state to summarize short-range change, and the confidence-
+derived presence targets determine when an observation is
+reliable enough to update an entry. Persistent association is
+then applied as the fixed downstream rule in Appendix A.3.
+C.4
+Stage 3: Language Alignment
+Stage 3 uses the VideoInstruct-100K instruction conversa-
+tions and the freeze policy summarized in Table S1. Train-
+ing uses batch size 8, four-step gradient accumulation, cosine
+decay, and a 3% warm-up ratio. The standard Qwen2 chat
+template places the serialized object-state sequence before
+the question, and the loss is applied only to assistant-answer
+tokens. Let Y denote the set of answer-token positions, aℓthe
+answer token at position ℓ, a<ℓits preceding answer prefix,
+q the question, Z(V ) the visual-token sequence, and pLLM
+the next-token distribution. The objective is
+L(3) = −1
+|Y|
+X
+ℓ∈Y
+log pLLM
+ aℓ| Z(V ), q, a<ℓ
+
+.
+Gradients in this stage do not propagate beyond the typed
+interface into the upstream visual modules. They update the
+identity and state projectors, their layer normalizations, and
+the type/object/segment embeddings, but not SigLIP, slot at-
+tention, the trajectory and presence modules, memory, or
+Qwen2. This freeze policy makes language alignment at-
+tributable to how the established persistent object narratives
+are serialized.
+C.5
+Inference and Reproducibility
+We use random seed 42 for training and data loading. The
+reported values are single training runs. All model training
+and testing use two NVIDIA A800 GPUs, and the trainable
+stages use bfloat16 mixed precision. For Stage 3, batch size
+8 is per GPU and four-step accumulation gives an effective
+global batch size of 64.
+Open-ended answers are decoded deterministically with
+sampling disabled, the tokenizer end-of-sequence token as
+the stopping condition, and at most 64 new tokens. Follow-
+ing Video-ChatGPT, the final judge uses the API model iden-
+tifier gpt-3.5-turbo, temperature zero, and a 64-token
+response limit. The prompt asks the judge to compare the
+prediction with the reference, accept synonymous or para-
+phrased answers, and return binary correctness together with
+an integer quality score from 0 to 5. Malformed responses
+are retried up to three times. Evaluator versions may differ
+across published reports, so cross-paper GPT-judged values
+are treated as reference points rather than strictly controlled
+comparisons; all within-model ablations use this same eval-
+uator.
+D
+Additional Experiments and Analysis
+This section reports comparisons, controlled ablations, diag-
+nostics, and qualitative evidence that support the main-paper
+conclusions. All ActivityNet-QA variants follow the com-
+mon evaluation protocol in Appendix C.5 and report point
+estimates from the corresponding trained variant.
+The evidence is organized from system-level comparisons
+to representation-level analysis. Near-budget results locate
+the operating point of the complete model; ablations vary in-
+dividual design choices; offline probes test what information
+survives the object bottleneck; and question types and fail-
+ure cases connect those measurements to observable answer
+errors.
+D.1
+Evaluation and Ablation Protocol
+The main paper reports the trajectory/memory and typed-
+token ablations. The studies below complement them by
+varying the Stage 1 representation objective and the ob-
+ject/segment budget. Unless stated otherwise, each variant
+uses the full interface defined in Appendix B and changes
+only the component named in its row.
+
+
+Figure S2: Representation diagnostics. Left: removing the shared clip direction exposes appearance information that is weak
+under raw slot cosine similarity. Middle: the trajectory state contains little linearly decodable velocity or frame-order information
+under these probes. Right: the remaining object fragmentation and the temporal signal retained by the patch grid summarize the
+current bottleneck.
+D.2
+Near-Budget Token Efficiency
+Table S2 collects reported ActivityNet-QA results around the
+144-position regime. Video-LLaMA, LLaMA-VID, Chat-
+UniVi, VISTA-LLaMA, Slot-VLM, Matryoshka Multimodal
+Models, and Video-ChatGPT use Vicuna-7B (Zhang, Li, and
+Bing 2023; Li, Wang, and Jia 2024; Jin et al. 2024; Ma et al.
+2024; Xu et al. 2024; Cai et al. 2025; Maaz et al. 2024).
+LLaVA-OneVision, its four compressed variants, and Slot-
+Narrative use Qwen2-7B (Li et al. 2024; Yang et al. 2025;
+Shen et al. 2025a; Shao et al. 2025; Du et al. 2026). The com-
+pression rows share one 32-frame setup and are controlled
+with one another; the remaining rows differ in backbone,
+training data, frame sampling, or evaluation implementation.
+Across our own budgets, 80, 144, and 216 positions yield
+49.0%, 50.3%, and 50.9%, respectively. The default setting
+is also close to the two strongest 2%-retention Qwen2 rows
+at about 125 positions (49.9% and 50.2%) and exceeds the
+reported VISTA-LLaMA and Slot-VLM results. Thus, the
+object-state interface remains competitive without a dense
+visual sequence, while its modest gain beyond 144 positions
+supports the selected operating point. Because our model
+uses a different interface and training recipe, these rows es-
+tablish near-budget context rather than a controlled gain over
+every method.
+D.3
+Additional Ablations
+Representation learning.
+Table S3 shows that removing
+SlotContrast reduces ActivityNet-QA accuracy by 4.5 points
+and raises the fragmented-slot rate from 49% to 74%. The
+appearance gap also decreases. The temporal consistency
+objective therefore improves both the object representation
+and its downstream usefulness, even though the full model
+still contains substantial fragmentation.
+Token budget.
+We additionally vary the object capacity
+M and temporal resolution J while keeping the remaining
+interface unchanged. Table S4 shows that reducing object
+coverage is more costly than reducing temporal resolution
+at nearby budgets. Increasing either dimension beyond the
+144-position setting yields only modest accuracy gains and
+does not improve the answer-quality score.
+Taken together, the two ablations separate representation
+quality from interface capacity. SlotContrast improves the
+observations available to every later module, while the bud-
+get study changes only how many persistent object narratives
+and temporal segments can reach the language model. The
+larger drop from reducing M indicates that preserving ob-
+ject coverage is especially important in this regime; once 16
+entries and eight segments are available, additional positions
+show diminishing returns.
+D.4
+Representation Diagnostics
+The following probes are not alternative VideoQA training
+objectives. They are offline measurements on frozen repre-
+sentations, designed to localize whether a failure originates
+in object grouping, appearance readout, or temporal state.
+This distinction matters because the final QA score alone
+cannot reveal which part of the compact interface discarded
+the relevant evidence.
+Figure S2 summarizes where the compact object represen-
+tation preserves useful content and where information is lost,
+while Table S5 reports the corresponding diagnostic values.
+For all linear probes, videos rather than observations define
+the train/test split, with one third held out. Features are stan-
+dardized using training-split statistics, ridge regularization is
+10−2, and the split seed is 0. Cosine comparisons are com-
+puted within each clip; the probes use all valid observations
+from the selected videos and no QA labels.
+Object binding.
+For each slot mask, we measure the frac-
+tion of attention mass in the top 3% of patches and its spatial
+second moment. A slot is marked fragmented when its mass
+concentration is below 0.40 and its dispersion is above 0.06.
+The trained object representation has a 49% fragmented-slot
+
+
+Method
+Year
+Size
+#Tok
+Acc.
+Score
+LLaVA-OneVision
+2024
+7B
+6,272
+54.5
+3.55
+Video-ChatGPT
+2024
+7B
+356
+35.2
+2.7
+SlotNarrative (M=24, J=8)
+2026
+7B
+216
+50.9
+3.38
+Slot-VLM
+2024
+7B
+192
+48.3
+3.4
+LLaVA-NeXT-M3
+2025
+7B
+180
+55.0
+–
+SlotNarrative (default)
+2026
+7B
+144
+50.3
+3.47
+VISTA-LLaMA
+2024
+7B
+128
+48.3
+3.3
++ VisionZip (2%)
+2025
+7B
+∼125
+41.7
+3.13
++ FastVID (2%)
+2025
+7B
+∼125
+49.6
+3.35
++ HoliTom (2%)
+2025
+7B
+∼125
+49.9
+3.31
++ Unified (2%)
+2026
+7B
+∼125
+50.2
+3.37
+Chat-UniVi
+2024
+7B
+112
+46.1
+3.3
+SlotNarrative (M=16, J=4)
+2026
+7B
+80
+49.0
+3.41
+LLaVA-NeXT-M3
+2025
+7B
+45
+53.2
+–
+Video-LLaMA
+2023
+7B
+32
+12.4
+1.1
+LLaMA-VID
+2024
+7B
+2/frame
+47.4
+3.3
+Table S2: Reported ActivityNet-QA results for compact visual interfaces. Year is the model or method release year, Size is
+the language-model scale, and fixed per-video allocations are sorted from largest to smallest; LLaMA-VID is listed separately
+because its total varies with frame count. VisionZip, FastVID, HoliTom, and Unified at 2% retention use LLaVA-OneVision-7B
+as their common base and are evaluated under the same setup. Its 54.5% dense result is reproduced by that study; the original
+report gives 56.6% under a different setup. Bold marks our default setting.
+Stage 1 variant
+Acc.
+Frag. (%)
+Gap
+Full
+50.3
+49
+0.126
+Without SlotContrast
+45.8
+74
+0.100
+Table S3: Stage 1 representation ablation on ActivityNet-
+QA. Frag. is the fragmented-slot rate, and Gap is the bias-
+corrected same-entry appearance-similarity gap.
+M
+J
+#Tok
+Acc.
+Score
+∆
+8
+8
+72
+46.3
+3.21
+-4.0
+16
+4
+80
+49.0
+3.41
+-1.3
+16
+8
+144
+50.3
+3.47
+–
+24
+8
+216
+50.9
+3.38
++0.6
+16
+16
+272
+50.6
+3.35
++0.3
+Table S4: Visual-token budget ablation on ActivityNet-QA.
+The allocation is M(1 + J), Score uses the 0–5 GPT scale,
+and ∆is the accuracy difference from 144 positions. Bold
+marks the default setting.
+rate. This criterion captures scattered texture regions that a
+centroid-only statistic would miss.
+Appearance and content.
+We compare observations as-
+signed to the same memory entry but appearing at differ-
+ent slot indices with pairs assigned to different entries. The
+raw cosine gap is 0.036 and increases to 0.126 after sub-
+tracting the per-clip mean direction. A ridge probe predict-
+ing attention-pooled SigLIP appearance from the slot vector
+raises held-out R2 by 0.26 over a slot-index baseline. Slot
+vectors contain object content, but raw cosine geometry is
+a weak semantic readout. This motivates pooled appearance
+Figure S3: ActivityNet-QA accuracy by question type. The
+dashed line marks the overall 50.34% accuracy.
+for token content while retaining slots for grouping. Because
+entry membership is model-assigned, this measures model
+consistency rather than ground-truth re-identification accu-
+racy.
+Temporal signal.
+Linear probes predict next-frame cen-
+troid velocity and normalized frame position from the 64-
+dimensional trajectory state. Their R2 values, 0.008 and -
+0.11, show little linearly readable motion or order under these
+probes. In contrast, the raw SigLIP patch grid covers 31% of
+the change from one-frame similarity toward the cross-video
+similarity floor by lag 20. If cd is the mean same-cell cosine
+similarity at lag d and c× is the cross-video cosine floor, the
+percentage is 100(c1−c20)/(c1−c×) when c1−c× > 10−6;
+otherwise, the diagnostic is undefined. The result identifies
+object pooling and state construction as a bottleneck for fine
+temporal order without ruling out nonlinear information or
+later losses in the language model.
+The probes support two different design conclusions. Ap-
+
+
+Figure S4: Representative ActivityNet-QA failures. Each row contains six event-aligned source-video frames. Red borders mark
+evidence that conflicts with the prediction. From top to bottom, the cases expose errors in temporal outcome, spatial support,
+association across cuts, and counting in a crowded scene.
+Diagnostic metric
+Result
+Fragmented object-slot rate (%)
+49
+Appearance gap, raw / bias-corrected
+0.036 / 0.126
+Additional explained appearance variance
+0.26
+State velocity / frame-order R2
+0.008 / -0.11
+Long-range patch feature change (%)
+31
+Table S5: Offline representation diagnostics. R2 denotes the
+coefficient of determination. Higher is better for appearance
+and temporal-signal measures; lower is better for fragmenta-
+tion.
+pearance remains present but is poorly exposed by raw
+slot cosine geometry, which supports using attention-pooled
+backbone features as token content. By contrast, the weak ve-
+locity and frame-order readouts indicate a genuine limitation
+of the current state pathway. These measurements diagnose
+the learned representation; they do not substitute for ground-
+truth tracking or persistence evaluation.
+D.5
+Question-Type Analysis
+Motion and location questions exceed the overall accuracy,
+whereas temporal and spatial questions remain substantially
+lower. The gap between motion (55.38%) and temporal ques-
+tions (31.25%) suggests that recognizing an action is easier
+than reasoning about event order. The lower color and ob-
+ject accuracies may reflect the loss of fine appearance details
+when evidence is pooled through imperfect slot masks.
+The categories use the answer-type labels released with
+Type
+#Q
+Share Correct
+Acc. Score
+Overall
+8000 100.00
+4027 50.34 3.468
+Yes/No
+2094
+26.18
+1264 60.36 4.554
+Other
+1499
+18.74
+848 56.57 3.372
+Temporal
+800
+10.00
+250 31.25 2.818
+Motion
+800
+10.00
+443 55.38 3.730
+Spatial
+800
+10.00
+246 30.75 2.776
+Color
+697
+8.71
+271 38.88 2.944
+Number
+606
+7.58
+287 47.36 3.449
+Location
+386
+4.83
+281 72.80 3.906
+Object
+318
+3.98
+137 43.08 2.941
+Table S6: ActivityNet-QA question-type results. Share and
+accuracy are percentages; Score uses the 0–5 GPT scale.
+ActivityNet-QA: Motion, Spatial, Temporal, Yes/No, Color,
+Object, Location, Number, and Other. They form a disjoint
+partition of all 8,000 evaluation questions. Table S6 includes
+counts and shares because the category sizes differ substan-
+tially, while Figure S3 shows the corresponding accuracy
+pattern. The breakdown is descriptive rather than a separate
+benchmark: it localizes the aggregate result without changing
+the evaluator or selecting a category-specific model.
+D.6
+Failure Cases
+Figure S4 complements the successful gallery with four dis-
+tinct errors. The model misses the bird’s final return, over-
+looks the mat below the parallel bars, confuses the target per-
+son after several cuts, and over-counts athletes in a crowded
+race. The first error is consistent with the weak trajectory
+
+
+probes in Appendix D.4; the remaining cases show how spa-
+tial context, object association, and crowded scenes can be
+lost in the compact object inventory.
+These examples were chosen to cover different failure
+mechanisms, not to estimate their frequency. Together with
+the quantitative diagnostics, they show that a compact object
+inventory can preserve answer-relevant evidence while still
+losing event order, contextual support, or a stable assignment
+in crowded and edited scenes.
+References
+Bolya, D.; Fu, C.-Y.; Dai, X.; Zhang, P.; Feichtenhofer, C.;
+and Hoffman, J. 2023. Token Merging: Your ViT but Faster.
+In International Conference on Learning Representations.
+Burgess, C. P.; Matthey, L.; Watters, N.; Kabra, R.; Higgins,
+I.; Botvinick, M.; and Lerchner, A. 2019. MONet: Unsu-
+pervised Scene Decomposition and Representation. arXiv
+preprint arXiv:1901.11390.
+Cai, M.; Yang, J.; Gao, J.; and Lee, Y. J. 2025. Matryoshka
+Multimodal Models. In International Conference on Learn-
+ing Representations.
+Chen, L.; Zhao, H.; Liu, T.; Bai, S.; Lin, J.; Zhou, C.; and
+Chang, B. 2024. An Image is Worth 1/2 Tokens After Layer
+2: Plug-and-Play Inference Acceleration for Large Vision-
+Language Models. In European Conference on Computer
+Vision, 19–35. Springer.
+Cheng, Z.; Leng, S.; Zhang, H.; Xin, Y.; Li, X.; Chen,
+G.; Zhu, Y.; Zhang, W.; Luo, Z.; Zhao, D.; et al. 2024.
+VideoLLaMA 2: Advancing Spatial-Temporal Modeling
+and Audio Understanding in Video-LLMs. arXiv preprint
+arXiv:2406.07476.
+Dai, W.; Li, J.; Li, D.; Tiong, A.; Zhao, J.; Wang, W.; Li,
+B.; Fung, P. N.; and Hoi, S. 2023. InstructBLIP: Towards
+General-Purpose Vision-Language Models with Instruction
+Tuning. In Advances in Neural Information Processing Sys-
+tems, volume 36, 49250–49267.
+Du, J.; Xue, J.; Li, A.; Dai, J.; and Lu, G. 2026. Unified Spa-
+tiotemporal Token Compression for Video-LLMs at Ultra-
+Low Retention. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, 17661–17671.
+Elsayed, G. F.; Mahendran, A.; van Steenkiste, S.; Greff, K.;
+Mozer, M. C.; and Kipf, T. 2022. SAVi++: Towards End-
+to-End Object-Centric Learning from Real-World Videos.
+In Advances in Neural Information Processing Systems, vol-
+ume 35.
+Feng, Y.; Li, Y.; Zhang, W.; Zheng, S.; Luo, H.; Yue, Z.;
+and Lu, Z. 2025. VideoOrion: Tokenizing Object Dynamics
+in Videos. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, 20401–20412.
+Greff, K.; Kaufman, R. L.; Kabra, R.; Watters, N.; Burgess,
+C.; Zoran, D.; Matthey, L.; Botvinick, M.; and Lerchner,
+A. 2019.
+Multi-Object Representation Learning with It-
+erative Variational Inference. In Proceedings of the 36th
+International Conference on Machine Learning, volume 97
+of Proceedings of Machine Learning Research, 2424–2433.
+PMLR.
+Grigore, D.-N.; Madan, N.; Mogelmose, A.; Moeslund, T. B.;
+and Ionescu, R. T. 2025. SlotMatch: Distilling Temporally
+Consistent Object-Centric Representations for Unsupervised
+Video Segmentation. arXiv preprint arXiv:2508.03411.
+He, B.; Li, H.; Jang, Y. K.; Jia, M.; Cao, X.; Shah, A.;
+Shrivastava, A.; and Lim, S.-N. 2024. MA-LMM: Memory-
+Augmented Large Multimodal Model for Long-Term Video
+Understanding. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, 13504–13514.
+Jiang, J.; Li, X.; Liu, Z.; Li, M.; Chen, G.; Li, Z.; Huang,
+D.-A.; Liu, G.; Yu, Z.; Keutzer, K.; Ahn, S.; Kautz, J.; Yin,
+H.; Lu, Y.; Han, S.; and Byeon, W. 2025. STORM: Token-
+Efficient Long Video Understanding for Multimodal LLMs.
+In Proceedings of the IEEE/CVF International Conference
+on Computer Vision Workshops, 5889–5900.
+Jin, P.; Takanobu, R.; Zhang, W.; Cao, X.; and Yuan, L. 2024.
+Chat-UniVi: Unified Visual Representation Empowers Large
+Language Models with Image and Video Understanding. In
+Proceedings of the IEEE/CVF Conference on Computer Vi-
+sion and Pattern Recognition, 13700–13710.
+Kipf, T.; Elsayed, G. F.; Mahendran, A.; Stone, A.; Sabour, S.;
+Heigold, G.; Jonschkowski, R.; Dosovitskiy, A.; and Greff,
+K. 2022. Conditional Object-Centric Learning from Video.
+In International Conference on Learning Representations.
+Lan, X.; Yuan, Y.; Jie, Z.; and Ma, L. 2024.
+VidCom-
+press: Memory-Enhanced Temporal Compression for Video
+Understanding in Large Language Models. arXiv preprint
+arXiv:2410.11417.
+Li, B.; Zhang, Y.; Guo, D.; Zhang, R.; Li, F.; Zhang, H.;
+Zhang, K.; Zhang, P.; Li, Y.; Liu, Z.; et al. 2024. LLaVA-
+OneVision: Easy Visual Task Transfer.
+arXiv preprint
+arXiv:2408.03326.
+Li, H.; Chen, J.; Wei, Z.; Huang, S.; Hui, T.; Gao, J.; Wei, X.;
+and Liu, S. 2025. LLaVA-ST: A Multimodal Large Language
+Model for Fine-Grained Spatial-Temporal Understanding. In
+Proceedings of the IEEE/CVF Conference on Computer Vi-
+sion and Pattern Recognition, 8592–8603.
+Li, J.; Li, D.; Savarese, S.; and Hoi, S. 2023. BLIP-2: Boot-
+strapping Language-Image Pre-Training with Frozen Image
+Encoders and Large Language Models. In International Con-
+ference on Machine Learning, 19730–19742. PMLR.
+Li, Y.; Wang, C.; and Jia, J. 2024. LLaMA-VID: An Image
+is Worth 2 Tokens in Large Language Models. In European
+Conference on Computer Vision, 323–340. Springer.
+Lin, B.; Ye, Y.; Zhu, B.; Cui, J.; Ning, M.; Jin, P.; and Yuan,
+L. 2024. Video-LLaVA: Learning United Visual Represen-
+tation by Alignment Before Projection. In Proceedings of the
+2024 Conference on Empirical Methods in Natural Language
+Processing, 5971–5984.
+Locatello, F.; Weissenborn, D.; Unterthiner, T.; Mahendran,
+A.; Heigold, G.; Uszkoreit, J.; Dosovitskiy, A.; and Kipf,
+T. 2020. Object-Centric Learning with Slot Attention. In
+Advances in Neural Information Processing Systems, vol-
+ume 33, 11525–11538.
+Ma, F.; Jin, X.; Wang, H.; Xian, Y.; Feng, J.; and Yang, Y.
+2024. VISTA-LLAMA: Reducing Hallucination in Video
+
+
+Language Models via Equal Distance to Visual Tokens. In
+Proceedings of the IEEE/CVF Conference on Computer Vi-
+sion and Pattern Recognition, 13151–13160.
+Maaz, M.; Rasheed, H.; Khan, S.; and Khan, F. 2024. Video-
+ChatGPT: Towards Detailed Video Understanding via Large
+Vision and Language Models. In Proceedings of the 62nd
+Annual Meeting of the Association for Computational Lin-
+guistics (Volume 1: Long Papers), 12585–12602.
+Manasyan, A.; Seitzer, M.; Radovic, F.; Martius, G.; and
+Zadaianchuk, A. 2025.
+Temporally Consistent Object-
+Centric Learning by Contrasting Slots. In Proceedings of
+the Computer Vision and Pattern Recognition Conference,
+5401–5411.
+Ryoo, M. S.; Piergiovanni, A.; Arnab, A.; Dehghani, M.; and
+Angelova, A. 2021.
+TokenLearner: Adaptive Space-Time
+Tokenization for Videos. In Advances in Neural Informa-
+tion Processing Systems, volume 34, 12786–12797. Curran
+Associates, Inc.
+Seitzer, M.; Horn, M.; Zadaianchuk, A.; Zietlow, D.; Xiao,
+T.; Simon-Gabriel, C.-J.; He, T.; Zhang, Z.; Schölkopf, B.;
+Brox, T.; et al. 2023. Bridging the Gap to Real-World Object-
+Centric Learning. In International Conference on Learning
+Representations.
+Seong, H. S.; Moon, W.; and Heo, J.-P. 2026. From Vicious
+to Virtuous Cycles: Synergistic Representation Learning for
+Unsupervised Video Object-Centric Learning. In Interna-
+tional Conference on Learning Representations.
+Shao, K.; Tao, K.; Qin, C.; You, H.; Sui, Y.; and Wang,
+H. 2025. HoliTom: Holistic Token Merging for Fast Video
+Large Language Models. In Advances in Neural Information
+Processing Systems, volume 38, 135547–135570.
+Shen, L.; Gong, G.; He, T.; Zhang, Y.; Liu, P.; Zhao, S.;
+and Ding, G. 2025a. FastVID: Dynamic Density Pruning
+for Fast Video Large Language Models.
+In Advances in
+Neural Information Processing Systems, volume 38, 123553–
+123581.
+Shen, X.; Xiong, Y.; Zhao, C.; Wu, L.; Chen, J.; Zhu, C.;
+Liu, Z.; Xiao, F.; Varadarajan, B.; Bordes, F.; Liu, Z.; Xu,
+H.; Kim, H. J.; Soran, B.; Krishnamoorthi, R.; Elhoseiny, M.;
+and Chandra, V. 2025b. LongVU: Spatiotemporal Adaptive
+Compression for Long Video-Language Understanding. In
+Proceedings of the 42nd International Conference on Ma-
+chine Learning, volume 267 of Proceedings of Machine
+Learning Research, 54582–54599. PMLR.
+Singh, G.; Deng, F.; and Ahn, S. 2022. Illiterate DALL-E
+Learns to Compose. In International Conference on Learn-
+ing Representations.
+Song, E.; Chai, W.; Wang, G.; Zhang, Y.; Zhou, H.; Wu, F.;
+Chi, H.; Guo, X.; Ye, T.; Zhang, Y.; et al. 2024. MovieChat:
+From Dense Token to Sparse Memory for Long Video Un-
+derstanding. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, 18221–18232.
+Tran, S.; Nguyen, D.; Vo, H.; Vo, K.; and Le, N. 2026.
+Dual-State Slot Attention: Decoupling Appearance and Iden-
+tity for Video Object-Centric Learning.
+arXiv preprint
+arXiv:2606.12601.
+Wang, P.; Bai, S.; Tan, S.; Wang, S.; Fan, Z.; Bai, J.; Chen, K.;
+Liu, X.; Wang, J.; Ge, W.; et al. 2024. Qwen2-VL: Enhancing
+Vision-Language Model’s Perception of the World at Any
+Resolution. arXiv preprint arXiv:2409.12191.
+Wu, Z.; Dvornik, N.; Greff, K.; Kipf, T.; and Garg, A.
+2023. SlotFormer: Unsupervised Visual Dynamics Simu-
+lation with Object-Centric Models. In International Confer-
+ence on Learning Representations.
+Xu, D.; Zhao, Z.; Xiao, J.; Wu, F.; Zhang, H.; He, X.; and
+Zhuang, Y. 2017.
+Video Question Answering via Grad-
+ually Refined Attention over Appearance and Motion. In
+Proceedings of the 25th ACM International Conference on
+Multimedia, 1645–1653.
+Xu, J.; Lan, C.; Xie, W.; Chen, X.; and Lu, Y. 2024. Slot-
+VLM: Object-Event Slots for Video-Language Modeling. In
+Advances in Neural Information Processing Systems, vol-
+ume 37.
+Xu, M.; Gao, M.; Gan, Z.; Chen, H.-Y.; Lai, Z.; Gang, H.;
+Kang, K.; and Dehghan, A. 2025.
+SlowFast-LLaVA: A
+Strong Training-Free Baseline for Video Large Language
+Models. In International Conference on Learning Represen-
+tations.
+Yang, A.; Yang, B.; Hui, B.; Zheng, B.; Yu, B.; Zhou, C.; Li,
+C.; Li, C.; Liu, D.; Huang, F.; et al. 2024. Qwen2 Technical
+Report. arXiv preprint arXiv:2407.10671.
+Yang, S.; Chen, Y.; Tian, Z.; Wang, C.; Li, J.; Yu, B.; and Jia,
+J. 2025. VisionZip: Longer is Better but Not Necessary in
+Vision Language Models. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+19792–19802.
+Yashima, D.; Kurita, S.; Oda, Y.; and Sugiura, K. 2026.
+ReMoRa: Multimodal Large Language Model Based on Re-
+fined Motion Representation for Long-Video Understanding.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, 31845–31855.
+Yu, Z.; Xu, D.; Yu, J.; Yu, T.; Zhao, Z.; Zhuang, Y.; and
+Tao, D. 2019. ActivityNet-QA: A Dataset for Understanding
+Complex Web Videos via Question Answering.
+In Pro-
+ceedings of the AAAI Conference on Artificial Intelligence,
+volume 33, 9127–9134.
+Zadaianchuk, A.; Seitzer, M.; and Martius, G. 2023. Object-
+Centric Learning for Real-World Videos by Predicting Tem-
+poral Feature Similarities. In Advances in Neural Information
+Processing Systems, volume 36, 61514–61545.
+Zhai, X.; Mustafa, B.; Kolesnikov, A.; and Beyer, L. 2023.
+Sigmoid Loss for Language Image Pre-Training. In Proceed-
+ings of the IEEE/CVF International Conference on Computer
+Vision, 11975–11986.
+Zhang, H.; and Fu, Y. 2025. VQToken: Neural Discrete To-
+ken Representation Learning for Extreme Token Reduction
+in Video Large Language Models. In Advances in Neural
+Information Processing Systems, volume 38, 32851–32869.
+Zhang, H.; Li, X.; and Bing, L. 2023. Video-LLaMA: An
+Instruction-Tuned Audio-Visual Language Model for Video
+Understanding. In Proceedings of the 2023 Conference on
+Empirical Methods in Natural Language Processing: System
+Demonstrations, 543–553.
+
+
+Zhang, Y.; Wu, J.; Li, W.; Li, B.; Ma, Z.; Liu, Z.; and Li,
+C. 2024. LLaVA-Video: Video Instruction Tuning with Syn-
+thetic Data. arXiv preprint arXiv:2410.02713.
+Zhao, Z.; Huo, Y.; Yue, T.; Guo, L.; Lu, H.; Wang, B.; Chen,
+W.; and Liu, J. 2025. Efficient Motion-Aware Video MLLM.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, 24159–24168.
+Zheng, C.; Zhang, J.; Salehi, M.; Gao, Z.; Iyengar, V.; Kobori,
+N.; Kong, Q.; and Krishna, R. 2025. One Trajectory, One To-
+ken: Grounded Video Tokenization via Panoptic Sub-object
+Trajectory. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, 23156–23166.
+Zheng, C.; Zhang, J.; Zhang, J.; Huang, W.; Kumar, A.; Kong,
+Q.; Tuzel, O.; Li, C.-L.; and Krishna, R. 2026. TrajTok:
+Learning Trajectory Tokens Enhances Video Understanding.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, 31207–31218.

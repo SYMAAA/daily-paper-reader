@@ -1,0 +1,1343 @@
+Adaptive Two-Stage Visual Token Pruning for Efficient Inference in
+Video-Language Models
+Paribesh Regmi*, Qingshuang Chen, Chi Zhang, Heba Aly, Yelin Kim, Hongda Mao
+Amazon.com Services LLC
+paribesh@amazon.com
+Abstract
+Vision-language models excel at image and video under-
+standing but suffer from high inference latency due to the
+need to process thousands of tokens per image, limiting
+their deployment on resource-constrained edge devices and
+in real-time surveillance applications. This challenge is fur-
+ther amplified in video processing, where multiple frames
+must be analyzed simultaneously. Existing token reduction
+techniques are largely developed for single-image inputs
+and therefore fail to account for the temporal and inter-
+frame redundancies present in video sequences. In addition,
+these methods generally rely on a fixed, uniform pruning ra-
+tio applied across all inputs, which is suboptimal because
+the degree of redundancy can vary significantly between dif-
+ferent videos, necessitating content-dependent pruning lev-
+els to preserve critical information. To address these lim-
+itations, we propose a two-stage adaptive token pruning
+strategy specifically designed for video processing. In the
+first stage, we prune out the redundant frames, and in the
+second stage, token-level pruning is applied within the re-
+tained frames. Crucially, the pruning ratio in the second
+stage is determined adaptively based on the content of each
+video. This is achieved by analyzing the correlation struc-
+ture of token embeddings to quantify redundancy, which is
+used to determine the ratio. Importantly, our method is en-
+tirely post-hoc and requires no additional training or fine-
+tuning, while achieving strong empirical gains; notably, it
+improves accuracy by +7% on a video captioning bench-
+mark at 10% token retention, while reducing computation
+TFLOPs by 95%.
+1. Introduction
+Vision-Language
+Models
+(VLMs)
+have
+demonstrated
+strong performance across image and video understanding
+tasks [2, 6, 13, 30, 32]. The models encode visual inputs
+into token embeddings using a vision encoder and input
+*Work done during internship at Amazon.
+them to a Large Language Model (LLM), together with
+textual instructions, to generate semantic descriptions of
+the visual content. Notably, encoding a single image can
+yield thousands of tokens, which imposes substantial com-
+putational overhead, as the processing cost of the LLM in-
+creases quadratically with the token sequence length. This
+challenge is further exacerbated in video processing, where
+multiple frames must be encoded and processed simulta-
+neously. For example, in LLaVA-Video, each frame pro-
+duces roughly 180 visual tokens; thus, a moderate 5-minute
+clip sampled at 5 fps already yields ∼11k tokens, making
+quadratic-time processing prohibitively expensive for low-
+resource edge devices.
+To address this, token reduction
+methods have been developed to reduce the number of to-
+kens and feed only a fraction of them to the LLM decoder
+[1, 4, 11, 15, 20, 24, 25].
+Token reduction methods aim to retain only a subset of
+the most informative tokens from the visual input. One line
+of work trains a dedicated compressor or selector module
+to map the original tokens into a substantially smaller set
+[11, 15], but this approach requires additional training and
+cannot be seamlessly applied to pre-trained vision-language
+models. An alternative line of research develops training-
+free pruning strategies [1, 4, 20, 24, 29], which eliminate to-
+kens without retraining. However, these methods are mostly
+designed for single-image inputs and largely overlook tem-
+poral redundancy across video frames. We argue that such
+strategies are suboptimal for video understanding tasks, and
+explicitly accounting for temporal redundancy yields more
+effective token reduction.
+These approaches can be broadly categorized into
+attention-based
+pruning
+methods
+[4,
+20,
+29]
+and
+embedding-based pruning methods [1, 24],
+with the
+latter generally achieving superior performance.
+While
+these methods propose strategies for identifying represen-
+tative tokens, most of them lack a principled mechanism
+for determining how many tokens are required to faithfully
+preserve visual information. This is critical, since different
+videos demand different length of tokens depending on the
+dynamism of their content. Using more tokens than nec-
+1
+arXiv:2608.03112v1  [cs.CV]  4 Aug 2026
+
+
+essary leads to inefficiency, whereas using fewer degrades
+performance.
+LLaVA-Scissor [24] merges semantically
+related components into a single token, effectively ending
+up with a different number of tokens for different inputs.
+However, its chain-merging procedure may conflate com-
+ponents where the endpoints exhibit weak or no semantic
+similarity, potentially leading to information loss. Thus, we
+lack a principled method to reliably estimate the number of
+tokens necessary to represent the information content of a
+given visual input.
+To address the two challenges, we develop a novel two-
+stage adaptive token pruning strategy in which, first we re-
+duce temporal redundancy by selecting the most informa-
+tive frames, thereby discarding visually similar frames. In
+the second stage, we perform token-level pruning on the
+embeddings of the selected frames to further eliminate spa-
+tial redundancy. To determine how many tokens should be
+retained in this second stage, we propose a principled ap-
+proach to estimate redundancy in the token embeddings.
+Specifically, we analyze the linear correlation structure
+among the embeddings by performing eigen-decomposition
+of their correlation matrix. The resulting eigenvalues cap-
+ture the variance explained by different components, and
+their distribution provides a quantitative measure of redun-
+dancy: if a few dominant eigenvalues explain most of the
+variance, the embeddings are highly redundant; conversely,
+a flatter distribution indicates greater diversity. To charac-
+terize this distribution, we fit the eigenvalue spectrum with
+an exponentially decaying function and extract its decay
+rate. A higher decay rate corresponds to stronger redun-
+dancy, implying that fewer tokens are sufficient to represent
+the visual input, while a slower decay indicates the need to
+retain more tokens. Accordingly, we define the retention
+ratio to be inversely proportional to the decay rate.
+In summary, our contributions are threefold:
+• We design a two-stage pruning pipeline combining frame
+and token selection, allowing the model to discard redun-
+dant visual information progressively.
+• We introduce a data-driven pruning ratio based on token
+correlation, eliminating the manually chosen one-size-
+fits-all ratio.
+• We show consistent accuracy gains across three VLMs
+and five datasets at high pruning ratios, demonstrating
+that our pruning strategy preserves semantic fidelity while
+significantly reducing computation.
+Unlike prior fixed-ratio pruning methods, our method de-
+termines the pruning ratio for each video based on its con-
+tent.
+2. Related Works
+2.1. Small-Scale VLMs
+Due to the high computational demands of large VLMs, re-
+cent research has focused on developing algorithms that en-
+hance efficiency without sacrificing performance. One line
+of work proposes training strategies to boost the capabilities
+of VLMs with relatively small parameter sizes [10, 21, 31].
+Another line of work propose knowledge distillation tech-
+niques, transferring knowledge from large-scale models to
+their smaller counterparts [3, 23]. However, due to their
+small size, these models lose the powerful generation capa-
+bility of the large-parameter models, and significantly fall
+behind in performance.
+2.2. Visual Token Reduction
+VLMs typically process thousands of visual tokens, and
+their computational complexity scales quadratically with
+input length. Thus, another line of research improves ef-
+ficiency not by reducing model size, but by reducing the
+number of visual tokens [1, 9, 15, 20, 22, 24]. Video-XL-
+Pro [15] trains a compressor module that compresses a large
+number of tokens into one.
+LongVU [22] and LLaMA-
+Vid [14] improve efficiency through query-based selection
+of salient tokens using attention layers. Other approaches,
+such as VideoLLaMB [26] and VideoLLaMA2 [5], adopt
+token compression mechanisms, for example training an
+additional compressor module, via convolutional layers or
+memory bridges that aggregate multiple visual tokens into
+a single memory token. A key limitation of these methods
+is the need for training or fine-tuning additional compressor
+modules, which restricts their applicability to off-the-shelf
+VLMs.
+There are training-free methods that can be directly used
+to reduce visual tokens in off-the-shelf VLMs [1, 4, 9, 20,
+24, 25, 28, 29]. Among these, PruMerge [20], ATP [29],
+and FastV [4] reduce tokens by selecting only the “impor-
+tant tokens” from all visual tokens, where importance is
+estimated based on the total attention a token receives in
+the self-attention layers of either the vision encoder or the
+LLM component of the VLM. However, it turns out that
+attention scores are not the sole indicators of token impor-
+tance [8]. DivPrune [1] selects a fixed number of visual
+tokens by maximizing diversity, thereby retaining the least
+redundant subset. Diversity is measured via cosine simi-
+larity between token embeddings, and the method demon-
+strates improved performance over attention-based selec-
+tion. However, it requires a pre-determined number of to-
+kens (fixed retention ratio) for all inputs, adopting a one-
+size-fits-all strategy. This is suboptimal since inputs vary
+in redundancy, and the number of tokens needed to ade-
+quately represent information differs across cases. More-
+over, DivPrune is designed to address only spatial redun-
+2
+
+
+(a)
+(b)
+Figure 1. (a) A general block diagram of a VLM with our pruning algorithm applied on top of the vision encoder. (b) Two-stage pruning:
+we use a diversity-based selection [1] to select a diverse subset of M ′ frames out of the total N ′ frames in the first stage, γ being the
+retention ratio. In the second stage, we prune at the token level where the retention ratio β is determined based on the video content. The
+overall retained compute budget is therefore γ (frame retention) × β (token retention).
+dancy in images, whereas video inputs span multiple frames
+and could benefit from temporal pruning, such as discard-
+ing redundant frames entirely. LLaVA-Scissor [24] extends
+this line of work with a graph-based token compression
+method. It constructs a graph where nodes represent tokens
+and edges connect similar tokens, then merges all tokens
+within each connected component into a single representa-
+tive token. Unlike DivPrune, LLaVA-Scissor incorporates
+both spatial- and temporal-level pruning, and the number
+of retained tokens adapts to each video, overcoming the
+fixed-token limitation. A limitation, however, arises from
+the transitivity of connectivity: in long chains of connected
+components, tokens at the ends may be grouped together
+despite being semantically dissimilar, leading to potential
+loss of distinct information. Also, the computation of con-
+nected components is in itself a computationally expensive
+operation.
+To address the shortcomings of DivPrune [1], we pro-
+pose a two-stage pruning algorithm: frame-level (temporal)
+pruning in the first stage, followed by token-level (spatial)
+pruning in the second. Furthermore, to overcome the limi-
+tation of a fixed retention ratio, the second stage adaptively
+determines the ratio based on video content by analyzing
+correlations among visual tokens.
+2.3. Correlation-based Pruning Methods
+Spectral and correlation-based criteria have long been used
+to identify redundancy for pruning and compression. Early
+work used principal-component analysis of activations to
+remove redundant parameters [12]. More recently, heavy-
+tailed spectral analysis of weight matrices has been used to
+allocate layer-wise sparsity in large language models [17],
+and low-rank / SVD approaches have been applied to com-
+press and prune weights while preserving model behavior.
+Moreover, the previously discussed methods, DivPrune [1]
+and LLaVA-Scissor [24], also exploit correlations between
+token embeddings to either select or merge tokens. In this
+work, we leverage the correlation matrix as an indicator of
+redundancy, using it to estimate the number of tokens re-
+quired to effectively represent the visual information con-
+tent.
+3. Methodology
+In this section, we first present our two-stage pruning
+method, followed by our strategy to adaptively determine
+the retention ratio.
+3.1. Two-Stage Pruning
+Most existing token pruning methods are developed for
+single-image inputs, and while they can be directly applied
+to videos by pruning tokens across all frames, we find this
+approach to be suboptimal. Unlike static images, videos in-
+troduce redundancy at multiple levels: both across frames
+(temporal redundancy) and within frames (spatial/token-
+level redundancy). Simply pruning tokens without address-
+ing redundant frames risks wasting computation on visually
+similar frames and reduces the potential efficiency gains.
+To address this, we propose a novel two-stage pruning
+strategy tailored for video inputs in which first we perform
+frame-level pruning by carrying out diversity-based selec-
+3
+
+
+Figure 2. Determining the retention ratio β. After N tokens are obtained from the first-stage pruning (Figure 1(b)), pairwise correlations
+are computed to construct a correlation matrix. The eigenvalues of this matrix are then calculated, providing information about the
+degree of correlation (or redundancy) among the tokens. To quantify this, the eigenvalues are ordered in descending magnitude and an
+exponential curve is fitted to estimate the decay rate, which reflects the level of redundancy. Finally, the retention ratio is defined as
+inversely proportional to the decay rate.
+Figure 3. Demonstration of the eigenvalue spectrum for two representative videos. The top panel corresponds to a video captured from
+inside a moving car, featuring highly dynamic scenes, substantial camera motion, and multiple distinct activities across different scenes.
+The bottom panel shows a person rolling a ball down an incline, where the activity is repetitive throughout the video and the camera
+remains relatively static, focusing on a single scene. We perform eigen-decomposition of the token correlation matrix as described in
+Figure 2, and the rightmost subfigure presents the corresponding eigenvalue spectra. For the dynamic video (top), the eigenvalues decay
+gradually, indicating that significant information is distributed across multiple modes. In contrast, for the static, repetitive video (bottom),
+the eigenvalues exhibit a steep decay, with most of the energy concentrated in the first eigenvalue
+tion of a subset of frames, thereby discarding redundant
+frames that contribute little new information. In the sec-
+ond stage, we apply token-level pruning within the retained
+frames to remove redundant visual tokens while preserving
+essential content. This hierarchical pruning process is in-
+spired by the inherent structure of video data and ensures
+that redundancy is addressed both temporally and spatially,
+and experiments show that this two-stage approach leads
+to more effective pruning, maintaining stronger video un-
+derstanding performance compared to applying token-level
+pruning alone.
+Figure 4 shows the results reported on two benchmark
+datasets by varying the retention ratios γ and β. The ex-
+periments are conducted on LLaVA-Video, where a frame-
+level feature is obtained by averaging all the token embed-
+dings belonging to the frame. In this experiment, we use
+diversity-based pruning [1] in both stages. While all config-
+urations share the same net retention ratio, we observe that
+performance is sensitive to the allocation of pruning in the
+two stages. In particular, the two-stage settings outperform
+the single-stage baseline on both datasets. This sensitivity
+underlines the relevance of our two-stage design: by explic-
+itly accounting for redundancy at both the frame and token
+levels, the method identifies a balance point that preserves
+4
+
+
+Figure 4.
+Performance of single-stage and two-stage pruning
+methods, using diversity-based pruning (DivPrune) in both stages
+in a LLaVA-Video model. γ & β are retention ratios for frame-
+level and token-level pruning respectively. The total retention ra-
+tio (γ × β) is kept constant; a value of γ = 1 corresponds to
+single-stage pruning. The accuracy for VideoDC and VideoChat-
+GPT datasets is reported. The plot shows that the optimal setting
+lies in two-stage pruning, which renders single-stage strategy sub-
+optimal.
+the most informative content while discarding redundancy
+more effectively than single-stage pruning.
+3.2. Adaptive Retention Ratio
+Vision encoders such as CLIP and SigLIP, widely used in
+vision–language models, are trained with a contrastive ob-
+jective that optimize the cosine distance between visual em-
+beddings and their corresponding textual descriptions. This
+training objective encourages the embeddings to preserve
+linear relationships in the embedding space: semantically
+similar patches exhibit high cosine similarity and vice versa.
+Thus, linear correlation between the visual embeddings in-
+forms about the redundancy in the visual information input
+to the model. We propose to leveraging this information to
+estimate the number of visual tokens required to adequately
+represent the information in the input. A higher degree of
+correlation indicates greater redundancy, allowing the con-
+tent to be represented with fewer tokens, whereas lower cor-
+relation suggests the need to retain more tokens to preserve
+information.
+We propose to analyze redundancy in token embeddings
+through a linear decomposition of their correlation matrix.
+Specifically, we perform eigen-decomposition to obtain the
+eigenvalues, which capture the variance explained by each
+constituent component.
+The distribution of these values
+provides a quantitative measure of correlation among to-
+kens: a small number of dominant principal values indicates
+high redundancy, whereas a more uniform distribution sug-
+gests greater diversity. We fit the sequence of eigenvalues
+with an exponentially decaying function, since exponen-
+Algorithm 1 Obtaining the adaptive retention ratio β
+Require: Token embeddings {xt}T
+t=1, scaling coefficient
+κ, number of required eigenvalues K.
+1: Obtain top-K eigenvalues via low-rank SVD:
+λ1, . . . , λK = SVD lowrank({xt}, K)
+2: Form the sequence of index–value data pairs:
+(n, λn) for n = 1, . . . , K
+3: Estimate the decay rate by fitting the following curve to
+the data pairs:
+log λn = log A −αn
+4: Compute the pruning ratio:
+β = κ/α
+5: return β
+tial decay matches the empirically observed fast eigenvalue
+drop-off in redundant videos. This process is illustrated in
+Figure 2. The rate of decay serves as an indicator of the
+degree of correlation in the tokens.
+We begin by constructing the correlation matrix of the
+token embeddings and performing eigen-decomposition to
+obtain the eigenvalues λ1 ≥λ2 ≥· · · ≥λT . These eigen-
+values characterize the distribution of variance among the
+tokens: a spectrum dominated by a few large values indi-
+cates high redundancy, whereas a flatter spectrum reflects
+greater diversity. To quantify this redundancy, we model the
+eigenvalue spectrum with an exponential decay function:
+λn = Ae−αn
+(1)
+where n is the rank index and α is the decay rate. Taking
+the logarithm yields a log–linear relation,
+log λn = log A −αn,
+(2)
+which allows us to estimate α by fitting a straight line to
+(n, log λn).
+In practice, we use the top 32 eigenvalues,
+which capture most of the spectral energy and provide a
+stable estimate of the decay trend, while the smaller eigen-
+values, which contribute little meaningful information, have
+minimal effect on the spectrum’s shape. A larger value of
+k indicates faster decay of the spectrum and thus higher
+redundancy among tokens, while a smaller value suggests
+greater diversity in the token representations as shown in
+Figure 3. We employ a low-rank SVD (singular valued de-
+composition) approximation using iterative power methods
+to compute only the top 32 eigenvalues, providing a fast and
+memory-efficient alternative to full decomposition. This re-
+duces the cubic time complexity of full decomposition to
+5
+
+
+roughly quadratic in the matrix size, making it scalable for
+large token sets.
+Based on this redundancy score, we define the pruning
+ratio as
+β = κ
+α
+(3)
+where κ is a scaling factor that controls the overall prun-
+ing strength. An algorithm for estimating β is presented in
+Algorithm 1. Since α is derived from the eigenvalue spec-
+trum of each video, the resulting pruning ratio β is content-
+dependent and adapts automatically to the redundancy level
+of individual videos. This decay-rate-based pruning ratio
+serves as the basis for our adaptive token pruning frame-
+work.
+4. Experiments
+We conduct a series of experiments to assess the effective-
+ness of our proposed method. First, we evaluate the perfor-
+mance of our method at different retention ratios by com-
+paring it against the state-of-the-art training-free pruning
+baselines for the LLaVA-Video [30] model. Next, we ex-
+tend this comparison to other popular VLMs: InternVL3
+[32] and Qwen2.5VL [2]. Then, we assess how the perfor-
+mance generalizes to different parameter sizes of the VLMs.
+Finally, we ablate between linear, quadratic, and exponen-
+tial decay rates for our method and compare the resulting
+performance under each setting. All experiments are con-
+duced on NVIDIA L40S GPU with 48GB memory.
+4.1. Performance Comparison on LLaVA-Video
+We compare the performance of baselines and our method
+on the LLaVA-Video [30] model with 7B parameters.
+Video Datasets: The models are evaluated on video cap-
+tioning dataset VideoDetailCaption (VideoDC) [16], open-
+ended QA dataset VideoChatGPT [18], and three multi-
+ple choice datasets NextQA [27], PerceptionTest [19], and
+Video-MME [7].
+Baselines: We consider five training-free token prun-
+ing baselines: PruMerge [20], FastV [4], AvgPool from
+Dynamic-VLM [25], DivPrune [1], and LLaVA-Scissor
+[24]. We compare the models for 30%, 15% and 10% re-
+tention ratios. For our method, since the retention ratio is
+different for different videos, we set the hyperparameter κ
+such that on average the ratio is the same as baselines.
+Metrics:
+For video captioning and open-ended QA
+datasets, we report the percentage accuracy and score (out
+of 5) of the predictions. These are obtained by prompting an
+LLM (Claude sonnet 3.7) to rate the prediction as compared
+the the ground truth answer. For multiple choice datasets,
+we report the percentage accuracy of the predictions.
+The results are reported in Table 1. For all the baselines
+and our method, we observe a decrease in performance as
+the retention ratio decreases. Across all retention ratios,
+our method consistently outperforms the baseline. Further-
+more, we observe that in comparison with the multiple-
+choice QA tasks, the performance gain with our method
+is more significant in captioning (VideoDC) and the open-
+ended QA (VideoChatGPT) tasks. Specially for low reten-
+tion ratios (15% and 10%), we achieve over 6% improve-
+ment on VideoDC, and 2-4% improvement on VideoChat-
+GPT over the baselines.
+The last two columns of the table reports the time per
+token generation on the VideoDC dataset and the number
+of floating point operations in LLM for each retention ra-
+tios, measured in trillions (TFLOPs).
+On average, 250
+tokens are generated by each method, and the per-token
+time is calculated accordingly. It is observed that LLaVA-
+Scissor requires substantially more time than other meth-
+ods, as it computes all connected components of the sim-
+ilarity graph—an inherently expensive operation. In con-
+trast, our method is considerably more efficient. Although
+the token matrices have ranks on the order of thousands,
+only a small number of eigenvalues (32 in our case) are re-
+quired to estimate the decay rate α, which allows for low-
+rank SVD estimation, making the computation significantly
+cheaper than performing a full eigen-decomposition. From
+the last column, we observe that there is ∼83%, ∼93%,
+and ∼95.5% reduction in TFLOPs at 30%, 15%, and 10%
+retention ratios.
+Notably, at 30% retention in VideoDC
+and VideoChatGPT datasets, our method only suffers 2-
+3% drop in performance, while lowering the computational
+overhead by 83%.
+4.2. Extending Comparison to InternVL3 and
+Qwen2.5VL
+In Table 2, we extend the comparison of our method and
+baselines to other state-of-the-art vision-language models:
+InternVL3 [32] and Qwen2.5VL [2] of 8B and 7B param-
+eter sizes respectively. For comparison, we use the best
+baselines from Table 1 (Prumerge, DivPrune, and LLaVA-
+Scissor), and datasets from all 3 categories i.e. captioning
+(VideoDC), open-ended QA (VideoChatGPT) and multiple-
+choice QA (NextQA). The results shows that our method
+achieves the overall best performance, which is consistent
+with Table 1. This demonstrates the versatility of our adap-
+tive two-stage pruning approach across different VLMs.
+4.3. Performance Across Different Parameter Sizes
+of VLMs
+We analyze if the performance our method generalizes to
+with different parameter sizes of the VLM. To this end,
+we compare the performance of our method and DivPrune,
+which is the overall best baseline from Tables 1 & 2 on
+InternVL3 with 1B and 2B parameter sizes. Table 3 re-
+ports results on the video captioning (VideoDC) and multi-
+6
+
+
+Table 1. Comparison of different pruning/retention methods across five video-language benchmarks. VideoDC and Video-ChatGPT report
+both accuracy and score, while Next-QA, PerceptionTest, and Video-MME report accuracy only.
+%Retention
+Method
+VideoDC
+VideoChatGPT
+Next-QA
+PerceptionTest
+Video-MME
+Time (ms)
+TFLOPs
+Acc.
+Score
+Acc.
+Score
+Acc.
+Acc.
+Acc.
+100%
+Original
+86.57
+3.75
+72.44
+3.31
+83.21
+67.84
+63.66
+50.06
+87.9
+PruMerge
+65.33
+3.07
+54.74
+2.65
+77.58
+59.61
+57.33
+42.30
+FastV
+51.10
+2.66
+50.22
+0.54
+75.11
+56.97
+50.59
+41.30
+AvgPool
+78.15
+3.46
+65.88
+3.05
+80.26
+63.55
+59.44
+39.90
+30%
+DivPrune
+80.96
+3.55
+69.43
+3.18
+82.05
+65.05
+60.48
+41.44
+14.9
+LLaVA-Scissor
+79.15
+3.48
+65.69
+3.05
+81.35
+64.34
+59.15
+47.87
+Ours
+83.56
+3.61
+70.31
+3.21
+82.15
+65.93
+60.52
+42.19
+PruMerge
+52.90
+2.70
+48.82
+2.41
+75.08
+56.80
+54.74
+40.07
+FastV
+40.48
+2.35
+47.00
+2.42
+73.68
+56.39
+49.11
+40.97
+AvgPool
+66.73
+3.10
+55.15
+2.68
+77.23
+61.23
+56.00
+39.30
+15%
+DivPrune
+76.15
+3.40
+65.21
+3.02
+80.88
+63.70
+58.85
+39.30
+6.3
+LLaVA-Scissor
+65.13
+3.09
+56.52
+2.74
+79.60
+62.71
+56.33
+42.38
+Ours
+82.36
+3.58
+67.41
+3.09
+81.23
+64.46
+60.07
+39.37
+PruMerge
+36.47
+2.15
+39.31
+2.04
+70.96
+53.55
+51.07
+39.2
+FastV
+34.66
+2.13
+43.73
+2.31
+73.01
+56.17
+49.04
+39.86
+AvgPool
+52.30
+2.71
+47.54
+2.39
+73.77
+56.85
+53.37
+39.0
+10%
+DivPrune
+68.47
+3.19
+59.54
+2.84
+79.49
+61.55
+57.85
+38.7
+3.9
+LLaVA-Scissor
+60.32
+2.91
+54.20
+2.63
+78.67
+61.52
+55.74
+42.30
+Ours
+76.75
+3.41
+63.12
+2.95
+79.95
+62.62
+57.88
+38.87
+Table 2. Comparison of different pruning/retention methods across three video-language benchmarks, with separate blocks for InternVL
+and QwenVL. VideoDC and VideoChatGPT report both accuracy and score, while Next-QA reports accuracy only.
+InternVL3
+Qwen2.5VL
+%Retention
+Method
+VideoDC
+VideoChatGPT
+Next-QA
+VideoDC
+VideoChatGPT
+Next-QA
+Acc.
+Score
+Acc.
+Score
+Accuracy
+Acc.
+Score
+Acc.
+Score
+Accuracy
+PruMerge
+71.34
+2.75
+55.74
+2.75
+79.50
+79.35
+3.44
+64.31
+3.11
+81.60
+30%
+DivPrune
+75.35
+3.26
+57.3
+2.78
+81.76
+77.95
+3.43
+65.84
+3.15
+81.84
+LLaVA-Scissor
+74.14
+3.22
+56.97
+2.78
+81.79
+78.15
+3.38
+62.89
+3.04
+81.34
+Ours
+80.76
+3.41
+60.52
+2.86
+81.98
+79.36
+3.44
+65.92
+3.16
+81.89
+PruMerge
+63.73
+2.97
+51.06
+2.58
+76.12
+77.75
+3.40
+64.38
+3.09
+80.19
+15%
+DivPrune
+72.34
+3.14
+55.55
+2.71
+80.77
+75.75
+3.37
+65.95
+3.14
+80.85
+LLaVA-Scissor
+69.54
+3.09
+55.59
+2.69
+80.85
+65.53
+3.01
+58.36
+2.83
+79.40
+Ours
+76.75
+3.37
+57.73
+2.78
+81.85
+76.55
+3.38
+65.56
+3.13
+80.88
+PruMerge
+56.91
+3.21
+46.24
+2.43
+74.45
+76.35
+3.37
+63.83
+3.07
+79.15
+10%
+DivPrune
+64.13
+2.98
+53.35
+2.64
+79.57
+73.34
+3.26
+64.35
+3.06
+80.07
+LLaVA-Scissor
+69.53
+3.08
+55.10
+2.67
+80.44
+54.71
+2.71
+53.68
+2.63
+76.98
+Ours
+75.15
+3.26
+55.72
+2.69
+81.48
+75.15
+3.33
+64.36
+3.08
+80.18
+ple choice QA (NextQA) datasets, and our method has con-
+sistent and significant improvement over DivPrune across
+all retention ratios.
+Similar to table 1, the performance
+gain is considerably higher at lower retention ratios, and
+for the video captioning task as compared to the multiple
+choice QA task. This further demonstrates the versatility of
+our proposed method across different parameter sizes of the
+VLM.
+7
+
+
+Table 3. Comparison of DivPrune and Ours on VideoDC and Next-
+QA across InternVL model sizes (1B and 2B). Results are reported
+in accuracy (%) and score for VideoDC and accuracy for NextQA.
+InternVL-1B
+InternVL-2B
+VideoDC (Acc./Score)
+30%
+DivPrune
+62.53/2.89
+71.54/3.16
+Ours
+70.74/3.13
+73.54/3.17
+15%
+DivPrune
+64.53/2.95
+71.94/3.13
+Ours
+68.13/3.05
+75.15/3.18
+10%
+DivPrune
+61.52/2.85
+65.73/3.02
+Ours
+67.53/3.07
+74.14/3.22
+Next-QA (Acc.)
+30%
+DivPrune
+68.03
+73.08
+Ours
+69.12
+74.25
+15%
+DivPrune
+67.21
+71.99
+Ours
+69.29
+73.51
+10%
+DivPrune
+66.76
+70.84
+Ours
+68.65
+73.36
+Table 4. Ablation Study of the two components introduced in our
+method: two-stage pruning and adaptive retention ratio. We see
+that addition of each element improves upon the respective base-
+lines, and combining both achieves the best performance.
+DivPrune
+Two-Stage
+Ours
+VideoDC (Acc./Score)
+30%
+80.96/3.55
+82.16/3.60
+83.56/3.61
+15%
+76.15/3.40
+77.35/3.42
+82.36/3.58
+10%
+68.47/3.17
+69.27/3.19
+76.75/3.41
+VideoChatGPT (Acc./Score)
+30%
+69.43/3.18
+69.96/3.21
+70.31/3.21
+15%
+65.21/3.02
+66.55/3.08
+67.41/3.09
+10%
+59.54/2.84
+60.94/2.91
+63.12/2.95
+4.4. Ablation Study
+4.4.1. Ablation on Two-stage Pruning and Adaptive Re-
+tention Ratio
+To evaluate the effectiveness of the proposed two-stage
+pruning strategy, we conduct experiments by ablating its
+two components: two-stage pruning and adaptive retention
+ratio. Results on LLava-Video are reported in Table 4. The
+first column presents the DivPrune baseline, where pruning
+is performed in a single stage. The second column applies
+diversity-based selection, similar to DivPrune, but in two
+stages—pruning first at the frame level and then at the to-
+ken level. This outperforms the single-stage DivPrune base-
+line, demonstrating the effectiveness of the two-stage strat-
+Table 5. Ablation study on the choice of functional form for fitting
+the eigenvalue spectrum. We compare linear, quadratic, and expo-
+nential decay rates to obtain the adaptive retention ratio β. Results
+are reported on VideoDC dataset across different retention ratios.
+The exponential formulation demonstrates superior performance.
+Ret’n
+Linear
+Quadratic
+Exponential
+30%
+Acc.
+82.35
+82.36
+83.56
+Score
+3.61
+3.59
+3.61
+15%
+Acc.
+79.75
+79.35
+82.36
+Score
+3.49
+3.50
+3.58
+10%
+Acc.
+74.34
+75.35
+76.75
+Score
+3.35
+3.38
+3.41
+egy. The third column shows results from our full method,
+where the retention ratio β in the second stage is deter-
+mined adaptively. This further improves performance over
+the two-stage variant, demonstrating that adaptively deter-
+mining the retention ratio—thus allowing different levels of
+pruning for videos depending on their content—is consid-
+erably more effective than applying a fixed, one-size-fits-all
+retention ratio.
+4.4.2. Ablation on Decay Rates
+In Section 3.2, we introduced the use of an exponential fit
+to the eigenvalue spectrum in order to obtain an exponential
+decay rate α. In this section, we extend the analysis by ex-
+ploring alternative functional forms for modeling the decay,
+specifically a linear and a quadratic curves.
+λn = A −αn
+(Linear)
+(4)
+λn = A −αn2
+(Quadratic)
+(5)
+For each formulation, the decay rate α is used to derive the
+adaptive retention ratio β. Table 5 reports the compara-
+tive results. We observe that the exponential formulation
+achieves superior results overall, indicating that it provides
+a more faithful characterization of redundancy in the token
+embeddings.
+5. Conclusion
+We proposed a two-stage adaptive visual token pruning
+strategy for video inputs in vision-language models. Our
+adaptive strategy involves analyzing the linear correlation
+between the token embeddings to estimate the retention
+ratio for a video.
+Experiments show that the proposed
+method outperforms the training-free baselines across dif-
+ferent VLMs and parameter sizes, demonstrating its effec-
+tiveness and versatility. An interesting future exploration is
+to study the effect of fine-tuning VLM with the proposed
+strategy on performance.
+8
+
+
+References
+[1] Saeed Ranjbar Alvar, Gursimran Singh, Mohammad Akbari,
+and Yong Zhang. Divprune: Diversity-based visual token
+pruning for large multimodal models. In Proceedings of the
+Computer Vision and Pattern Recognition Conference, pages
+9392–9401, 2025. 1, 2, 3, 4, 6
+[2] Shuai Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin
+Ge, Sibo Song, Kai Dang, Peng Wang, Shijie Wang, Jun
+Tang, et al. Qwen2. 5-vl technical report. arXiv preprint
+arXiv:2502.13923, 2025. 1, 6
+[3] Yuxuan Cai, Jiangning Zhang, Haoyang He, Xinwei He,
+Ao Tong, Zhenye Gan, Chengjie Wang, Zhucun Xue, Yong
+Liu, and Xiang Bai.
+Llava-kd: A framework of distill-
+ing multimodal large language models.
+arXiv preprint
+arXiv:2410.16236, 2024. 2
+[4] Liang Chen, Haozhe Zhao, Tianyu Liu, Shuai Bai, Junyang
+Lin, Chang Zhou, and Baobao Chang. An image is worth 1/2
+tokens after layer 2: Plug-and-play inference acceleration for
+large vision-language models. In European Conference on
+Computer Vision, pages 19–35. Springer, 2024. 1, 2, 6
+[5] Zesen Cheng, Sicong Leng, Hang Zhang, Yifei Xin, Xin
+Li, Guanzheng Chen, Yongxin Zhu, Wenqi Zhang, Ziyang
+Luo, Deli Zhao, et al.
+Videollama 2: Advancing spatial-
+temporal modeling and audio understanding in video-llms.
+arXiv preprint arXiv:2406.07476, 2024. 2
+[6] Wenliang Dai, Junnan Li, Dongxu Li, Anthony Tiong, Junqi
+Zhao, Weisheng Wang, Boyang Li, Pascale N Fung, and
+Steven Hoi. Instructblip: Towards general-purpose vision-
+language models with instruction tuning. Advances in neural
+information processing systems, 36:49250–49267, 2023. 1
+[7] Chaoyou Fu, Yuhan Dai, Yongdong Luo, Lei Li, Shuhuai
+Ren, Renrui Zhang, Zihan Wang, Chenyu Zhou, Yunhang
+Shen, Mengdan Zhang, et al.
+Video-mme: The first-ever
+comprehensive evaluation benchmark of multi-modal llms in
+video analysis. In Proceedings of the Computer Vision and
+Pattern Recognition Conference, pages 24108–24118, 2025.
+6
+[8] Zhiyu Guo, Hidetaka Kamigaito, and Taro Watanabe. Atten-
+tion score is not all you need for token importance indicator
+in kv cache reduction: Value also matters. arXiv preprint
+arXiv:2406.12335, 2024. 2
+[9] Yuhang Han, Xuyang Liu, Zihan Zhang, Pengxiang Ding,
+Donglin Wang, Honggang Chen, Qingsen Yan, and Siteng
+Huang.
+Filter, correlate, compress:
+Training-free to-
+ken reduction for mllm acceleration.
+arXiv preprint
+arXiv:2411.17686, 2024. 2
+[10] Muyang He, Yexin Liu, Boya Wu, Jianhao Yuan, Yueze
+Wang, Tiejun Huang, and Bo Zhao.
+Efficient multi-
+modal learning from data-centric perspective. arXiv preprint
+arXiv:2402.11530, 2024. 2
+[11] Kai Huang, Hao Zou, Ye Xi, BoChen Wang, Zhen Xie, and
+Liang Yu. Ivtp: Instruction-guided visual token pruning for
+large vision-language models. In European Conference on
+Computer Vision, pages 214–230. Springer, 2024. 1
+[12] Asriel Levin, Todd Leen, and John Moody.
+Fast pruning
+using principal components. Advances in neural information
+processing systems, 6, 1993. 3
+[13] Bo Li, Yuanhan Zhang, Dong Guo, Renrui Zhang, Feng Li,
+Hao Zhang, Kaichen Zhang, Peiyuan Zhang, Yanwei Li, Zi-
+wei Liu, et al. Llava-onevision: Easy visual task transfer.
+arXiv preprint arXiv:2408.03326, 2024. 1
+[14] Yanwei Li, Chengyao Wang, and Jiaya Jia.
+Llama-vid:
+An image is worth 2 tokens in large language models. In
+European Conference on Computer Vision, pages 323–340.
+Springer, 2024. 2
+[15] Xiangrui Liu, Yan Shu, Zheng Liu, Ao Li, Yang Tian, and
+Bo Zhao.
+Video-xl-pro: Reconstructive token compres-
+sion for extremely long video understanding. arXiv preprint
+arXiv:2503.18478, 2025. 1, 2
+[16] LMMs-Lab.
+Video detail caption.
+Dataset available at
+HuggingFace, 2024.
+https://huggingface.co/
+datasets/lmms-lab/VideoDetailCaption. 6
+[17] Haiquan Lu, Yefan Zhou, Shiwei Liu, Zhangyang Wang,
+Michael W Mahoney, and Yaoqing Yang.
+Alphapruning:
+Using heavy-tailed self regularization theory for improved
+layer-wise pruning of large language models.
+Advances
+in neural information processing systems, 37:9117–9152,
+2024. 3
+[18] Muhammad Maaz, Hanoona Rasheed, Salman Khan, and Fa-
+had Shahbaz Khan. Video-chatgpt: Towards detailed video
+understanding via large vision and language models. arXiv
+preprint arXiv:2306.05424, 2023. 6
+[19] Viorica Patraucean, Lucas Smaira, Ankush Gupta, Adria Re-
+casens, Larisa Markeeva, Dylan Banarse, Skanda Koppula,
+Mateusz Malinowski, Yi Yang, Carl Doersch, et al.
+Per-
+ception test: A diagnostic benchmark for multimodal video
+models.
+Advances in Neural Information Processing Sys-
+tems, 36:42748–42761, 2023. 6
+[20] Yuzhang Shang, Mu Cai, Bingxin Xu, Yong Jae Lee, and Yan
+Yan. Llava-prumerge: Adaptive token reduction for efficient
+large multimodal models. arXiv preprint arXiv:2403.15388,
+2024. 1, 2, 6
+[21] Zhenwei Shao, Zhou Yu, Jun Yu, Xuecheng Ouyang, Lihao
+Zheng, Zhenbiao Gai, Mingyang Wang, Zhenzhong Kuang,
+and Jiajun Ding.
+Imp: Highly capable large multimodal
+models for mobile devices. IEEE Transactions on Multime-
+dia, 2025. 2
+[22] Xiaoqian Shen, Yunyang Xiong, Changsheng Zhao, Lemeng
+Wu, Jun Chen, Chenchen Zhu, Zechun Liu, Fanyi Xiao, Bal-
+akrishnan Varadarajan, Florian Bordes, et al. Longvu: Spa-
+tiotemporal adaptive compression for long video-language
+understanding. arXiv preprint arXiv:2410.17434, 2024. 2
+[23] Fangxun Shu, Yue Liao, Le Zhuo, Chenning Xu, Lei Zhang,
+Guanghao Zhang, Haonan Shi, Long Chen, Tao Zhong,
+Wanggui He, et al. Llava-mod: Making llava tiny via moe
+knowledge distillation.
+arXiv preprint arXiv:2408.15881,
+2024. 2
+[24] Boyuan Sun, Jiaxing Zhao, Xihan Wei, and Qibin Hou.
+Llava-scissor:
+Token compression with semantic con-
+nected components for video llms.
+arXiv preprint
+arXiv:2506.21862, 2025. 1, 2, 3, 6
+[25] Han Wang, Yuxiang Nie, Yongjie Ye, Deng GuanYu, Yanjie
+Wang, Shuai Li, Haiyang Yu, Jinghui Lu, and Can Huang.
+Dynamic-vlm: Simple dynamic visual token compression
+9
+
+
+for videollm. arXiv preprint arXiv:2412.09530, 2024. 1,
+2, 6
+[26] Yuxuan Wang, Cihang Xie, Yang Liu, and Zilong Zheng.
+Videollamb: Long-context video understanding with recur-
+rent memory bridges.
+arXiv preprint arXiv:2409.01071,
+2024. 2
+[27] Junbin Xiao, Xindi Shang, Angela Yao, and Tat-Seng Chua.
+Next-qa: Next phase of question-answering to explaining
+temporal actions.
+In Proceedings of the IEEE/CVF con-
+ference on computer vision and pattern recognition, pages
+9777–9786, 2021. 6
+[28] Cheng Yang, Yang Sui, Jinqi Xiao, Lingyi Huang, Yu Gong,
+Chendi Li, Jinghua Yan, Yu Bai, Ponnuswamy Sadayappan,
+Xia Hu, et al. Topv: Compatible token pruning with infer-
+ence time optimization for fast and low-memory multimodal
+vision language model.
+In Proceedings of the Computer
+Vision and Pattern Recognition Conference, pages 19803–
+19813, 2025. 2
+[29] Xubing Ye, Yukang Gan, Yixiao Ge, Xiao-Ping Zhang, and
+Yansong Tang. Atp-llava: Adaptive token pruning for large
+vision language models.
+In Proceedings of the Computer
+Vision and Pattern Recognition Conference, pages 24972–
+24982, 2025. 1, 2
+[30] Yuanhan Zhang, Jinming Wu, Wei Li, Bo Li, Zejun Ma, Zi-
+wei Liu, and Chunyuan Li. Video instruction tuning with
+synthetic data. arXiv preprint arXiv:2410.02713, 2024. 1, 6
+[31] Baichuan Zhou, Ying Hu, Xi Weng, Junlong Jia, Jie Luo,
+Xien Liu, Ji Wu, and Lei Huang.
+Tinyllava: A frame-
+work of small-scale large multimodal models. arXiv preprint
+arXiv:2402.14289, 2024. 2
+[32] Jinguo Zhu, Weiyun Wang, Zhe Chen, Zhaoyang Liu, Shen-
+glong Ye, Lixin Gu, Hao Tian, Yuchen Duan, Weijie Su,
+Jie Shao, et al. Internvl3: Exploring advanced training and
+test-time recipes for open-source multimodal models. arXiv
+preprint arXiv:2504.10479, 2025. 1, 6
+10
+
+
+Adaptive Two-Stage Visual Token Pruning for Efficient Inference in
+Video-Language Models
+Supplementary Material
+6. Hyperparameters for Our Method
+For generation with all methods, we select the token with
+highest probability score from the LLM output. Also, we
+use beam size of 1, and the number of maximum new to-
+kens is capped to 1024. A total of 64 frames were sampled
+from the videos for LLaVA-Video and InternVL follow-
+ing the original implementation. For QwenVL, we follow
+the original implementation to sample 2 frames per token,
+but limit the maximum frames to 64. We found out that
+γ = 0.5 was consistently better performing in all settings
+for LLaVA-Video and InternVL, whereas for QwenVL, we
+set γ = 1. The setting of hyperparameter κ for our method
+is detailed in Table 6.
+7. Prompt Used for Evaluation
+We queried the LLM Claude Sonnet 3.7 with the fol-
+lowing prompt to evaluate the generated response from
+VLMs. This prompt is copied from the LLaVA-NeXT repo
+(https://github.com/LLaVA-VL/LLaVA-NeXT):
+You are an intelligent chatbot designed for eval-
+uating the correctness of generative outputs for
+question-answer pairs. Your task is to compare the
+predicted answer with the correct answer and deter-
+mine if they match meaningfully. Here’s how you
+can accomplish the task
+##INSTRUCTIONS:
+- Focus on the meaningful match between the pre-
+dicted answer and the correct answer.
+- Consider synonyms or paraphrases as valid
+matches.
+- Evaluate the correctness of the prediction com-
+pared to the answer.
+Please evaluate the following video-based question-
+answer pair:
+Question: {question}
+Correct Answer: {answer}
+Predicted Answer: {pred}
+Provide your evaluation only as a yes/no and score
+where the score is an integer value between 0 and
+5, with 5 indicating the highest meaningful match.
+Please generate the response in the form of a Python
+dictionary string with keys ’pred’ and ’score’, where
+value of ’pred’ is a string of ’yes’ or ’no’ and value
+of ’score’ is an INTEGER, not STRING. DO NOT
+PROVIDE ANY OTHER OUTPUT TEXT OR EX-
+PLANATION. Only provide the Python dictionary
+string. For example, your response should look like
+this: {{”pred”: ”yes”, ”score”: 4}}.
+1
+
+
+Retention Ratio
+VideoDC
+VideoChatGPT
+NextQA
+PerceptionTest
+VideoMME
+LLaVA-Video
+30%
+0.064
+0.064
+0.0185
+0.0465
+0.055
+15%
+0.032
+0.032
+0.074
+0.023
+0.027
+10%
+0.016
+0.016
+0.037
+0.0115
+0.015
+InternVL3
+30%
+0.0468
+0.0468
+0.0170
+-
+-
+15%
+0.0234
+0.0234
+0.0255
+-
+-
+10%
+0.0145
+0.0145
+0.0500
+-
+-
+Qwen2.5VL
+30%
+0.009
+0.009
+0.009
+-
+-
+15%
+0.0135
+0.0135
+0.0135
+-
+-
+10%
+0.0270
+0.0270
+0.0270
+-
+-
+Table 6. The values of hyperparameter κ used for our method on different VLMs for various retention ratios.
+2

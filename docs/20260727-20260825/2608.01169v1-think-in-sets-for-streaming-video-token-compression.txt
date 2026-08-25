@@ -1,0 +1,1200 @@
+Think in Sets for Streaming Video Token Compression
+Moxu Duan1, Jingwen Fu2∗, Yuwang Wang3∗
+1Beijing Jiaotong University, 2Zhongguancun Academy, 3Tsinghua University
+24271096@bjtu.edu.cn, fujingwen@bza.edu.cn, wang-yuwang@tsinghua.edu.cn
+Abstract
+Streaming VideoLLMs process frames causally while visual
+tokens grow continuously, making compression essential for
+controlling prefilling latency and memory. Existing training-
+free methods independently rank tokens, ignoring marginal-
+gain interactions among retained tokens. We argue that stream-
+ing video token compression should instead be formulated
+as set selection, where each candidate is valued by what
+it adds beyond the tokens already retained. Unlike existing
+set-wise methods designed for offline tasks, streaming makes
+causal, frame-by-frame pruning decisions, so modeling cross-
+frame interactions requires an explicit historical reference.
+This creates a reference-set dilemma: the reference must ade-
+quately represent previously conveyed content while remain-
+ing bounded for real-time inference. We introduce NovaCov,
+to our knowledge the first training-free, plug-and-play set-
+wise token compressor designed for streaming video. Nova-
+Cov maintains a capacity-bounded, recency-weighted Histor-
+ical Reference Bank and optimizes a dual-branch submodular
+coverage objective that preserves representative current-frame
+content while prioritizing information insufficiently covered
+by history. Both branches are facility-location functions, so
+greedy selection retains the classical (1−1/e) approximation
+guarantee. Across streaming and offline benchmarks, Nova-
+Cov outperforms existing training-free compression methods,
+retaining 99.6% of ReKV accuracy while reducing LLM pre-
+filling latency by 46%.
+Introduction
+Streaming video understanding is an increasingly impor-
+tant capability of video large language models (Vide-
+oLLMs) (Chen et al. 2025b; Wang et al. 2025, 2026a; Zhang
+et al. 2024, 2025a), enabling multimodal understanding and
+reasoning over continuously arriving visual observations (Li
+et al. 2024b; Fu et al. 2025; Zhou et al. 2025). Its practical de-
+ployment, however, is constrained by the cost of processing
+dense visual tokens (Chen et al. 2025a). Unlike offline video,
+where the complete recording and its temporal boundary are
+known, streaming video requires the model to process each
+frame causally and remain ready for a query at any moment.
+The model therefore has no access to future frames or fu-
+ture questions, while visual tokens continue to accumulate
+as the stream progresses (Wei et al. 2025; Lin et al. 2026).
+This accumulation increases prefilling latency and KV-cache
+memory, making visual-token compression before the LLM
+∗Corresponding author.
+Full ReKV
+ToMe
+VisionZIP
+VidCom²
+STC-Pruner
+NovaCov (Ours)
+46
+47
+48
+49
+50
+51
+52
+53
+25% 30%
+50%
+70%
+100%
+Per-frame token retention ratio (%)
+Accuracy Performance (%)
+Full ReKV (52.9)
+Figure 1: Accuracy–budget trade-off on OVO-Bench under
+different per-frame token-retention ratios. Among represen-
+tative training-free token compression methods, NovaCov
+consistently achieves the highest accuracy across all com-
+pression levels.
+essential for practical streaming inference (Ning et al. 2025).
+What remains unclear is not whether tokens should be
+compressed, but how they should be selected. Existing
+training-free streaming methods (Yao et al. 2025; Chen et al.
+2025a; Wang et al. 2026b; Xie et al. 2026) typically assign
+each token an independent score based on signals such as
+spatial saliency, inter-frame difference, or distance to a run-
+ning anchor, and retain the top-ranked tokens. Regardless of
+the scoring signal, these methods share the same underly-
+ing structure: the value of a token is treated as an intrinsic
+property, independent of the other tokens retained. Several
+individually important tokens may therefore represent nearly
+identical content, repeatedly spending a limited budget on
+the same object, region, or background.
+We argue that this token-wise formulation is fundamen-
+tally mismatched with token compression. Compression is a
+subset-selection problem: downstream performance depends
+on the collective information carried by the retained tokens,
+not the isolated score of each token. A set-wise objective in-
+stead values a candidate by its marginal contribution relative
+arXiv:2608.01169v1  [cs.CV]  2 Aug 2026
+
+
+With Historical Reference (NovaCov)
+Without Historical Reference
+0%
+15%
+30%
+45%
+60%
+26.0
+5.3
+<0.7
+58.0
+15.3
+0.7-0.8
+16.0
+43.3
+0.8-0.9
+0.0
+36.0
+0.9-1.0
+Historical coverage  h_i
+Retained-token proportion
+Input frames
+(a) Without Historical Reference
+(b) With Historical Reference (NovaCov)
+t=102s
+t=103s
+t=104s
+Question
+What does the man lift out of
+the wheel?
+A.  The metal wheel rim.
+B.  The black inner tube.
+C.  The bicycle chain.
+D.  The brake cable.
+Key evidence under-retained
+Answer: A
+He lifts the metal wheel rim.
+Key evidence better retained
+Answer: B
+He lifts the black inner tube.
+Figure 2: Visual diagnosis of the need for an explicit historical reference in streaming set-wise selection. Left: historical coverage
+hi of retained tokens, computed post hoc using the same Historical Reference Bank. NovaCov assigns 84.0% of the budget
+to tokens with hi < 0.8, versus 20.6% without historical reference. Right: an OVO-Bench example where selection without
+historical reference misses key evidence, while NovaCov preserves it and answers correctly.
+to a reference set representing the content already accounted
+for, naturally suppressing duplicates and favoring comple-
+mentary information. Recent offline methods adopt this per-
+spective through submodular coverage maximization (Dong
+et al. 2025; Cho et al. 2026) or column subset selection (Lee,
+Wen, and Choi 2026), consistently improving over indepen-
+dent token ranking.
+In streaming scenarios, consecutive frames often contain
+the same background, objects, and scene layout, while only
+a small portion of the visual content changes (Yao et al.
+2025). Set-wise selection can directly address this problem
+by asking whether a candidate token adds anything beyond
+what is already retained. However, transferring it to stream-
+ing is not straightforward. Offline set-wise methods perform
+one-shot selection over a fully visible video, allowing selec-
+tions across frames to interact through their marginal gains.
+Streaming instead compresses each frame upon arrival, with
+future frames unavailable and past selections already for-
+warded to the model. Applying an offline set-wise objective
+directly to streaming decomposes global selection into inde-
+pendent per-frame selections over current-frame candidates,
+leaving cross-frame redundancy unaccounted for. Fig. 2 vi-
+sualizes the resulting loss of cross-frame interaction. As a
+result, streaming set-wise selection requires an explicit his-
+torical reference to restore marginal interactions among to-
+kens retained across frames. However, under the causal and
+real-time constraints of streaming, this historical reference
+faces a reference-set dilemma: On the one hand, causal
+completeness requires the reference set to represent as much
+as possible of the information already conveyed to the model;
+On the other hand, real-time efficiency requires the reference
+set to remain bounded.
+This dilemma motivates the central question of this work:
+How to summarize the visual content that has already
+reached the model well enough to judge whether a new to-
+ken contributes? To solve this problem, we introduce Nova-
+Cov, to our knowledge the first training-free, set-wise token
+compressor for streaming video. NovaCov is a plug-and-
+play method built on two complementary designs. First, it
+maintains a Historical Reference Bank, a capacity-bounded
+and recency-weighted summary of previously retained con-
+tent. An online match-or-insert update consolidates redun-
+dant observations, while temporal decay gradually removes
+stale information. The bank therefore remains fixed in size
+and keeps the per-frame cost independent of stream length,
+while staying aligned with the visual context currently rep-
+resented by the model. Second, NovaCov optimizes a dual-
+branch submodular coverage objective. The current-frame
+branch preserves the spatial content of the incoming frame,
+while the historical-novelty branch rewards only coverage
+that is not already supplied by the reference bank. A token
+is therefore valued not by an isolated importance score, but
+by what it adds to the retained set and what the model still
+lacks. Both branches are facility-location functions defined
+over different similarity matrices, so their weighted com-
+bination remains monotone submodular and greedy selec-
+tion retains the classical (1 −1/e) approximation guarantee.
+We evaluate NovaCov on both streaming and offline video-
+understanding benchmarks. As shown in Fig. 1, NovaCov
+consistently achieves a stronger accuracy–budget trade-off
+across compression levels. It outperforms existing training-
+free compression methods in both settings, retains 99.6%
+of the uncompressed ReKV (Di et al. 2025) accuracy, and
+reduces language-model prefilling latency by 46%.
+Overall, this paper makes the following contributions:
+• We formulate streaming video token compression as a set-
+selection problem requiring an explicit historical refer-
+ence, and identify the reference-set dilemma: set-wise se-
+lection requires a sufficiently complete representation of
+historical context, whereas real-time streaming requires
+
+
+this representation to remain bounded.
+• We propose NovaCov, which resolves this dilemma
+through a capacity-bounded, recency-weighted Histori-
+cal Reference Bank and a dual-branch submodular ob-
+jective that jointly preserves current-frame content and
+prioritizes information absent from history. And we show
+that both objective branches are facility-location func-
+tions, preserving monotone submodularity and the clas-
+sical (1 −1/e) approximation guarantee under greedy
+selection.
+• Extensive experiments demonstrate state-of-the-art per-
+formance among training-free methods on streaming and
+offline benchmarks, with consistently stronger accuracy–
+efficiency trade-offs.
+Related Work
+Streaming Video Understanding.
+Streaming video un-
+derstanding requires a pretrained VideoLLM (Li et al. 2024a;
+Bai et al. 2025; Wang et al. 2026a) to process continuously
+arriving frames while remaining ready to answer questions
+posed at any moment. A line of offline-to-online frameworks
+adapts existing VideoLLMs to this causal setting without
+retraining. ReKV (Di et al. 2025) maintains a frame-wise
+KV cache and retrieves relevant history for online question
+answering, while others reorganize the streaming context or
+bound the active memory through query-agnostic cache com-
+pression, eviction, or retrieval (Liu et al. 2024; Ning et al.
+2025; Yang et al. 2025b; Kim et al. 2026). Every arriving
+frame nonetheless still yields dense visual tokens that must
+all be prefilled, leaving causal, query-agnostic compression
+before the LLM as the missing piece.
+Token Compression for Video LLMs.
+Existing training-
+free methods fall broadly into two categories.
+(i) Token-wise Methods assign each token an indepen-
+dent score. Offline designs either merge semantically or spa-
+tiotemporally redundant representations (Bolya et al. 2023;
+Ren et al. 2023; Shao et al. 2025), or rank tokens by attention,
+text relevance, visual saliency, or temporal redundancy (Chen
+et al. 2024; Tao et al. 2025; Zhang et al. 2025b; Yang et al.
+2025a; Shen et al. 2025). Streaming-specific methods further
+exploit causal temporal cues, through adjacent-frame differ-
+encing, joint consistency and saliency scoring, distances to
+spatial and temporal anchors, or decay with temporal dis-
+tance (Wang et al. 2026b; Chen et al. 2025a; Xie et al. 2026).
+The retained subset is not evaluated jointly, leaving redun-
+dancy among selected tokens unaddressed.
+(ii) Set-wise Methods formulate token compression explic-
+itly as a set-level subset-selection problem, valuing a token by
+its marginal contribution to what is already selected. Arising
+from different mathematical tools, they converge on this same
+view: FLoC (Cho et al. 2026) maximizes facility-location
+coverage over a fully visible video or temporal block; MM-
+Tok (Dong et al. 2025) covers both textual and visual targets
+simultaneously through multimodal maximum coverage; and
+SPARE (Lee, Wen, and Choi 2026) casts token pruning as
+a column subset selection problem, retaining the subspace
+spanned by the full visual feature matrix. These methods,
+however, assume a static or fully visible input and none is
+designed for a causal stream. To our knowledge, NovaCov is
+the first set-wise compressor built for streaming video.
+Method
+Preliminary and Problem Formulation
+Streaming inference pipeline.
+A VideoLLM is adapted
+to the streaming setting (Di et al. 2025) by processing the
+video incrementally, prefilling each arriving frame into the
+LLM. Formally, a video arrives as a stream V = {vt}T
+t=1,
+where each frame vt is encoded by a vision encoder and
+a projector (Li et al. 2024a) into N visual tokens Xt =
+{x1, . . . , xN} with xi ∈RD, and we write ˆxi = xi/∥xi∥2
+for the ℓ2-normalized token. Prefilling appends the key-value
+states of these tokens to a continually growing cache. In this
+setting, compression must be causal and query-agnostic: the
+decision at frame t may depend only on Xt and on the history.
+Problem formulation.
+Since a video stream has no known
+temporal boundary, the token sequence fed to the LLM
+grows with the stream. Streaming token compression there-
+fore selects, at every arriving frame, an index subset St ⊆
+{1, . . . , N} of fixed size |St| = K ≪N and forwards
+only the corresponding tokens {xi}i∈St, so that the sequence
+grows at a rate K/N of the uncompressed one. Writing Ft
+for an objective that scores a candidate subset at frame t, the
+problem is
+St ∈
+arg max
+S⊆{1,...,N}, |S|=K
+Ft(S).
+(1)
+We construct Ft from a single principle, coverage: the se-
+lected tokens should cover the current frame as well as the
+budget allows, while each token is credited only for what it
+adds to the content already accounted for, which we call the
+reference set.
+Facility-location coverage.
+We measure coverage with the
+facility-location function, a classical objective in subset se-
+lection (Cornuéjols, Fisher, and Nemhauser 1977; Lin and
+Bilmes 2011; Krause and Golovin 2014). Given a ground set
+V and a non-negative similarity matrix A, the coverage is
+defined as
+f(S) =
+X
+i∈V
+max
+s∈S A(i, s).
+(2)
+Each element i contributes its similarity to the most similar
+selected element, so a larger f(S) means that S represents V
+better as a whole. Crucially, f exhibits diminishing marginal
+gains: once an element is covered by S, adding a similar
+one yields little, which suppresses redundant selection by
+construction.
+Reference set.
+Coverage involves two distinct sets, which
+must be kept apart. The set to be covered at frame t is the
+current frame Xt alone, since tokens forwarded earlier are
+already held by the LLM and need not be represented again.
+The reference set is precisely that held content, against which
+a candidate earns credit only for what it adds, and in the
+streaming setting it comprises every token forwarded so far:
+R⋆
+t =
+[
+τ<t
+{ˆxi}i∈Sτ
+|
+{z
+}
+history
+∪
+{ˆxi}i∈St
+|
+{z
+}
+current selection
+.
+(3)
+
+
+Dual-Branch Token Selection
+Historical Reference Bank
+supplies the
+history half
+update
+the bank
+next
+frame
+Streaming Video
+Reference Set
+Historical Coverage
+Dual-Branch Objective
+Greedy Selection
+t-2
+t-1
+t
+t+1
+unseen future
+history patches
+...
+current frame
+high history
+coverage
+light
+blue
+already
+conveyed
+low history
+coverage
+orange
+novel
+Current-Frame
+Historical-Novelty
+The man is preparing
+to take a shot.
+Bank State
+Incoming Tokens
+MATCH (update existing)
+INSERT (add new prototype)
+capacity C
+ageing
+recent
+fading
+Recency-aware: older prototypes fade stepwise
+(each selected token from frame t)
+...
+similar to
+a prototype?
+>= threshold θ
+< threshold θ
+ACTION
+EMA Refine
+old prototype new token
+CAPACITY (no change)
+6 / C
+ACTION
+CAPACITY (slot swap)
+6 / C
+replace
+LLM
+Fast &
+Accurate
++
++
+time
+=
+get novelty-aware weight ρi
+(1-hi)
+Figure 3: Overview of NovaCov. A per-frame cycle between token selection and bank update. Left: each current-frame token
+is scored by its historical coverage hi (light blue: already conveyed; orange: novel), which also yields the novelty-aware weight
+ρi; the dual-branch objective is then greedily maximized to retain K tokens. Right: those tokens update the Bank, refining the
+nearest prototype by EMA when the similarity reaches θ and inserting a new one otherwise, with a recency-aware utility evicting
+the least useful prototype once capacity C is exceeded.
+Its first term is fixed once the frame begins, whereas the
+second grows with every selection: a token just chosen joins
+the reference for those chosen after it, and when the frame
+is complete the whole of St passes into the history term of
+frame t + 1. By construction R⋆
+t is causally complete, yet
+its history term grows with the stream, so using it directly
+would make the per-frame cost rise without limit: this is the
+reference-set dilemma in concrete form. Our design therefore
+makes the reference set carry as much of the content of R⋆
+t
+as a bounded size allows.
+Concretely, NovaCov runs a per-frame cycle (Figure 3):
+the Bank carried over from t −1 supplies the history term,
+the dual-branch objective selects K tokens from frame t, and
+those tokens are folded back into the Bank for t + 1.
+Historical Reference Bank
+NovaCov summarizes the history term of R⋆
+t
+with a
+lightweight Historical Reference Bank B of prototypes {mj},
+so the reference set it actually uses at frame t is Rt =
+{mj}|B|
+j=1 ∪{ˆxi}i∈St, mirroring Eq. (3) term by term: the
+Bank is not the whole reference set but its bounded historical
+component. Serving compression alone and never entering
+the LLM, it records what past frames have retained, and
+its fixed capacity C resolves the dilemma within a constant
+per-frame budget.
+Bank representation.
+We represent B as a set of pro-
+totypes, B = {(mj, τj, nj)}|B|
+j=1, with |B| ≤C. Here
+mj ∈RD is a normalized prototype vector summarizing
+a cluster of historically similar retained tokens, τj records
+the frame index of its most recent update, and nj the cumu-
+lative number of times it has been matched. The Bank starts
+empty at t = 1 and is populated online by the update below.
+We keep multiple prototypes so that a current token is tested
+against a specific piece of past content.
+Match-or-insert update.
+After the compression of each
+frame, the selected tokens are used to update the Bank on-
+line. For each selected token ˆxi, i ∈St, we find its nearest
+prototype j⋆= arg maxj ˆx⊤
+i mj. If the similarity exceeds a
+threshold θ, the content is already represented by the Bank,
+and we refine the matched prototype toward it by an expo-
+nential moving average (EMA):
+mj⋆←normalize
+ (1 −α) mj⋆+ α ˆxi
+
+,
+(4)
+where α is the EMA coefficient; its timestamp and count are
+then refreshed by τj⋆←t and nj⋆←nj⋆+1. Otherwise the
+token carries content not yet in the Bank and is inserted as a
+new prototype (ˆxi, t, 1). The EMA refinement lets recurring
+content, such as a static background, consolidate into one
+sharp prototype rather than many slots.
+Recency-aware eviction.
+A bounded Bank must choose
+what to keep, and the criterion is usefulness ahead rather
+than fidelity to the past: a prototype earns its slot by being
+likely to recur, since only then can it mark incoming tokens
+as already conveyed. Whenever |B| > C, we therefore evict
+the prototype of least utility, which balances recency and
+
+
+frequency:
+uj = 2−(t−τj)/λ
+|
+{z
+}
+γj
+· log
+ 1 + nj
+
+,
+(5)
+where γj ∈(0, 1] is a time-decay factor with half-life λ, and
+t −τj is the number of frames elapsed since the prototype
+was last updated. Both terms estimate how likely a prototype
+is to be matched again: recently updated content is probably
+still in view, while content matched many times has proved
+persistent. The Bank thus maintains an evolving active con-
+text rather than a permanent archive, spending a bounded
+capacity where it helps the next frame most.
+Dual-Branch Token Selection
+With the Bank supplying the history term of Rt, we now build
+Ft from two branches, one for each term of the reference set:
+a current-frame branch over the frame itself and a historical-
+novelty residual branch over what the history has yet to cover.
+Current coverage.
+We measure similarity by the co-
+sine between token embeddings, clamped to discard
+negative values so that the matrix stays non-negative:
+A(i, j) = clamp(ˆx⊤
+i ˆxj, 0, 1). Instantiating Eq. (2) with
+V
+= {1, . . . , N} gives ci(S) = maxs∈S A(i, s), with
+ci(∅) = 0, the degree to which token i is covered by the
+current selection S.
+Historical coverage.
+To incorporate the history term of Rt,
+we measure the degree to which each token of the current
+frame is covered by the Bank:
+hi =
+max
+1≤j≤|B|
+h
+clamp(ˆx⊤
+i mj, 0, 1) · γj
+i
+∈[0, 1],
+(6)
+where γj is the time-decay factor of Eq. (5). A value hi →1
+means token i is highly similar to recently seen content and is
+already well covered by the history, whereas hi →0 means
+it carries content absent from that history. When the Bank is
+empty, at the first frame, all hi = 0 and the objective reduces
+to intra-frame coverage alone.
+Novelty-aware
+weighting.
+Within
+the
+current-frame
+branch, whose gains are not already discounted by the his-
+tory, a novel token should command a higher coverage de-
+mand than a redundant one. We therefore weight each token
+by its temporal novelty 1 −hi, rank-normalized within the
+frame for stability:
+ρi = ρmin+(1−ρmin)·RankNorm(1−hi) ∈[ρmin, 1], (7)
+where RankNorm maps {1−hi}N
+i=1 to normalized ranks in
+[0, 1], and the floor ρmin > 0 keeps even a fully redundant
+token in demand, so that the spatial skeleton of the frame
+does not collapse.
+Dual-Branch coverage objective.
+We regard hi as a lower
+bound on the coverage of token i: the current-frame selection
+contributes to the residual branch only when it lifts the cov-
+erage of i above the historical level. Combining this branch
+with the novelty-weighted current-frame branch yields the
+objective of Eq. (1),
+Ft(S) = λc
+N
+X
+i=1
+ρi ci(S)+λr
+N
+X
+i=1
+max
+ ci(S)−hi, 0
+
+, (8)
+where λc, λr ≥0 balance the two branches. The two play
+complementary roles: the residual branch yields almost no
+gain for tokens already well covered (hi close to 1) and
+thus steers the budget toward new content, while the current-
+frame branch, unconstrained by the historical lower bound,
+always rewards covering the current frame and so preserves
+its spatial structure.
+Greedy selection.
+Maximizing a coverage objective under
+a cardinality constraint is NP-hard (Feige 1998), so we solve
+Eq. (1) with the greedy algorithm: starting from S = ∅, each
+round adds the token of largest marginal gain until |S| = K,
+maintaining one running coverage state per branch, ci for the
+current-frame branch and ri for the residual one, initialized
+to 0 and hi respectively. The selected tokens are output in
+the original raster order to keep the positions fed to the LLM
+consistent. Since Ft is monotone submodular, this single pass
+is provably near-optimal.
+Theoretical Analysis
+We next prove that enriching the objective with a history term
+and novelty-aware weights preserves the classical greedy ap-
+proximation guarantee.
+Definitions.
+For f : 2V →R and all S ⊆T ⊆V , a ∈V \
+T: f is normalized if f(∅) = 0; monotone if f(S) ≤f(T);
+and submodular if f(S∪{a})−f(S) ≥f(T ∪{a})−f(T),
+marginal gains never growing as the selection grows. We use
+the classical fact that the weighted facility-location function
+gW,w(S) = P
+i∈V wi maxs∈S W(i, s) is normalized, non-
+negative, monotone and submodular for non-negative W and
+w (Krause and Golovin 2014).
+Proposition 1.
+For λc, λr ≥0, the objective Ft in Eq. (8)
+is normalized, non-negative, monotone and submodular on
+2V , and greedy selection therefore returns ˆS with Ft( ˆS) ≥
+(1 −1/e) max|S|≤K Ft(S).
+Proof. At frame t the quantities A, h and ρ are fixed before
+selection begins and are therefore constant in S. The current-
+frame branch is gA,ρ, as A ≥0 and ρi ≥ρmin > 0. Since
+z 7→max(z−hi, 0) is monotone, it commutes with the max-
+imum over a finite non-empty S, so max(ci(S) −hi, 0) =
+maxs∈S ˜Ah(i, s) with ˜Ah(i, s) = max(A(i, s)−hi, 0) ≥0,
+both sides vanishing for S = ∅; the residual branch is thus
+g ˜
+Ah,1. A non-negative combination preserves every prop-
+erty, and the bound then follows from the classical guarantee
+for monotone submodular maximization under a cardinality
+constraint (Nemhauser, Wolsey, and Fisher 1978).
+□
+The two branches are thus one function class on two ma-
+trices: A, and ˜Ah thresholded by the historical coverage.
+History enters as a shift of the similarity rather than an ex-
+ternal penalty, so the richer reference set costs nothing in
+approximation quality, and no polynomial-time algorithm
+can do better unless P = NP (Feige 1998), a guarantee that
+independent token ranking cannot claim.
+
+
+Method
+CS
+OP
+ATP
+PR
+ACP
+SU
+EU
+CT
+TR
+CR
+Overall
+LLM Pref. Latency
+ReKV† (ICLR25)
+79.2
+77.5
+75.6
+66.0
+62.2
+60.3
+72.3
+43.6
+69.7
+79.5
+69.1
+482.4
++ ToMe (ICLR23)
+67.5
+64.6
+66.3
+63.0
+58.4
+53.3
+65.2
+19.7
+57.3
+76.6
+59.4 (86.0%)
+257.8 (↓46.6%)
++ VisionZip (CVPR25)
+69.5
+66.4
+69.3
+50.7
+52.9
+57.2
+64.1
+33.3
+54.8
+73.4
+60.4 (87.4%)
+258.3 (↓46.5%)
++ VidCom2 (EMNLP25)
+76.0
+68.1
+71.6
+62.0
+58.6
+52.0
+64.0
+42.5
+60.4
+76.6
+63.6 (92.0%)
+259.1 (↓46.3%)
++ STC-Pruner (CVPR26)
+75.4
+66.8
+71.2
+63.9
+57.8
+51.2
+64.0
+45.1
+63.2
+76.6
+63.7 (92.2%)
+259.2 (↓46.3%)
++ NovaCov (Ours)
+75.7
+74.5
+77.6
+71.3
+62.5
+58.5
+68.0
+44.2
+67.6
+80.5
+68.4 (99.0%)
+259.9 (↓46.2%)
+Table 1: Comprehensive evaluation results on StreamingBench across real-time understanding tasks: †: the uncompressed upper
+bound. CS: Clips Summarization, OP: Object Perception, ATP: Attribute Perception, PR: Prospective Reasoning, ACP: Action
+Perception, SU: Spatial Understanding, EU: Event Understanding, CT: Counting, TR: Text-Rich Understanding, CR: Causal
+Reasoning. “LLM Pref. Latency” includes token compression and LLM prefilling (ms).
+Real-Time Visual
+Perception
+Backward
+Tracing
+Forward Active
+Responding
+LLM Pref.
+Method
+OCR ACR ATR STU FPD OJR Avg. EPM ASI HLD Avg. REC SSR CRR Avg. Overall
+Latency
+ReKV† (ICLR25)
+73.8
+56.0 74.1 51.7 70.3 60.3 64.4 54.2 57.4 28.5 46.7 25.4 64.6 53.3 47.8
+52.9
+482.4
++ ToMe (ICLR23)
+61.1
+49.5 52.6 42.7 62.4 50.0 53.1 49.2 50.0 29.6 42.9 19.2 60.7 50.0 43.3
+46.4
+257.8
++ VisionZip (CVPR25)
+49.0
+49.5 64.7 44.4 64.4 50.5 53.8 47.1 54.1 30.7 44.0 21.9 58.4 53.8 44.7
+47.5
+258.3
++ VidCom2 (EMNLP25)
+65.8
+59.6 69.0 47.2 64.4 56.5 60.4 50.5 53.4 32.8 45.6 25.8 59.0 50.8 45.2
+50.4
+259.1
++ STC-Pruner (CVPR26) 64.4
+59.6 68.1 48.9 65.4 56.5 60.5 51.2 52.0 33.3 45.5 25.9 59.3 52.1 45.8
+50.6
+259.2
++ NovaCov (Ours)
+67.1
+57.2 69.8 48.5 73.3 59.8 62.4 52.5 56.1 31.7 46.8 28.8 64.9 52.1 48.6
+52.7
+259.9
+Table 2: Comprehensive evaluation results on OVO-Bench across three categories: (i) Real-Time Visual Perception (OCR:
+Optical Character Recognition, ACR: Action Recognition, ATR: Attribute Recognition, STU: Spatial Understanding, FPD:
+Future Prediction, OJR: Object Recognition), (ii) Backward Tracing (EPM: Episodic Memory, ASI: Action Sequence Identifi-
+cation, HLD: Hallucination Detection), (iii) Forward Active Responding (REC: Repetition Event Count, SSR: Sequential Steps
+Recognition, CRR: Clues Reveal Responding).
+Experiments
+Experimental Setup
+Benchmarks.
+We evaluate NovaCov across two bench-
+mark categories: (i) Streaming video understanding: we use
+OVO-Bench (Niu et al. 2025) and StreamingBench (Lin et al.
+2026) to assess performance in streaming scenarios. (ii) Long
+video understanding: we select EgoSchema (Mangalam, Ak-
+shulakov, and Malik 2023), MLVU-dev (Zhou et al. 2025),
+and VideoMME (Fu et al. 2025) to evaluate effectiveness in
+offline long-video understanding.
+Implementation details.
+We adopt ReKV (Di et al. 2025)
+with LLaVA-OV-7B (Li et al. 2024a) as the backbone, fol-
+lowing its original settings (0.5 fps protocol). All compres-
+sion methods are plugged into the same backbone, replacing
+only the pre-LLM token selection and leaving the rest of
+the pipeline unchanged: of the N = 196 visual tokens per
+frame, K = 50 are retained, compressing the sequence to
+about 25%. For NovaCov we set the Reference Bank capacity
+C = 512, half-life λ = 16 frames, match threshold θ = 0.9,
+EMA coefficient α = 0.10, branch weights λc = 0.1 and
+λr = 0.9, and novelty floor ρmin = 0.20. Both branches
+are fused into a single Triton kernel (Tillet, Kung, and Cox
+2019), so each frame is selected in one pass. All experiments
+run on a single 32GB NVIDIA GeForce RTX 5090 GPU.
+Baselines.
+We compare NovaCov against four training-free
+token compression methods: ToMe (Bolya et al. 2023), Vi-
+sionZip (Yang et al. 2025a), VidCom2 (Liu et al. 2025), and
+STC-Pruner (Wang et al. 2026b), all of which score tokens
+in a token-wise manner and among which STC-Pruner is the
+strongest streaming pruner to date. Existing set-wise meth-
+ods assume a fully visible video and cannot be transferred
+directly to streaming, so we instead examine the set-wise
+setting through the Current-only ablation in Table 4.
+Main Comparisons
+Tables 1, 2, 3 present comprehensive comparisons of No-
+vaCov against other compression methods in streaming and
+long video understanding scenarios, addressing two ques-
+tions: (i) how it performs across diverse scenarios? (ii) how
+the run-time cost of its set-wise objective trades off against
+the accuracy it delivers?
+Performance across diverse scenarios.
+NovaCov outper-
+forms every compression method on all five benchmarks.
+Against the previous state of the art STC-Pruner (Wang
+et al. 2026b), it improves by 4.7 on StreamingBench and 2.1
+on OVO-Bench, retaining 99.0% and 99.6% of the uncom-
+pressed ReKV, and it leads on all three offline benchmarks
+for an average of 62.3 against 61.8. These results showcase
+the strong performance of NovaCov in streaming scenarios
+and demonstrate its robust performance across diverse set-
+
+
+VideoMME
+Method
+EgoSchema
+MLVU-dev
+Short
+Med.
+Long
+Overall
+Avg.
+ReKV† (ICLR25)
+57.7
+68.6
+70.4
+55.4
+47.3
+57.7
+61.3
++ ToMe (ICLR23)
+55.2
+63.1
+59.6
+52.0
+43.4
+51.7
+56.7
++ VisionZip (CVPR25)
+55.8
+63.2
+59.6
+51.8
+43.4
+51.6
+56.9
++ VidCom2 (EMNLP25)
+60.6
+67.1
+68.2
+55.7
+46.6
+56.8
+61.5
++ STC-Pruner (CVPR26)
+60.8
+67.6
+68.7
+56.3
+46.3
+57.1
+61.8
++ NovaCov (Ours)
+61.4
+67.9
+68.7
+57.3
+46.6
+57.5
+62.3
+Table 3: Quantitative evaluation results on three offline long video understanding benchmarks.
+Component
+OVO-Bench
+Streaming
+Bank Hist. Nov. EPM FPD REC
+Bench
+(a) Current-only
+×
+×
+×
+52.1 68.6 27.1
+64.2
+(b) + Bank
+✓
+✓
+×
+52.4 72.4 27.9
+67.7
+(c) + Novelty
+✓
+✓
+✓
+52.5 73.3 28.8
+68.4
+(d) Unbounded
+∞
+✓
+✓
+51.7 70.2 27.7
+67.4
+Table 4: Ablation on three OVO-Bench subsets and Stream-
+ingBench overall ("Bank": bounded Historical Reference
+Bank; "Hist.": historical-novelty branch; "Nov.": novelty-
+aware weighting). Variant (a) uses the current coverage
+branch alone; (c) is the full NovaCov; (d) never evicts, so
+the Bank grows without bound.
+tings. The reference set still matters offline, only less visibly:
+a complete video answers the question trivially rather than
+making it irrelevant.
+More striking is where the budget lands. On five of the ten
+StreamingBench tasks NovaCov exceeds the uncompressed
+upper bound, and the excess concentrates on cross-frame rea-
+soning: Prospective Reasoning reaches 71.3 against ReKV’s
+66.0, Attribute Perception 77.6 against 75.6, and Repetition
+Event Count on OVO-Bench 28.8 against 25.4. Feeding the
+model every token is evidently not the same as feeding it
+every useful one; once redundant background is gone, what
+remains competes for attention against far less noise.
+Accuracy–latency trade-off.
+At a fixed budget the latency
+question is nearly degenerate: all compression methods pre-
+fill within 2.1 ms of one another, a spread of 0.8%, while their
+accuracies differ by up to 9.0 points. Greedy maximization
+needs only O(NK) marginal-gain evaluations (Nemhauser,
+Wolsey, and Fisher 1978; Cho et al. 2026), and fusing both
+branches into a single Triton kernel (Tillet, Kung, and Cox
+2019) brings the measured cost to the level of token-wise
+baselines: 259.9 ms against 482.4 ms uncompressed, a re-
+duction of 46.2%. The set-wise objective therefore costs no
+measurable latency while returning 4.7 points more than the
+next best method.
+Ablation Study
+We ablate NovaCov on StreamingBench and three repre-
+sentative OVO-Bench subsets—FPD, EPM, and REC—each
+representing one of its three major task categories, using the
+same 25% retention ratio as in the main comparisons.
+Reference set.
+Even with the current frame as its only
+reference (a), the set-wise objective already reaches 64.2
+on StreamingBench, above the 63.7 of the state-of-the-art
+token-wise pruner. The decisive step, however, is the refer-
+ence set itself. Adding the bounded Bank (b) supplies the
+history term and raises StreamingBench to 67.7, with the
+largest subset gain on the Future Prediction task (68.6 to
+72.4), where anticipating what comes next depends on what
+earlier frames established. What a set-wise method is able to
+reference, rather than the formulation itself, is what carries
+the improvement.
+Novelty weighting.
+Weighting current-frame demand by
+temporal novelty (c) raises StreamingBench further to 68.4,
+with Repetition Event Count rising from 27.9 to 28.8. Count-
+ing repeated events depends on registering each new occur-
+rence, which is exactly what a novelty-weighted budget pre-
+serves.
+Bounded vs. unbounded.
+Variant (d) lifts the capacity
+limit, so the Bank never evicts and grows with the stream.
+Its cost rises without bound, and accuracy falls as well, from
+68.4 to 67.4 on StreamingBench: a reference that forgets
+nothing finds a near-match for almost any incoming token,
+so historical coverage saturates and content that faded and
+returned is no longer recognized as new. The bounded up-
+date therefore meets the real-time requirement at no cost in
+accuracy: what a reference set needs is alignment with the
+active context, not exhaustive recall.
+Conclusion
+In this work, we introduce NovaCov, a training-free, plug-
+and-play component and, to our knowledge, the first set-
+wise token compressor for streaming video. NovaCov pairs
+a capacity-bounded, recency-weighted Historical Reference
+Bank with a dual-branch coverage objective over a current-
+frame branch and a historical-novelty branch. Both rest on
+one idea: a token is worth keeping for what it adds to the
+content the model already holds, which makes the reference
+set the crux and, under streaming, requires it to stay bounded
+while still tracking a growing context. As both branches are
+facility-location functions, greedy selection retains the clas-
+sical (1 −1/e) guarantee. NovaCov attains state-of-the-art
+accuracy on streaming and offline benchmarks at latency
+comparable to strong baselines.
+
+
+References
+Bai, S.; Chen, K.; Liu, X.; Wang, J.; Ge, W.; Song, S.; Dang,
+K.; Wang, P.; Wang, S.; Tang, J.; Zhong, H.; Zhu, Y.; Yang,
+M.; Li, Z.; Wan, J.; Wang, P.; Ding, W.; Fu, Z.; Xu, Y.;
+Ye, J.; Zhang, X.; Xie, T.; Cheng, Z.; Zhang, H.; Yang, Z.;
+Xu, H.; and Lin, J. 2025. Qwen2.5-VL Technical Report.
+arXiv:2502.13923.
+Bolya, D.; Fu, C.-Y.; Dai, X.; Zhang, P.; Feichtenhofer, C.;
+and Hoffman, J. 2023. Token Merging: Your ViT but Faster.
+In International Conference on Learning Representations.
+Chen, L.; Zhao, H.; Liu, T.; Bai, S.; Lin, J.; Zhou, C.; and
+Chang, B. 2024. An Image is Worth 1/2 Tokens After Layer
+2: Plug-and-Play Inference Acceleration for Large Vision-
+Language Models. In European Conference on Computer
+Vision (ECCV), 19–35.
+Chen, X.; Tao, K.; Shao, K.; and Wang, H. 2025a. Stream-
+ingtom: Streaming token compression for efficient video un-
+derstanding. arXiv preprint arXiv:2510.18269.
+Chen, Y.; Xue, F.; Li, D.; Hu, Q.; Zhu, L.; Li, X.; Fang,
+Y.; Tang, H.; Yang, S.; Liu, Z.; He, E.; Yin, H.; Molchanov,
+P.; Kautz, J.; Fan, J.; Zhu, Y.; Lu, Y.; and Han, S. 2025b.
+LongVILA: Scaling Long-Context Visual Language Models
+for Long Videos. In International Conference on Learning
+Representations.
+Cho, J.; Lee, J.; Hayat, M.; Hwang, K.; Porikli, F.; and Choi,
+S. 2026. FLoC: Facility Location-Based Efficient Visual To-
+ken Compression for Long Video Understanding. In Inter-
+national Conference on Learning Representations (ICLR).
+Cornuéjols, G.; Fisher, M. L.; and Nemhauser, G. L. 1977.
+Location of Bank Accounts to Optimize Float: An Analytic
+Study of Exact and Approximate Algorithms. Management
+Science, 23(8): 789–810.
+Di, S.; Yu, Z.; Zhang, G.; Li, H.; Zhong, T.; Cheng, H.; Li,
+B.; He, W.; Shu, F.; and Jiang, H. 2025. Streaming Video
+Question-Answering with In-Context Video KV-Cache Re-
+trieval. In International Conference on Learning Represen-
+tations.
+Dong, S.; Hu, J.; Zhang, M.; Yin, M.; Fu, Y.; and Qian,
+Q. 2025. Mmtok: Multimodal coverage maximization for
+efficient inference of vlms. arXiv preprint arXiv:2508.18264.
+Feige, U. 1998. A Threshold of ln n for Approximating Set
+Cover. Journal of the ACM, 45(4): 634–652.
+Fu, C.; Dai, Y.; Luo, Y.; Li, L.; Ren, S.; Zhang, R.; Wang,
+Z.; Zhou, C.; Shen, Y.; Zhang, M.; Chen, P.; Li, Y.; Lin, S.;
+Zhao, S.; Li, K.; Xu, T.; Zheng, X.; Chen, E.; Shan, C.; He, R.;
+and Sun, X. 2025. Video-MME: The First-Ever Comprehen-
+sive Evaluation Benchmark of Multi-Modal LLMs in Video
+Analysis. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, 24108–24118.
+Kim, M.; Shim, K.; Choi, J.; and Chang, S. 2026. Infinipot-
+v: Memory-constrained kv cache compression for streaming
+video understanding. Advances in Neural Information Pro-
+cessing Systems, 38: 138983–139013.
+Krause, A.; and Golovin, D. 2014. Submodular function
+maximization. Tractability, 3(71-104): 3.
+Lee, J.; Wen, S.; and Choi, D.-W. 2026. Moving Beyond
+Diversity: Visual Token Pruning as Subspace Reconstruction
+for Efficient VLMs. arXiv preprint arXiv:2606.18681.
+Li, B.; Zhang, Y.; Guo, D.; Zhang, R.; Li, F.; Zhang,
+H.; Zhang, K.; Zhang, P.; Li, Y.; Liu, Z.; and Li, C.
+2024a.
+LLaVA-OneVision: Easy Visual Task Transfer.
+arXiv:2408.03326.
+Li, K.; Wang, Y.; He, Y.; Li, Y.; Wang, Y.; Liu, Y.; Wang,
+Z.; Xu, J.; Chen, G.; Luo, P.; Wang, L.; and Qiao, Y. 2024b.
+MVBench: A Comprehensive Multi-Modal Video Under-
+standing Benchmark.
+In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+22195–22206.
+Lin, H.; and Bilmes, J. 2011. A Class of Submodular Func-
+tions for Document Summarization. In Proceedings of the
+49th Annual Meeting of the Association for Computational
+Linguistics: Human Language Technologies, 510–520.
+Lin, J.; Fang, Z.; Chen, C.; Cheng, H.; Wan, Z.; Luo, F.;
+Wang, Z.; Li, P.; Liu, Y.; and Sun, M. 2026. Streaming-
+bench: Assessing the gap for mllms to achieve streaming
+video understanding. In ICASSP 2026-2026 IEEE Interna-
+tional Conference on Acoustics, Speech and Signal Process-
+ing (ICASSP), 12147–12151. IEEE.
+Liu, J.; Yu, Z.; Lan, S.; Wang, S.; Fang, R.; Kautz, J.; Li,
+H.; and Alvarez, J. M. 2024. StreamChat: Chatting with
+Streaming Video. arXiv:2412.08646.
+Liu, X.; Wang, Y.; Ma, J.; and Zhang, L. 2025. Video com-
+pression commander: Plug-and-play inference acceleration
+for video large language models. In Proceedings of the 2025
+Conference on Empirical Methods in Natural Language Pro-
+cessing, 1910–1924.
+Mangalam, K.; Akshulakov, R.; and Malik, J. 2023.
+Egoschema: A diagnostic benchmark for very long-form
+video language understanding. Advances in Neural Infor-
+mation Processing Systems, 36: 46212–46244.
+Nemhauser, G. L.; Wolsey, L. A.; and Fisher, M. L. 1978. An
+Analysis of Approximations for Maximizing Submodular Set
+Functions—I. Mathematical Programming, 14(1): 265–294.
+Ning, Z.; Liu, G.; Jin, Q.; Ding, W.; Guo, M.; and
+Zhao, J. 2025. LiveVLM: Efficient Online Video Under-
+standing via Streaming-Oriented KV Cache and Retrieval.
+arXiv:2505.15269.
+Niu, J.; Li, Y.; Miao, Z.; Ge, C.; Zhou, Y.; He, Q.; Dong, X.;
+Duan, H.; Ding, S.; Qian, R.; Zhang, P.; Zang, Y.; Cao, Y.;
+He, C.; and Wang, J. 2025. OVO-Bench: How Far Are Your
+Video-LLMs from Real-World Online Video Understanding?
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, 18902–18913.
+Ren, S.; Chen, S.; Li, S.; Sun, X.; and Hou, L. 2023. TESTA:
+Temporal-Spatial Token Aggregation for Long-form Video-
+Language Understanding. In Findings of the Association for
+Computational Linguistics: EMNLP 2023, 932–947.
+Shao, K.; Tao, K.; Qin, C.; You, H.; Sui, Y.; and Wang,
+H. 2025. HoliTom: Holistic Token Merging for Fast Video
+Large Language Models. In Advances in Neural Information
+Processing Systems (NeurIPS).
+
+
+Shen, L.; Gong, G.; He, T.; Zhang, Y.; Liu, P.; Zhao, S.;
+and Ding, G. 2025. FastVID: Dynamic Density Pruning for
+Fast Video Large Language Models. In Advances in Neural
+Information Processing Systems (NeurIPS).
+Tao, K.; Qin, C.; You, H.; Sui, Y.; and Wang, H. 2025.
+DyCoke: Dynamic Compression of Tokens for Fast Video
+Large Language Models. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR).
+Tillet, P.; Kung, H. T.; and Cox, D. 2019. Triton: An Inter-
+mediate Language and Compiler for Tiled Neural Network
+Computations. In Proceedings of the 3rd ACM SIGPLAN
+International Workshop on Machine Learning and Program-
+ming Languages (MAPL), 10–19.
+Wang, S.; Chen, G.; Huang, D.-A.; Li, Z.; Li, M.; Liu, G.;
+Kautz, J.; Alvarez, J. M.; Zhang, L.; and Yu, Z. 2026a.
+VideoITG: Multimodal Video Understanding with Instructed
+Temporal Grounding.
+In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+24640–24650.
+Wang, Y.; Li, X.; Yan, Z.; He, Y.; Yu, J.; Zeng, X.; Wang,
+C.; Ma, C.; Huang, H.; Gao, J.; Dou, M.; Chen, K.; Wang,
+W.; Qiao, Y.; Wang, Y.; and Wang, L. 2025. InternVideo2.5:
+Empowering Video MLLMs with Long and Rich Context
+Modeling. arXiv:2501.12386.
+Wang, Y.; Liu, X.; Gui, X.; Lin, X.; Yang, B.; Liao, C.;
+Chen, T.; and Zhang, L. 2026b.
+Accelerating Stream-
+ing Video Large Language Models via Hierarchical Token
+Compression.
+In Proceedings of the IEEE/CVF Confer-
+ence on Computer Vision and Pattern Recognition (CVPR).
+ArXiv:2512.00891.
+Wei, M.; Wan, C.; Yu, X.; Wang, T.; Yang, Y.; Mao, X.; Zhu,
+C.; Cai, W.; Wang, H.; Chen, Y.; et al. 2025. Streamvln:
+Streaming vision-and-language navigation via slowfast con-
+text modeling. arXiv preprint arXiv:2507.05240.
+Xie, Y.; He, B.; Wang, J.; Zheng, X.; Ye, Z.; and Wu, Z.
+2026. Fluxmem: Adaptive hierarchical memory for stream-
+ing video understanding. arXiv preprint arXiv:2603.02096.
+Yang, S.; Chen, Y.; Tian, Z.; Wang, C.; Li, J.; Yu, B.; and Jia,
+J. 2025a. VisionZip: Longer is Better but Not Necessary in
+Vision Language Models. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), 19792–19802.
+Yang, Y.; Zhao, Z.; Shukla, S. N.; Singh, A.; Mishra, S. K.;
+Zhang, L.; and Ren, M. 2025b. Streammem: Query-agnostic
+kv cache memory for streaming video understanding. arXiv
+preprint arXiv:2508.15717.
+Yao, L.; Li, Y.; Wei, Y.; Li, L.; Ren, S.; Liu, Y.; Ouyang, K.;
+Wang, L.; Li, S.; Li, S.; Kong, L.; Liu, Q.; Zhang, Y.; and
+Sun, X. 2025. TimeChat-Online: 80% Visual Tokens Are
+Naturally Redundant in Streaming Videos. In Proceedings
+of the 33rd ACM International Conference on Multimedia,
+10807–10816.
+Zhang, B.; Li, K.; Cheng, Z.; Hu, Z.; Yuan, Y.; Chen, G.;
+Leng, S.; Jiang, Y.; Zhang, H.; Li, X.; Jin, P.; Zhang, W.;
+Wang, F.; Bing, L.; and Zhao, D. 2025a.
+VideoLLaMA
+3: Frontier Multimodal Foundation Models for Image and
+Video Understanding. arXiv:2501.13106.
+Zhang, Y.; Fan, C.-K.; Ma, J.; Zheng, W.; Huang, T.; Cheng,
+K.; Gudovskiy, D.; Okuno, T.; Nakata, Y.; Keutzer, K.; and
+Zhang, S. 2025b. SparseVLM: Visual Token Sparsification
+for Efficient Vision-Language Model Inference. In Interna-
+tional Conference on Machine Learning (ICML).
+Zhang, Y.; Wu, J.; Li, W.; Li, B.; Ma, Z.; Liu, Z.; and Li,
+C. 2024.
+Video Instruction Tuning with Synthetic Data.
+arXiv:2410.02713.
+Zhou, J.; Shu, Y.; Zhao, B.; Wu, B.; Liang, Z.; Xiao, S.;
+Qin, M.; Yang, X.; Xiong, Y.; Zhang, B.; Huang, T.; and
+Liu, Z. 2025. MLVU: Benchmarking Multi-Task Long Video
+Understanding. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, 13691–13701.

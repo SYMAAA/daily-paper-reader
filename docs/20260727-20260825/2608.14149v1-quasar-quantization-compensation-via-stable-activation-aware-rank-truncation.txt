@@ -1,0 +1,586 @@
+QUASAR: QUANTIZATION COMPENSATION VIA STABLE
+ACTIVATION-AWARE RANK TRUNCATION
+A PREPRINT
+Lin-Fa Lee
+Department of Institute of Artificial Intelligence Innovation
+National Yang Ming Chiao Tung University
+Hsinchu, Taiwan
+prologue.ii14@nycu.edu.tw
+Yi-Yu Chang
+Department of Institute of Artificial Intelligence Innovation
+National Yang Ming Chiao Tung University
+Hsinchu, Taiwan
+daniel282907@gmail.com
+Kuo-Hui Yeh
+Department of Institute of Artificial Intelligence Innovation
+National Yang Ming Chiao Tung University
+Hsinchu, Taiwan
+khyeh@nycu.edu.tw
+August 17, 2026
+Recent training-free post-training quantization methods restore model accuracy through closed-form residual compen-
+sation. To constrain additional model storage overhead, several existing methods gate layer selection by goodness-of-fit,
+retaining only those layers whose compensation yields a positive residual fit score and discarding the rest. In this paper,
+we show that, under the low-bit W4A4 setting, this gating mechanism fails to distinguish poorly predictable quantization
+error from numerical solver failure. Rank-deficient input activations yield severely ill-conditioned or numerically
+singular Gram matrices, causing the closed-form solver to become unstable and produce spuriously negative fit scores.
+Consequently, existing goodness-of-fit gates misclassify affected layers as uncompensable and discard them. Many of
+these discarded layers can nevertheless provide substantial error recovery when their compensation is computed using a
+numerically stable solver. To address this problem, we propose a parameter-free truncated pseudoinverse solver which
+removes collapsed directions prior to inversion. On ViT-B with the W4A4 setting, our training-free method achieves
+81.42% top-1 accuracy, outperforming prior post-training methods and fine-tuning-based baselines. Combined with
+joint low-rank and quantization compression, the proposed method reaches a deployable operating point of 80.26%
+accuracy at 54.7 MB, providing a well-balanced trade-off between model size and accuracy.
+1
+Introduction
+Quantization is a mainstream method for compressing models and facilitates deployment on resource constrained
+devices. Existing quantization methods are generally divided into two categories: quantization aware training (QAT)
+Liu et al. [2024], Chen et al. [2025], Zhao et al. [2023] and post training quantization (PTQ) Li et al. [2021], Arai and
+Ichikawa [2026], Bai et al. [2022]. The former requires a full dataset and additional model training, while the latter
+requires only a small calibration set. Therefore, PTQ is often more suitable for practical deployment scenarios in which
+training data or computational resources are limited.
+arXiv:2608.14149v1  [cs.AI]  14 Aug 2026
+
+
+WebMCP Tool Surface Poisoning
+A PREPRINT
+In the training-free PTQ setting, recent studies model the quantization error as a linear function of the input, derive a
+compensation term in closed form, and add the resulting correction to the quantized output. Such methods can recover
+the model accuracy to a level close to that of the original full-precision model Zhang et al. [2026a], Shang et al. [2023],
+Tang et al. [2025]. This type of closed form compensation relies on the inversion of the activation covariance matrix,
+which is often ill conditioned under low bit quantization.
+Several techniques have been adopted to improve numerical stability. GPTQ applies dampening to the diagonal of
+the Hessian Frantar et al. [2022], and some methods introduce ridge regularization Hastie [2020]. However, these
+approaches mostly treat ill conditioning as an implementation detail and preemptively circumvent it, without examining
+the core issue of how ill conditioning leads to the actual failure of compensation, or even the erroneous discarding of
+originally compensable positions. The consequence is that the value of compensation is not realized in the positions
+where it is needed most, while the compensation module itself increases the model size. The failure is concrete and
+measurable. A collapsed layer returns a mathematically impossible R2 < 0 on its own fitted data, which the common
+R2 > 0 gate reads as a verdict of low value rather than as an alarm of numerical collapse. On ViT-B/W4A4 the layer
+this gate most confidently discards is b0.fc2, reporting R2 = −68.6 and a compensation parameter norm of 6.2 × 107.
+It is also the single most valuable compensator in the model: removing it costs 1.05% top 1, more than any other layer.
+The gate discards precisely what it should keep.
+Notably, existing studies on closed-form low-rank compensation have mainly considered weight-only quantization
+for large language models, such as QERA, CALDERA, and GPTQ-iLoRA. However, efficient inference for vision
+models often requires both weights and activations to be quantized, particularly under the W4A4 setting, as considered
+in QServe and MixA-Q. Compared with weight-only quantization, W4A4 is substantially more sensitive to accuracy
+degradation. Moreover, the high dimensional activations of certain layers are intrinsically redundant, rendering the
+closed form compensation regression fragile by nature. Activation quantization acts as an amplifier that pushes a subset
+of layers past the threshold of numerical collapse, which is an issue not encountered in weight only compensation
+research.
+Specifically, existing residual compensation faces an unresolved trade off under this setting. QwT Fu et al. [2025] trades
+full compensation for accuracy at the cost of model size, while its successor QwT-v2 Tang et al. [2025] utilizes static
+diagonal compensation to achieve an extremely lightweight size but sacrifices compensation capability. There lacks an
+operating point that balances both accuracy and size between the two. This paper proposes a training free layer wise
+compensation framework and makes three contributions:
+• A field wide diagnosis, not a new estimator. We identify an overlooked failure mechanism in W4A4
+compensation. The closed form solution is intrinsically fragile on rank deficient activation structures, and
+activation quantization amplifies this fragility into numerical collapse, leading such layers to be misjudged
+as uncompensable and thereby discarding originally high value compensation layers. We further show the
+trigger is rank deficiency rather than ill conditioning per se. This failure occurs across both CNN- and
+Transformer-based architectures.
+• Recovering the layers the gate discards. We introduce a parameter-free truncated pseudoinverse that removes
+only the collapsed directions while preserving the remaining compensable subspace. By recovering the
+erroneously discarded high value layers through a parameter free truncated pseudoinverse that removes only
+the collapsed directions, our method achieves 81.42% on ViT-B/W4A4 without additional training, surpassing
+all prior training free methods and even the fine tuning based QwT∗.
+• A deployable operating point, and how to budget it. Through low rank decomposition and compensation
+quantization, we further compress the compensation to a deployable scale, achieving an operating point of
+80.26% accuracy at 54.7 MB. This outperforms the fully compensated QwT and the extremely lightweight
+QwT-v2, filling the missing balance between accuracy and size. We further establish that the compensation
+budget should be allocated based on the global scale rather than in a fine grained, position wise manner.
+Reversing a high rank to important layers allocation to its exact opposite changes accuracy by only 0.02%,
+showing that layer importance does not predict rank sensitivity.
+2
+Related Work
+2.1
+PTQ for Vision Transformers
+Post training quantization (PTQ) deploys resource intensive networks on edge devices without the retraining pipeline of
+quantization aware training (QAT) Mohammadi et al. [2026]. Early PTQ methods achieved high fidelity on convolutional
+networks, but their direct application to Vision Transformers (ViTs) causes severe degradation Moon et al. [2024], driven
+by the extreme inter channel variance in post LayerNorm activations and the heavy tailed distributions of post Softmax
+2
+
+
+WebMCP Tool Surface Poisoning
+A PREPRINT
+attention maps Li et al. [2023]. Targeted frameworks address these distributions from two directions. RepQ-ViT
+decouples the calibration time quantization grid from the hardware friendly quantizer executed at inference Li et al.
+[2023], and IGQ-ViT partitions activation channels into instance aware groups to isolate token dependent outliers Moon
+et al. [2024]. Reconstruction based methods instead refine quantization parameters through localized optimization,
+using Fisher information approximations Wu et al. [2025a] or average perturbation Hessians Wu et al. [2025b]. All
+remain constrained by the representational limits of uniform low bit formats, leaving substantial quantization noise
+uncorrected under aggressive settings such as W4A4.
+2.2
+Low Rank Error Reconstruction
+A parallel line of work augments low precision backbones with high precision low rank components, exploiting the
+low rank structure of quantization error matrices Zhang et al. [2025]. For parameter efficient fine tuning, LoftQ jointly
+initializes the quantized weights and the low rank adapters to approximate the pre trained full precision weights Li et al.
+[2024]. For post training scenarios, QERA derives a closed form solution minimizing output activation discrepancy via
+singular value perturbation theory Zhang et al. [2025], CALDERA compresses both the backbone and the low rank
+matrices by alternating minimization Saha et al. [2024], and SVDQuant smooths activation outliers into the weight
+matrices and absorbs them into a 16 bit low rank branch Zhang et al. [2026b]. These analytical methods are biased
+toward weight only quantization or rely on parallel full precision branches that incur runtime and memory bottlenecks.
+Crucially, all of them assume stable, high precision activation inputs and do not examine the mathematical vulnerability
+of the underlying solver when the activation matrices are themselves heavily quantized and rank deficient.
+2.3
+Structural Residual Compensation
+To avoid the overhead of parallel high precision branches, recent compensation paradigms apply lightweight structural
+modifications that directly correct activation discrepancies Mohammadi et al. [2026]. Quantization without Tears
+(QwT) appends lightweight linear layers in parallel with quantized blocks and solves a closed form least squares
+regression on a calibration set to predict and add back the residual quantization error Fu et al. [2025]. It recovers
+substantial accuracy without backpropagation but introduces a parameter footprint of roughly 30% and requires parallel
+floating point computation incompatible with integer only hardware Tang et al. [2025]. QwT-v2 replaces the full linear
+projections with channel wise affine compensation that folds into the existing quantization scales and zero points,
+achieving zero deployment overhead Tang et al. [2025]. This simplification to diagonal operators limits representational
+capacity and leaves a noticeable gap under W4A4. Both methods treat the inversion of the activation Gram matrix as an
+implementation detail, applying diagonal dampening or ridge regularization without analyzing the physical cause of the
+instability.
+3
+Proposed Method
+We consider the post training quantization (PTQ) of Transformers under the W4A4 setting (where both weights and
+activations are quantized to 4 bit). For a given linear layer, let its full precision output be Yfp and its actual output after
+W4A4 quantization be Yq. The quantization error is the difference between the two:
+E = Yfp −Yq
+(1)
+The core idea of residual compensation is to linearly predict this error using the input X of the layer, and to add the
+prediction back to the quantized output. If the compensation parameters (Wc, bc) are obtained such that XWc + bc ≈E,
+the deployed output of the layer becomes:
+Ydeploy = Yq + (XWc + bc) ≈Yfp
+(2)
+We formulate this as a least squares problem. The complete framework, as illustrated in Figure ?? and Figure ?? and
+Algorithms 1 and 2 (at Appendix), consists of three components: layer wise compensation, numerically stable solving,
+and dual axis compression, detailed in the following subsections respectively.
+3.1
+Layer wise Compensation
+As shown in Figure ?? and Figure ??, we push down the compensation to the individual linear layers within the
+Transformer block, attaching an independent compensator to each of the four linear layers, rather than sharing a
+single compensator per block. Independent compensation allows the error at each layer to be corrected more precisely,
+3
+
+
+WebMCP Tool Surface Poisoning
+A PREPRINT
+contributing an accuracy gain of +3.1% over block wise compensation in our experiments. Each compensator is
+deployed in parallel with its corresponding linear layer, formulated as:
+output = Q(x) + (x · A) · B + b
+(3)
+where A and B are low rank factors detailed in the last subsection.
+Compensating a specific layer alters its output, which in turn affects the actual input to downstream layers. If we were
+to capture the pre compensation inputs for all layers at once to solve for the parameters, it would cause a mismatch with
+the deployment phase. Therefore, we sequentially compensate each layer (Algorithm 2 at Appendix), immediately
+replace it with the compensated version and plug it back into the model, and then capture the true input for the next
+layer to solve. Concretely, for each layer ℓwe feed the same actual input X, which includes all upstream quantization
+and compensation effects, through both the full precision weights and the quantized weights of ℓ; the error target E is
+the difference between these two outputs, so each compensator corrects the local error of its own layer under the true
+deployment time input distribution.
+3.2
+Numerically Stable Compensation Solution
+We point out that the aforementioned closed form solution suffers from a numerical failure during compensation under
+the W4A4 setting, an issue overlooked by existing methods, and propose a stable solver (Algorithm 1, lines 2–5).
+The least squares objective for compensation is:
+min ∥XWc + bc −E∥2
+(4)
+By absorbing the bias into the augmented input ˜X = [X, 1], the solution is given by:
+
+Wc
+bc
+
+= G−1 ˜XT E
+where
+G = ˜XT ˜X
+(5)
+(corresponding to Algorithm 1, line 2). We find that the numerical issues are concentrated in the inversion of G.
+Given that G is symmetric positive semi definite, its eigendecomposition is G = V ΛV T , and its inverse is G−1 =
+P
+i
+1
+λi vivT
+i , i.e., taking the reciprocal of each eigenvalue. The activations of certain layers are intrinsically redundant:
+their effective dimensionality is far below the nominal width, so G is inherently near rank deficient even under full
+precision inputs. Under the W4A4 setting, activation quantization further compresses slightly different input dimensions
+into nearly identical ones, reducing the effective rank and pushing such layers past the threshold of collapse. During
+inversion, these near zero directions produce reciprocals 1/λi approaching infinity, causing the solved compensation
+parameters to explode and the entire compensation to collapse.
+The direct fingerprint of collapse is rank deficiency: the Gram matrix of a collapsed layer becomes numerically singular,
+with its smallest eigenvalue indistinguishable from zero at float32 precision, falling within the eigenvalue noise floor
+≈ϵ · λmax. This rank deficiency manifests through two robust signals: the compensation parameter norm ∥Wc∥
+explodes by several orders of magnitude, and the goodness of fit R2 turns sharply negative (Appendix A.1). As a coarse
+gauge of ill conditioning we also report the condition number:
+κ(G) = λmax
+λ+
+min
+(6)
+where λ+
+min denotes the smallest eigenvalue above the numerical noise floor; eigenvalues within the float32 noise floor
+are excluded, as their magnitudes are not meaningful.
+Empirical measurements reveal that κ(G) for ViT-B can reach 107–109; a large κ alone, however, does not predict
+collapse. The layer with the largest κ in the entire model does not collapse, whereas every collapsed layer exhibits
+a numerically singular Gram matrix, identified by an exploding ∥Wc∥and a sharply negative R2. According to
+existing methods, the criterion R2 > 0 used to determine “whether the layer is worth compensating” treats this as an
+uncompensable numerical error. Here:
+R2 = 1 −∥E −(XWc + bc)∥2
+∥E −¯E∥2
+(7)
+Under normal solving conditions, the least squares solution must have R2 ≥0 on its fitted data. However, the
+meaningless parameters solved during a numerical collapse yield mathematically impossible R2 < 0 on the same batch
+of data, leading them to be misjudged as “uncompensable” by this threshold and subsequently discarded. (Empirical
+4
+
+
+WebMCP Tool Surface Poisoning
+A PREPRINT
+observation: the discarded layers actually include those with the highest compensation value, and removing their
+compensation leads to the most significant accuracy drop, to be detailed in Section 4.3).
+Truncated Pseudoinverse (Algorithm 1, lines 3–5). We replace the naive inversion with a truncated pseudoinverse
+(truncated SVD). Setting a threshold τ = rcond · λmax, we apply truncation to the eigenvalues:
+Λ+
+ii =
+1/λi
+if λi > τ
+0
+if λi ≤τ
+(8)
+The compensation solution becomes:
+
+Wc
+bc
+
+= V Λ+V T ˜XT E
+(9)
+That is, we retain the directions above the threshold and take their reciprocals, while directly ignoring the directions
+below the threshold. The ignored directions contain no reliable information; thus, discarding them does not compromise
+effective compensation but eliminates numerical explosion, thereby recovering the high value layers erroneously
+discarded by existing methods. Note that the truncated pseudoinverse preserves the R2 ≥0 guarantee: the intercept
+direction of the augmented input has an eigenvalue that scales with the sample count and thus always survives truncation,
+so the constant predictor remains in the feasible set and R2 ≥0 holds by construction for our stable solution.
+Improvement stems from stability, not shrinkage. We emphasize that this improvement originates from numerical
+stability rather than shrinkage after regularization. Unlike the biased Tikhonov/ridge regularization:
+ridge : (G + αI)−1 =⇒1/λi →
+1
+λi + α for every direction
+pinv : λi ≤τ →0,
+λi > τ →1/λi (no shrinkage)
+The truncated pseudoinverse (81.42%) and ridge regularization (81.64%) achieve almost identical accuracy, proving
+that the gain comes from discarding collapsed directions rather than from shrinkage, to be detailed in Section 4.2.
+3.3
+Low Rank and Quantization Compression of the Compensator
+A full matrix compensator occupies a considerable model size, posing a burden for edge deployment. We compress the
+compensator along the axes of low rank decomposition and quantization (corresponding to Algorithm 1, lines 6–7).
+Axis 1: Activation aware low rank decomposition. We approximate the full matrix compensator Wc with low rank
+factors A · B (rank r). Unlike standard SVD truncation, which minimizes the parameter space error ∥Wc −Wr∥, we
+choose to minimize the output space error:
+min ∥X(Wc −Wr)∥2
+subject to
+rank(Wr) ≤r
+By applying truncated SVD after whitening the Gram matrix, we obtain:
+Wr = G−1/2Tr(G1/2Wc)
+(10)
+where Tr denotes the SVD truncated to rank r, and G1/2 is the symmetric square root of the Gram matrix. Here
+G1/2 and G−1/2 are computed from the truncated eigendecomposition of G, using the same rcond threshold as in
+the stable solver; directions below the threshold are excluded, so the whitening remains well defined even for the
+numerically singular layers identified in the previous section. Whitening concentrates the retained rank in the directions
+that activations actually pass through, minimizing the reconstruction error of the output. The resulting factors are A
+(dimension din × r) and B (dimension r × dout), and during deployment, we compute (x · A) · B.
+Axis 2: Quantization of compensation factors. We further apply channel wise symmetric quantization to the low rank
+factors A and B down to int8/int4. For each column j of the factor (b = number of bits, qmax = 2b−1 −1):
+s = max |column j of A|
+qmax
+Aint = round
+A
+s
+
+A ≈s · Aint
+(11)
+We store the integer Aint and the fp16 scale s. The bias bc is kept in full precision and is not quantized. The two axes
+are orthogonal and can be combined.
+The aforementioned formulation of activation aware low rank compensation shares the same mathematical core as
+a series of recent training free low rank compensation methods (OLrC, QERA, CALDERA, EoRA, CLoQ). The
+contributions of this paper are: (i) integrating it into a comprehensive framework of layer wise and stable compensation;
+and (ii) systematically profiling the trade off between rank and bit width under the same size constraints.
+5
+
+
+WebMCP Tool Surface Poisoning
+A PREPRINT
+Method
+Top 1 (%)
+Size (MB)
+Training free
+RepQ-ViT
+(baseline,
+uncompensated)
+68.5
+44.9
+—
+QwT
+76.3
+59.1
+✓
+QwT*
+78.5
+59.1
+× (Fine tuning)
+QwT-v2
+75.6
+45.6
+✓
+IGQ-ViT
+79.3
+—
+—
+Ours
+(Compressed)
+80.26 ± 0.11
+54.7
+✓
+Table 1: Comparison of main results on ViT-B / W4A4 / ImageNet.
+Model
+Arch.
+Block level (QwT)
+Direct Inverse
+Ours (stable)
+Neg-R2 / Max Cond.
+Failure Mode of Direct Inverse
+ViT-B
+ViT
+76.43
+79.52† (collapse 3/5)
+pinv 81.42 ± 0.06
+5 / 2.3 × 109
+Divergent parameters; accuracy col-
+lapses to near random
+Swin-T
+Swin
+74.72
+78.40 ± 0.63
+pinv 78.90 ± 0.14
+2–7 / 3.4 × 1010
+Unstable solution; excessively high
+variance
+DeiT-T
+ViT
+61.40
+64.66 ± 0.16
+pinv 64.76 ± 0.13
+1–2 / 6.1 × 109
+A few layers judged failed and
+skipped
+ResNet-50
+CNN
+62.5‡
+Fails (3/3)
+ridge 68.72 / pinv 66.63
+singular / ∞
+Gram exactly singular; inversion un-
+defined and fails
+Table 2: Cross architecture numerical vulnerability. Ill conditioning is universal but manifests as distinct failure modes.
+†ViT-B direct inverse is reported at seed 0; averaging is uninformative as 3/5 seeds collapse to near random. Condition
+numbers indicate severity; collapse is driven by rank deficiency rather than large condition number alone (Appendix A).
+‡ResNet-50 uses Percentile quantization (its QwT reference), not RepQ-ViT, so its baseline is not directly comparable
+to the transformer rows.
+4
+Experiments
+Our main experiments focus on ViT-B, and we verify the generalizability of the core mechanism on DeiT-T, Swin-T,
+and ResNet-50. All models are quantized under the W4A4 setting, using RepQ-ViT as the baseline quantizer. The
+compensation utilizes 512 training images as the calibration set, and the threshold for the truncated pseudoinverse
+is set to 10−3. All main results report the mean and standard deviation over 5 random seeds. Baseline methods for
+comparison include QwT, QwT* (which requires fine tuning), QwT-v2, and IGQ-ViT.
+4.1
+Accuracy and Numerical Vulnerability
+Table 1 presents the main results under ViT-B/W4A4. Our method achieves a Top 1 accuracy of 81.42% ± 0.06 in
+a training free manner, outperforming the training free QwT (76.3%), QwT* which requires additional fine tuning
+(78.5%), QwT-v2 (75.6%), and IGQ-ViT (79.3%). The accuracy increases progressively across the three stages of our
+method: block wise compensation (76.43%) →pushed down to the linear layer (79.52%) →numerically stable solution
+(81.42%) (Figure 3 ). It is worth noting that the uncompressed full matrix compensator achieves 81.42% accuracy
+but has a massive size of 215MB; after compression, it still maintains an accuracy of 80.26% ± 0.11, while its size is
+reduced to 54.7MB.
+The key to the improvement from 79.52% to 81.42% lies in resolving the numerical collapse during the compensation
+solving process. Table 3 compares three solving methods: direct inversion collapses in 3 out of 5 seeds, with the
+accuracy of the collapsed seeds dropping to near random levels (approximately 0.1%). Its 79.52% is merely a lucky
+outcome from the uncollapsed seeds, whereas the truncated pseudo inverse remains stable across all 5 seeds, achieving
+81.42% ± 0.06. We further verify that this improvement stems from numerical stability rather than the shrinkage of
+regularization. Therefore, we also test the ridge method, which achieves an almost identical 81.64% ± 0.04, indicating
+that the gain comes from discarding the collapsed directions rather than the universal shrinkage applied by ridge across
+all directions.
+Under existing methods, the direct solving approach is misjudged as uncompensable and discarded by the R2 > 0
+threshold. We quantify the contribution of each layer’s compensation through a compensation value ablation study
+(Figure 4). The results reveal that b0.fc2 is the most valuable among all 48 compensators; removing its compensation
+results in a 1.05% accuracy drop, significantly higher than that of all other layers. Ironically, it is precisely this most
+valuable layer that is misjudged as “uncompensable” and discarded by the R2 > 0 threshold—and this is exactly the
+layer we salvage through our stable solution.
+6
+
+
+WebMCP Tool Surface Poisoning
+A PREPRINT
+Method
+Top 1
+(%)
+Collapsed
+Seeds
+Layers with
+Negative R2
+OLS
+(direct inverse)
+79.52
+3 / 5
+5
+Truncated
+pseudo inverse
+81.42 ± 0.06
+0 / 5
+0
+Ridge
+(Tikhonov)
+81.64 ± 0.04
+0 / 5
+0
+Table 3: Comparison of solving methods for compensation.
+Rank / Bits
+16-bit
+8-bit
+4-bit
+r = 256
+81.14 / 119.0
+81.16 / 82.3
+80.79 / 63.9
+r = 128
+80.79 / 82.4
+80.67 / 64.0
+80.50 / 54.7
+r = 64
+80.34 / 64.0
+80.37 / 54.8
+79.87 / 50.1
+Table 4: Relationship between rank and quantization bits. Performance is reported as Top-1 Accuracy (%) / Size (MB).
+4.2
+Cross Architecture Analysis
+All four architectures exhibit ill conditioned Gram matrices during the compensation solving process, albeit to varying
+degrees of severity: Figure 5(a) shows that the maximum condition number increases progressively across architectures,
+from 2.3 × 109 for ViT-B, to DeiT-T, Swin-T, and finally ResNet-50. The failure manifests differently: silent collapse
+of the least squares solution (ViT-B), high variance and the performance degradation of individual seeds (Swin-T), 1–2
+layers discarded by the R2 > 0 threshold (DeiT-T), and the direct inversion throwing an exception and crashing outright
+(ResNet-50). Yet numerical stabilization proves effective across all four architectures: Figure 5(b) demonstrates that
+the stable solution brings consistent accuracy gains over the unstable baseline. It must be emphasized that what is
+verified here is the universality of the core mechanism of numerical stabilization, rather than claiming that the complete
+compensation framework achieves the optimal solution on any arbitrary architecture.
+We do not claim that any single form of stabilization is universally optimal; rather, we argue that numerical stabiliza-
+tion itself is necessary, and this numerical vulnerability has not yet been fully addressed in existing compensation
+implementations.
+4.3
+Uniform Allocation is Sufficient
+A natural idea is to allocate compensation resources in a fine grained manner based on the importance of each position.
+We verify through ablation studies that such position wise allocation is not superior to uniform allocation. Table 10 in
+Appendix compares different rank allocation strategies under the same size constraint (54.7MB). Uniform allocation
+achieves 80.376%, whereas allocating higher ranks to important layers, allocating lower ranks to important layers, or
+adjusting continuously based on importance all yield slightly lower accuracy than uniform allocation.
+4.4
+Compression Results
+Figure 6 presents the accuracy–size trade off. Our primary configuration (80.26% ± 0.11 / 54.7MB) dominates QwT,
+QwT-v2, and the fine tuning required QwT∗in both dimensions while remaining training free, leading QwT∗by 1.76%
+at 4.4MB smaller size. Table 4 shows that under a fixed size constraint, a higher rank paired with more aggressive
+quantization outperforms a lower rank paired with milder quantization, indicating that the compensation benefits more
+from retained subspace dimensionality than from per parameter precision.
+5
+Conclusion and Future Work
+This paper reveals a problem overlooked by existing training free residual compensation methods: activation quantization
+drives the Gram matrix on which the compensation solver relies past the threshold of numerical collapse, and the
+collapsed layers are then falsely gated as “uncompensable” by the standard R2 > 0 criterion. This gate ironically
+discards the layers with the highest compensation value. We replace direct inversion with a truncated pseudoinverse to
+salvage them, verify that the gain originates from numerical stability rather than regularization induced shrinkage, and
+show that this vulnerability is not an isolated case. Built on this stable solver, our layer wise framework reaches 81.42%
+Top-1 on ViT-B / W4A4 / ImageNet without training, and compresses to a deployable operating point of 80.26% at
+54.7MB that outperforms both QwT and QwT-v2 as well as the fine tuning required QwT∗in accuracy and size.
+7
+
+
+WebMCP Tool Surface Poisoning
+A PREPRINT
+Three directions remain open. First, while numerical ill conditioning spans both CNNs and Transformers and the stable
+solution rescues the solver on ResNet-50, applying the complete layer wise framework to CNNs remains an open
+challenge: module level compensation does not yet stably outperform the block level baseline, which we attribute to
+the error propagation structure of convolutional layers. Second, ill conditioning worsens as bit width decreases, but
+at lower bit widths such as W3A3 the baseline itself degrades severely, so stabilizing both simultaneously remains
+unresolved. Third, the proposed solver is in principle agnostic to the specific quantizer, and combining it with other
+W4A4 quantizers is a natural extension.
+References
+Zechun Liu, Barlas Oguz, Changsheng Zhao, Ernie Chang, Pierre Stock, Yashar Mehdad, Yangyang Shi, Raghuraman
+Krishnamoorthi, and Vikas Chandra. Llm-qat: Data-free quantization aware training for large language models. In
+Findings of the Association for Computational Linguistics: ACL 2024, pages 467–484, 2024.
+Mengzhao Chen, Wenqi Shao, Peng Xu, Jiahao Wang, Peng Gao, Kaipeng Zhang, and Ping Luo. Efficientqat: Efficient
+quantization-aware training for large language models. In Proceedings of the 63rd Annual Meeting of the Association
+for Computational Linguistics (Volume 1: Long Papers), pages 10081–10100, 2025.
+Xiaotian Zhao, Ruge Xu, and Xinfei Guo. Post-training quantization or quantization-aware training? that is the question.
+In 2023 China Semiconductor Technology International Conference (CSTIC), pages 1–3. IEEE, 2023.
+Yuhang Li, Ruihao Gong, Xu Tan, Yang Yang, Peng Hu, Qi Zhang, Fengwei Yu, Wei Wang, and Shi Gu. Brecq:
+Pushing the limit of post-training quantization by block reconstruction. arXiv preprint arXiv:2102.05426, 2021.
+Yamato Arai and Yuma Ichikawa. Quantization error propagation: Revisiting layer-wise post-training quantization.
+Advances in Neural Information Processing Systems, 38:151916–151951, 2026.
+Haoli Bai, Lu Hou, Lifeng Shang, Xin Jiang, Irwin King, and Michael R Lyu. Towards efficient post-training
+quantization of pre-trained language models. Advances in neural information processing systems, 35:1405–1418,
+2022.
+Jingxuan Zhang, Yunta Hsieh, Zhongwei Wan, Haokun Lin, Xin Wang, Ziqi Wang, Yingtie Lei, and Mi Zhang.
+Quantvla: Scale-calibrated post-training quantization for vision-language-action models. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 39539–39549, 2026a.
+Yuzhang Shang, Zhihang Yuan, Bin Xie, Bingzhe Wu, and Yan Yan. Post-training quantization on diffusion models. In
+Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 1972–1981, 2023.
+Ningyuan Tang, Minghao Fu, Hao Yu, and Jianxin Wu. Qwt-v2: Practical, effective and efficient post-training
+quantization. arXiv preprint arXiv:2505.20932, 2025.
+Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. Gptq: Accurate post-training quantization for
+generative pre-trained transformers. arXiv preprint arXiv:2210.17323, 2022.
+Trevor Hastie. Ridge regularization: An essential concept in data science. Technometrics, 62(4):426–433, 2020.
+Minghao Fu, Hao Yu, Jie Shao, Junjie Zhou, Ke Zhu, and Jianxin Wu. Quantization without tears. In Proceedings of
+the Computer Vision and Pattern Recognition Conference, pages 4462–4472, 2025.
+Mohammadreza Mohammadi, Matthew Grenier, and Ramtin Zand. Fixing quantization with lightweight adapters. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 3569–3578, 2026.
+Jaehyeon Moon, Dohyung Kim, Junyong Cheon, and Bumsub Ham. Instance-aware group quantization for vision
+transformers. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages
+16132–16141, 2024.
+Zhikai Li, Junrui Xiao, Lianwei Yang, and Qingyi Gu. Repq-vit: Scale reparameterization for post-training quantization
+of vision transformers. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages
+17227–17236, 2023.
+Zhuguanyu Wu, Shihe Wang, Jiayi Zhang, Jiaxin Chen, and Yunhong Wang. Fima-q: Post-training quantization for
+vision transformers by fisher information matrix approximation. In Proceedings of the Computer Vision and Pattern
+Recognition Conference, pages 14891–14900, 2025a.
+Zhuguanyu Wu, Jiayi Zhang, Jiaxin Chen, Jinyang Guo, Di Huang, and Yunhong Wang. Aphq-vit: Post-training
+quantization with average perturbation hessian based reconstruction for vision transformers. In Proceedings of the
+Computer Vision and Pattern Recognition Conference, pages 9686–9695, 2025b.
+Cheng Zhang, Jeffrey TH Wong, Can Xiao, George Constantinides, and Yiren Zhao. Qera: an analytical framework for
+quantization error reconstruction. In International Conference on Learning Representations, volume 2025, pages
+12531–12560, 2025.
+8
+
+
+WebMCP Tool Surface Poisoning
+A PREPRINT
+Yixiao Li, Yifan Yu, Chen Liang, Nikos Karampatziakis, Pengcheng He, Weizhu Chen, and Tuo Zhao. Loftq: Lora-
+fine-tuning-aware quantization for large language models. In International Conference on Learning Representations,
+volume 2024, pages 13409–13424, 2024.
+Rajarshi Saha, Naomi Sagan, Varun Srivastava, Andrea J Goldsmith, and Mert Pilanci. Compressing large language
+models using low rank and low precision decomposition. Advances in Neural Information Processing Systems, 37:
+88981–89018, 2024.
+Xun Zhang, Kaicheng Yang, Hongliang Lu, Haotong Qin, Yong Guo, and Yulun Zhang. Q-dit4sr: Exploration of detail-
+preserving diffusion transformer quantization for real-world image super-resolution. arXiv preprint arXiv:2602.01273,
+2026b.
+9
+
+
+WebMCP Tool Surface Poisoning
+A PREPRINT
+Figure 1:
+10
+
+
+WebMCP Tool Surface Poisoning
+A PREPRINT
+Figure 2:
+Figure 3: Progressive accuracy improvements across the three stages of our method
+Figure 4: Compensation Value Plot
+11
+
+
+WebMCP Tool Surface Poisoning
+A PREPRINT
+Figure 5: (a)Severity of ill conditioning across architectures (b)Accuracy comparison before and after stabilization.
+Figure 6: Trade off plot between accuracy and size
+12

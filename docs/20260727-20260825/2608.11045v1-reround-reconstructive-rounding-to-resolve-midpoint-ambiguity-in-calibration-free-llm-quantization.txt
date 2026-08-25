@@ -1,0 +1,2728 @@
+ReRound: Reconstructive Rounding to Resolve Midpoint Ambiguity
+in Calibration-Free LLM Quantization
+He-Yen Hsieh, H. T. Kung
+Harvard University
+Abstract
+ReRound (Reconstructive Rounding) is a post-training quanti-
+zation method that addresses the midpoint ambiguity inherent
+in standard round-to-nearest (RTN) schemes when quantizing
+weights near the centers of quantization intervals.
+Starting from a pretrained LLM, ReRound trains a conditional
+diffusion model to produce continuous reconstructions of low-
+bit weights for the LLM. These reconstructed weights act as
+a guidance signal to disambiguate the rounding direction of
+weights located close to interval midpoints.
+To integrate this reconstruction-guided rounding with conven-
+tional RTN, ReRound introduces a tolerance metric measuring
+how far the quantized weight (not the final quantized integer)
+is away from the midpoint: quantized weights within a toler-
+ance region around midpoints are quantized using diffusion-
+based reconstructions, whereas weights closer to quantization
+boundaries are quantized with RTN. By sweeping the toler-
+ance parameter, ReRound generates multiple candidate quan-
+tized integer weight matrices and selects the de-quantized
+weight matrix candidate whose leading singular values most
+closely match those of the original full-precision weights.
+This selected candidate determines the tolerance parameter
+ReRound uses.
+ReRound is particularly effective for smaller LLMs. Across
+a range of such models, it consistently outperforms stan-
+dard RTN for 3-bit and 4-bit weight quantization. ReRound
+achieves superior accuracy compared to an extensive
+set of calibration-free methods, remains competitive with
+calibration-dependent approaches, and operates entirely of-
+fline, introducing no additional overhead during low-bit infer-
+ence.
+The ReRound strategy represents a new approach for low-bit
+quantization. The method applies to AI models beyond LLMs.
+This paper focuses on its applications to small LLMs. Code
+is available at https://github.com/louisYen/ReRound.
+1
+Introduction
+Weight-only post-training quantization (PTQ) reduces the
+storage and memory traffic of pretrained language mod-
+els without retraining. Accuracy under low-bit quantization
+has been improved through optimized quantization parame-
+ters (Frantar et al. 2022; Lin et al. 2025) and tensor trans-
+formations (Xiao et al. 2023; Ashkboos et al. 2024). Once
+the scales, zero-points, group size, and quantized layers are
+fixed, each quantized weight must still be assigned to its
+Reconstructed 
+Weight Matrix
+𝑊!"#
+Round Up
+(a) Midpoint Ambiguity: Round Down or Up?
+Round Down
+Round
+Up
+Floor
+Ceiling
+Midpoint
+1
+2
+= 1.76
+= 1.48
+1.5
+𝑤"
+𝑤"!"# 
+Diffusion-Prior Guidance from (b)
+(b) Diffusion-Prior Guidance
+Patches of 
+LLM Weight 
+Matrices
+Train 
+U-Net
+Weight 
+Matrix 𝑊
+𝑤"!"# 
+Learned 
+Diffusion 
+Prior (U-Net)
+Quantized floating-point weight 𝑤#
+Reconstructed quantized floating-point weight 𝑤#!"#
+Map to quantized coordinates
+Figure 1: ReRound resolves ambiguous rounding with a
+learned diffusion prior. (a) The quantized floating-point
+weight ew = 1.48 is in the midpoint ambiguity region (blue
+interval) in the sense that ew is sufficiently near the midpoint
+1.5. As a result, there is low confidence on whether ew should
+be rounded down to the floor 1 or up to the ceiling 2. But,
+under RTN, because ew is slightly closer to the floor 1, in
+this case it will always be rounded to the floor. (b) For a
+given LLM, ReRound resolves midpoint ambiguity using a
+diffusion prior (a U-Net) learned from 64×64 patches of
+all weight matrices in the LLM. Since this diffusion prior
+reflects the distribution of weights in the LLM, ReRound uses
+it to guide the rounding. In preparing for inference, the U-
+Net generates a collection of 64×64 patches around ew. The
+generated patches will be designated as the reconstructed
+ewrec. Since ewrec reflects the distribution of weights of the
+LLM, ReRound applies RTN to ewrec, rather than ew, when
+ewrec is not far from ew. Thus, in this example, ew = 1.48
+under ReRound will be rounded to the ceiling 2 rather than
+the floor 1, as shown in (a).
+lower or upper adjacent quantized integer. We focus on this
+final rounding step.
+Round-to-nearest (RTN) makes this assignment using
+scalar distance. Its choice is clear when a quantized weight
+lies close to one adjacent quantized integer. Near the mid-
+arXiv:2608.11045v1  [cs.LG]  11 Aug 2026
+
+
+point, however, rounding down and up incur nearly identical
+error, and the decision depends on only a small distance
+difference. Changing one such assignment incurs little ad-
+ditional scalar error. Across a matrix, however, a small set
+of changes can alter the overall rounding pattern applied by
+a linear layer. Midpoint-ambiguous decisions therefore pro-
+vide natural opportunities to improve rounding at the matrix
+level. Prior works show where RTN can be improved, but do
+not identify which alternative rounding assignments should
+be chosen.
+In this paper, we propose ReRound, a calibration-free
+framework that revisits midpoint-ambiguous RTN decisions
+using information learned from the pretrained LLM’s own
+weights. Quantization maps a range of full-precision values
+to the same low-bit level, so the quantized integer alone does
+not reveal the original full-precision value. We train a con-
+ditional diffusion model on paired full-precision and low-bit
+weight regions from the pretrained model to produce contin-
+uous reconstructed weights from each low-bit observation.
+The reconstructed weights are not deployed as model param-
+eters. Instead, they provide additional evidence for whether
+each original weight should be rounded down or up.
+The usefulness of this evidence depends on the margin
+of the original RTN decision. Near the midpoint, where the
+two assignments have similar scalar error, the reconstructed
+weight can provide useful guidance. Toward either adjacent
+quantized integer, RTN has a clearer preference and should
+be preserved more often. ReRound therefore uses a position-
+dependent tolerance metric determined by the distance of
+each quantized weight from the midpoint. This metric per-
+mits more reconstruction-guided changes within the mid-
+point region and increasingly preserves RTN toward the ad-
+jacent quantized integers. A change is accepted only when
+the reconstructed weight favors the assignment opposite to
+RTN and satisfies this tolerance metric. Varying the toler-
+ance parameter produces a small set of candidate quantized
+integer weight matrices with different reconstruction-guided
+assignments.
+These candidates differ in their rounding patterns across
+the complete weight matrix. We therefore compare them as
+complete matrices. The selected candidate is the one whose
+de-quantized weight matrix has leading singular values that
+most closely match those of the original full-precision ma-
+trix. This weight-only spectral criterion favors candidatesthat
+preserve the dominant structure of the original layer. Both
+diffusion-based reconstruction and spectral selection require
+no activation samples, calibration text, or downstream labels.
+The final model differs from RTN only in selected floor-or-
+ceiling assignments. The scales, zero-points, group size, and
+quantized layers remain unchanged. The same procedure can
+therefore refine standard RTN or be applied to quantization
+parameters produced by another PTQ method. All diffusion-
+based reconstruction and spectral selection are performed
+offline. Because ReRound changes only the quantized in-
+teger assignments, it leaves the low-bit representation and
+inference procedure unchanged.
+Our contributions are:
+• We introduce ReRound, which trains conditional diffu-
+sion on the pretrained model’s weight regions and uses
+the reconstructed continuous weights to guide midpoint-
+ambiguous floor-or-ceiling decisions without activation
+or text calibration data.
+• We propose a position-dependent tolerance metric that
+controls where reconstruction-guided changes are ac-
+cepted, together with a weight-only spectral criterion that
+selects the final quantized integer weight matrix.
+• ReRound consistently improves RTN at 3 and 4 bits, pre-
+serves the same low-bit representation and inference pro-
+cedure, and can be applied to quantization parameters
+produced by another PTQ method.
+2
+Related Work
+2.1
+LLM Post-Training Quantization
+LLM PTQ improves low-bit accuracy by optimizing quan-
+tization parameters or transforming weights and activations
+before quantization. GPTQ (Frantar et al. 2022) uses ap-
+proximate second-order information to reduce weight er-
+ror, AWQ (Lin et al. 2025) protects activation-salient chan-
+nels, and OmniQuant (Shao et al. 2024) learns clipping
+ranges and equivalent transformations from calibration data.
+SmoothQuant (Xiao et al. 2023) redistributes activation
+outliers, whereas QuaRot (Ashkboos et al. 2024), Spin-
+Quant (Liu et al. 2025), and FlatQuant (Sun et al. 2025a)
+transform tensors into more quantization-friendly represen-
+tations. Without calibration data, HQQ (Badri and Shaji
+2023) optimizes a weight-only objective, and SINQ (Müller
+et al. 2026) derives dual-axis scales from matrix statistics.
+These methods improve the quantization setup before the
+final rounding step.
+2.2
+Rounding Assignment Optimization
+With fixed quantization parameters, assigning each quan-
+tized weight to its lower or upper adjacent quantized in-
+teger can still affect model accuracy. AdaRound (Nagel
+et al. 2020) learns these assignments through local output
+reconstruction, whereas FlexRound (Lee et al. 2023) in-
+troduces element-wise divisive parameters for more flexi-
+ble rounding. SignRound (Cheng et al. 2024) jointly opti-
+mizes rounding and clipping with signed gradients. Sign-
+RoundV2 (Cheng et al. 2025) extends this approach with
+gradient-informed layer sensitivity and quantization-scale
+initialization for low-bit PTQ. CafeQ (Sun et al. 2025b) com-
+bines learned transformations with calibration-free adaptive
+rounding under a weight-space proxy. These methods opti-
+mize rounding through reconstruction or proxy objectives,
+whereas ReRound uses reconstructed weights as a learned
+prior for midpoint-ambiguous rounding decisions.
+2.3
+Diffusion and Weight Priors
+Diffusion models have been used as priors for inverse prob-
+lems by incorporating observations into the reverse process.
+DPS (Chung et al. 2023) addresses noisy and nonlinear mea-
+surements, and QCS-SGM (Meng and Kabashima 2022)
+and SIM-DMIS (Tang et al. 2025) adapt diffusion priors
+to quantized signal reconstruction. For image dequantiza-
+tion, Vavilala et al. (Vavilala, Shaik, and Forsyth 2025) re-
+construct continuous colors from quantized representations.
+
+
+Diff-OneBit (Chen and Liu 2026) further combines a dif-
+fusion prior with data consistency for reconstruction from
+1-bit measurements. In weight space, Neural Network Dif-
+fusion (Wang et al. 2024) and D2NWG (Soro et al. 2025)
+generate neural-network parameters. Dravid et al. (Dravid
+et al. 2024) introduce weights2weights for sampling, edit-
+ing, and inverting customized diffusion models. ReRound
+instead learns a diffusion prior from the pretrained LLM’s
+own weights and uses the reconstructed weights to guide
+midpoint-ambiguous rounding decisions for low-bit weight-
+only PTQ.
+3
+Method: ReRound
+ReRound revisits the final rounding assignments under a
+fixed quantization setup. For each pretrained LLM, a con-
+ditional diffusion model is trained once to produce con-
+tinuous reconstructed weights (Section 3.2). These recon-
+structed weights guide rounding decisions affected by mid-
+point ambiguity and produce candidate quantized integer
+weight matrices using a position-dependent tolerance met-
+ric (Section 3.3). For each matrix, the candidate whose de-
+quantized weight matrix has leading singular values that best
+match those of the full-precision matrix is selected (Sec-
+tion 3.4).
+3.1
+Midpoint-Ambiguous RTN Decisions
+Let W ∈Rdout×din be a full-precision weight matrix. Con-
+sider one quantization group with scale ∆and zero-point z;
+the same derivation applies independently to every group.
+For a weight w ∈W, define its quantized weight as
+˜w = w
+∆+z = ℓ+r,
+ℓ= ⌊˜w⌋,
+u = ℓ+1,
+r ∈[0, 1).
+(1)
+RTN selects the closer adjacent quantized integer:
+qrtn = arg min
+q∈{ℓ,u}( ˜w −q)2.
+(2)
+The lower and upper assignments incur
+eℓ(r) = (w −∆(ℓ−z))2 = ∆2r2,
+eu(r) = (w −∆(u −z))2 = ∆2(1 −r)2.
+(3)
+Thus, flipping the RTN assignment incurs the additional cost
+cflip(r) = |eu(r) −eℓ(r)| = ∆2|1 −2r|.
+(4)
+The cost is smallest at the midpoint r = 0.5 and increases
+toward either adjacent quantized integer. ReRound accord-
+ingly gives reconstructed weights greater influence near the
+midpoint and increasingly preserves RTN away from it.
+3.2
+Conditional Weight Reconstruction
+The flip cost in Eq. (4) identifies where an RTN assignment
+can be changed at low scalar cost, but not whether the alterna-
+tive assignment is supported by the joint weight structure. For
+each pretrained LLM, ReRound trains one conditional dif-
+fusion model on local patches from its full-precision weight
+matrices. The model jointly reconstructs each patch from
+its low-bit observation, providing a prior learned from the
+pretrained LLM’s own weights.
+Low-bit Conditions
+Quantize 
+(SR)
+Quantize 
+(RTN)
+Diffusion 
+Model
+(U-Net)
+Add Noise
+Predicted 
+Noise
+Gaussian noise
+Crop
+Stochastic rounding
+S𝐑
+Round-To-Nearest
+R𝐓𝐍
+&
+&
+Training path
+Inference path
+Target LLM
+(e.g., 
+Gemma 2)
+Weight Patch 𝑃
+Weight 
+Matrix 𝑊
+Training
+𝑃!
+Noisy 
+Patch
+Inference
+𝑃"#$
+ 𝑃%#&'
+Low-bit 
+Condition 
+Branch
+Initial State 𝑃!
+Reconstructed 
+Matrix 𝑊"#$
+Reconstructed 
+Patch 𝑃"#$
+Assemble
+Figure 2: Conditional weight reconstruction. During train-
+ing, the diffusion model predicts noise on a full-precision
+patch P, conditioned on its stochastic low-bit version Plow.
+During inference, reverse diffusion is conditioned on the de-
+terministic RTN patch Pcond. The reconstructed patches form
+Wrec, used only to guide rounding.
+Let P denote a patch cropped from a full-precision weight
+matrix W. During training, its low-bit condition is formed
+by group-wise stochastic quantization:
+Plow = Qsr(P; ∆c, zc),
+(5)
+where ∆c and zc are the corresponding scale and zero-
+point. For an entry p ∈P, define its quantized weight as
+˜p = p/∆c + zc = ℓ+ r, where r ∈[0, 1). Then Qsr se-
+lects the quantized integer ℓwith probability 1 −r and the
+quantized integer ℓ+ 1 with probability r. Only the condi-
+tion is quantized; the reconstruction target remains the full-
+precision patch P. ReRound models the conditional distri-
+bution pθ(P | Plow) using conditional diffusion (Vavilala,
+Shaik, and Forsyth 2025).
+At diffusion step t, Gaussian noise ϵ ∼N(0, I) produces
+Pt = √¯αt P +
+√
+1 −¯αt ϵ,
+(6)
+where ¯αt determines the noise level. The denoiser receives
+Pt, t, and Plow and predicts the added noise:
+Ldiff = EP,t,ϵ
+h
+∥ϵ −ϵθ(Pt, t, Plow)∥2
+2
+i
+.
+(7)
+During diffusion inference, let {Pk}K
+k=1 be the patches
+cropped from a weight matrix W of the pretrained LLM.
+Each patch is conditioned on its deterministic RTN quanti-
+zation:
+Pcond,k = Qrtn(Pk; ∆c, zc).
+(8)
+Starting from PT ∼N(0, I), the conditional reverse process
+produces
+Prec,k = Rθ(Pcond,k),
+(9)
+where Rθ denotes reverse diffusion from step T to step 0. The
+reconstructed patches are returned to their original locations
+to form the reconstructed matrix Wrec. Because each patch is
+reconstructed jointly, each reconstructed entry depends on its
+low-bit observation and the surrounding entries in the patch.
+The reconstructed matrix is used only to guide rounding and
+is not deployed as the final weight matrix.
+
+
+𝑤"!"# 
+2
+3
+𝟐. 𝟓
+Floor
+Ceiling
+𝑤" 
++𝜹
+−𝜹
+𝝉𝒑𝒐𝒔(𝒓; 𝝉) 
+Reconstructed Weights
+Original FP Weights
+Quantized coordinate
+𝜌= 𝑤-!"# −𝑤-
+≤𝜏$%&(𝑟; 𝜏)
+𝑞'() = 3
+𝑞!)* = 2
+𝑟from 𝑤" 
+Ambiguous region
+ReRound
+selects
+Interval position of 𝑤"
+Position-dependent 
+tolerance
+𝜏!"#(⋅)
+𝑟
+𝑊
+𝑊!"#
+Figure 3: Reconstruction-guided rounding. The original
+quantized weight ˜w determines the RTN assignment qrtn
+and the opposite adjacent assignment qalt. The reconstructed
+weight in quantized space, ˜wrec, proposes a change when
+qrec = qalt. The proposal is accepted when its deviation
+from ˜w lies within the position-dependent tolerance metric
+τpos(r; τ); otherwise, RTN is retained.
+3.3
+Reconstruction-Guided Rounding
+ReRound uses the reconstructed weights to propose alterna-
+tive floor-or-ceiling assignments under the fixed PTQ quan-
+tization parameters. Let w and wrec be corresponding entries
+of W and the reconstructed matrix Wrec. Using the fixed
+scale ∆and zero-point z, we map both to the same quantized
+weight space:
+˜w = w
+∆+ z,
+˜wrec = wrec
+∆
++ z.
+(10)
+Using ℓ, u, and r from Eq. (19), define
+qrtn = round( ˜w),
+qalt = ℓ+ u −qrtn,
+qrec = round( ˜wrec).
+(11)
+The reconstructed weight proposes changing RTN only when
+qrec = qalt. Thus, reconstruction-guided rounding can only
+switch RTN to the opposite adjacent quantized integer.
+Whether the proposal is accepted depends on the original
+quantized weight’s position within its quantization interval.
+Define its distance to the nearest quantized integer as
+d(r) = min{r, 1 −r} ∈[0, 0.5].
+(12)
+Here, d(r) = 0.5 at the midpoint and decreases toward zero
+near either adjacent quantized integer. By Eq. (4), for a fixed
+scale ∆, larger d(r) corresponds to a lower RTN flip cost.
+The
+position-dependent
+tolerance
+metric
+for
+a
+reconstruction-guided proposal depends on d(r). Given a
+tolerance parameter τ, ReRound defines
+τpos(r; τ) = τ exp
+"
+−β
+[0.5 −δ −d(r)]+
+0.5 −δ
+2#
+,
+(13)
+where [x]+ = max{x, 0}. The parameter δ defines the mid-
+point region |r−0.5| ≤δ, where τpos(r; τ) = τ. Outside this
+region, β controls how quickly the tolerance metric decreases
+toward either adjacent quantized integer.
+Final Quantized 
+Weights
+𝜏⋆= 𝜏"
+ReRound Candidates ( 𝜏∈
+)
+Original FP
+Weights
+Recovered 
+Weights
+𝑊#$%
+𝑊
+Candidate (𝜏!)
+𝑄&!
+𝑊&!
+Spectral Gap 
+to
+Spectral Gap 
+to
+𝑊&"
+Candidate (𝜏")
+𝑄&"
+De-quantize
+De-quantize
+vs. 
+Select          with 
+Smallest 
+Spectral Gap
+𝜏⋆
+Example:
+𝑊
+𝑊
+𝑄&⋆
+Figure 4: Candidate selection via spectral preservation.
+Each candidate quantized integer weight matrix Qτ is
+de-quantized to obtain the candidate weight matrix Wτ.
+ReRound compares its leading singular values with those
+of the full-precision matrix W and selects the candidate
+with the smallest spectral discrepancy. The illustration se-
+lects τ ⋆= τ2.
+The reconstruction deviation, measured in quantization-
+step units, is
+ρ(w, wrec) = | ˜wrec −˜w| = |wrec −w|
+|∆|
+.
+(14)
+The candidate assignment for tolerance parameter τ is
+qτ =
+qalt,
+qrec = qalt
+and
+ρ(w, wrec) ≤τpos(r; τ),
+qrtn,
+otherwise.
+(15)
+Applying Eq. (15) element-wise produces one candidate
+quantized integer weight matrix Qτ for each tolerance param-
+eter τ ∈T . Different tolerance parameters produce different
+rounding candidates, while all other quantization settings re-
+main fixed. The next section selects one candidate for each
+weight matrix.
+3.4
+Candidate Selection via Spectral Preservation
+Reconstruction-guided rounding produces one candidate
+quantized integer weight matrix Qτ for each tolerance pa-
+rameter τ ∈T . ReRound selects the candidate whose de-
+quantized weight matrix has leading singular values that
+most closely match those of the full-precision matrix W.
+These values summarize the strengths of the matrix’s domi-
+nant transformation modes, providing a matrix-level criterion
+without requiring activation data.
+Figure 4 illustrates the selection process. For each tol-
+erance parameter τ ∈T , the candidate quantized integer
+weight matrix Qτ is de-quantized using the fixed PTQ pa-
+rameters:
+Wτ = Dequant (Qτ; ∆, z) ,
+(16)
+where ∆and z denote the fixed scales and zero-points,
+applied group-wise when needed. The candidate is de-
+quantized only for spectral comparison.
+Let m = min{dout, din} be the smaller dimension of
+W. We compare the leading k singular values, where k =
+min{m, 128, max(32, ⌊m/16⌋)}. This choice adapts k to the
+matrix size and uses at most 128 singular values. Let σ1:k(W)
+
+
+Gemma 2 2B
+Gemma 3 1B
+Qwen3 1.7B
+Method
+WinoGrande↑PIQA↑BoolQ↑SIQA↑Avg.↑WinoGrande↑PIQA↑BoolQ↑SIQA↑Avg.↑WinoGrande↑PIQA↑BoolQ↑SIQA↑Avg.↑
+16-bit
+69.0
+79.3
+72.7
+51.4
+68.1
+58.8
+74.9
+66.5
+42.9
+60.8
+60.9
+72.6
+77.5
+45.2
+64.1
+W4A16
+RTN channel-wise
+66.2
+75.6
+70.2
+45.6
+64.4
+57.2
+72.1
+44.9
+39.8
+53.5
+56.5
+68.4
+72.3
+40.1
+59.3
+RTN group-wise, G = 128
+67.7
+78.1
+69.6
+50.3
+66.4
+57.9
+72.4
+62.6
+42.3
+58.8
+57.6
+70.4
+77.7
+42.9
+62.2
+HQQ, G = 128
+68.8
+78.2
+71.4
+50.8
+67.3
+58.9
+73.9
+54.7
+42.9
+57.6
+59.0
+69.0
+75.0
+42.4
+61.3
+BNB (FP4)
+67.6
+77.7
+61.7
+50.6
+64.4
+58.4
+73.5
+55.5
+42.1
+57.4
+57.8
+68.9
+76.7
+43.1
+61.6
+Hadamard + RTN, G = 128
+68.0
+78.0
+58.3
+49.6
+63.5
+58.4
+73.4
+63.1
+42.4
+59.3
+57.1
+66.5
+72.4
+41.3
+59.3
+ReRound
+68.7
+78.6
+72.0
+50.1
+67.4
+59.3
+73.3
+61.9
+42.6
+59.3
+58.6
+70.3
+78.3
+43.2
+62.6
+W3A16
+RTN channel-wise
+51.3
+55.4
+61.5
+34.3
+50.6
+50.2
+52.6
+47.3
+33.9
+46.0
+50.5
+53.1
+40.1
+34.4
+44.5
+RTN group-wise, G = 128
+63.2
+73.5
+68.3
+42.6
+61.9
+55.5
+65.9
+60.9
+38.9
+55.3
+53.4
+62.5
+62.9
+37.5
+54.1
+HQQ, G = 128
+62.3
+73.5
+60.9
+44.3
+60.2
+55.6
+67.4
+60.2
+38.1
+55.3
+48.5
+54.4
+51.4
+34.2
+47.1
+Hadamard + RTN, G = 128
+61.6
+76.1
+63.8
+46.0
+61.9
+55.0
+67.4
+48.2
+37.7
+52.1
+49.6
+54.7
+48.2
+34.3
+46.7
+ReRound
+63.8
+73.1
+68.6
+42.6
+62.0
+56.2
+65.5
+61.3
+38.9
+55.5
+52.5
+62.7
+64.6
+36.9
+54.2
+Table 1: Calibration-free weight-only PTQ on Gemma 2 2B, Gemma 3 1B, and Qwen3 1.7B. All group-wise methods use
+G = 128, and the lm_head is quantized for all methods. ReRound shares the scales and zero-points of group-wise RTN and
+changes only the rounding assignments. Avg. reports the mean of the four task accuracies. Best results for each model at each
+bit width are shown in bold.
+and σ1:k(Wτ) denote their leading k singular values, ordered
+from largest to smallest.
+Dspec(τ) = ∥σ1:k(Wτ) −σ1:k(W)∥2
+∥σ1:k(W)∥2 + ϵ
+,
+(17)
+where ϵ > 0 ensures numerical stability. ReRound selects
+τ ⋆= arg min
+τ∈T Dspec(τ).
+(18)
+The selected Qτ ⋆provides the final quantized integer assign-
+ments and, together with the fixed scales and zero-points,
+defines the quantized representation of W.
+4
+Experiments
+4.1
+Experimental Setup
+We summarize the main settings below; further implemen-
+tation details are provided in the supplementary material.
+Models and evaluation.
+Our full baseline comparison in-
+cludes Gemma 2 2B (Gemma Team et al. 2024), Gemma
+3 1B (Gemma Team et al. 2025), Qwen3 1.7B (Yang
+et al. 2025), OLMo 2 1B (OLMo Team et al. 2025), and
+SmolLM2 1.7B (Allal et al. 2025). We further evaluate
+whether ReRound consistently improves RTN across Llama
+3.2 1B (Grattafiori et al. 2024), Pythia 1.4B (Biderman et al.
+2023), and Phi-2 2.7B (Javaheripi and Bubeck 2023). We
+evaluate zero-shot accuracyon WinoGrande (Sakaguchi etal.
+2020), PIQA (Bisk et al. 2020), BoolQ (Clark et al. 2019),
+and SIQA (Sap et al. 2019) using the LM Evaluation Har-
+ness (Gao et al. 2026). For SINQ (Müller et al. 2026), we
+adopt its quantization scales and also report perplexity on
+WikiText-2 (Merity et al. 2017) and C4 (Raffel et al. 2020).
+Quantization settings.
+In the main RTN and ReRound ex-
+periments, we use asymmetric uniform weight quantization.
+W4A16 and W3A16 denote 4-bit and 3-bit weight quanti-
+zation, respectively, both with 16-bit activations. All group-
+wise methods use group size G = 128. For all evaluated
+quantization methods, we quantize the transformer linear
+layers and the output logit layer (lm_head). ReRound uses
+the same scales, zero-points, group size, and layer coverage
+as group-wise RTN; only selected quantized integer assign-
+ments differ. It therefore preserves the same low-bit repre-
+sentation and inference procedure as RTN.
+Baselines.
+The calibration-free baselines are channel-wise
+and group-wise RTN, HQQ, BNB FP4 (Dettmers et al. 2023),
+Hadamard-transformed RTN (Ashkboos et al. 2024; Müller
+et al. 2026), and CafeQ. BNB FP4 is evaluated only at 4 bits.
+The 4-bit calibration-based baselines are GPTQ, AdaRound,
+and SignRound. GPTQ and AdaRound use 128 calibration
+samples from C4.
+Diffusion training and inference.
+For each pretrained
+LLM, we train one conditional diffusion model (Vavilala,
+Shaik, and Forsyth 2025) on two GPUs using full-precision
+patches paired with 2-bit conditions generated by stochastic
+rounding (SR). Diffusion inference uses one GPU to recon-
+struct Wrec from deterministic 2-bit RTN conditions. The
+same reconstructed matrix Wrec is reused for the 3- and 4-bit
+ReRound runs. For SINQ, we instead train separate models
+for 3-bit and 4-bit conditions, using SR during training and
+RTN during diffusion inference.
+ReRound PTQ.
+For each target bit width, ReRound uses
+one GPU to map W and Wrec to the same quantized weight
+space, construct candidate quantized integer weight matri-
+ces over τ ∈T , and select one candidate for each weight
+matrix by matching the leading singular values of its de-
+quantized weight matrix to those of W. It changes at most
+1% of the RTN quantized integer assignments in each matrix
+and uses the same formulation across models. All diffusion-
+based reconstruction and ReRound PTQ stages use only the
+pretrained model’s weights, without activation or text cali-
+bration samples.
+4.2
+Comparison with Calibration-Free PTQ
+Tables 1 and 2 compare ReRound with calibration-free
+weight-only PTQ methods across five LLMs. ReRound im-
+proves its matched group-wise RTN baseline for every model
+at both bit widths, with gains of 0.1–0.9 points at 3 bits and
+
+
+OLMo 2 1B
+SmolLM2 1.7B
+Method
+WinoGrande↑
+PIQA↑
+BoolQ↑
+SIQA↑
+Avg.↑
+WinoGrande↑
+PIQA↑
+BoolQ↑
+SIQA↑
+Avg.↑
+16-bit
+64.6
+75.2
+62.3
+43.4
+61.4
+66.1
+77.3
+72.5
+44.3
+65.1
+W4A16
+RTN channel-wise
+59.4
+72.4
+63.2
+42.2
+59.3
+58.1
+72.2
+64.3
+40.1
+58.7
+RTN group-wise, G = 128
+63.5
+74.9
+51.7
+42.3
+58.1
+63.5
+76.2
+68.3
+42.8
+62.7
+HQQ, G = 128
+64.3
+74.8
+59.9
+42.5
+60.4
+61.8
+75.4
+67.3
+43.0
+61.9
+BNB (FP4)
+61.9
+74.7
+64.3
+43.4
+61.1
+62.7
+76.3
+54.4
+44.0
+59.3
+Hadamard + RTN, G = 128
+63.3
+75.5
+52.3
+43.3
+58.6
+62.8
+74.8
+68.3
+42.0
+62.0
+ReRound
+63.9
+75.4
+54.4
+43.7
+59.4
+65.1
+76.7
+67.3
+42.3
+62.9
+W3A16
+RTN channel-wise
+51.1
+57.6
+38.8
+33.8
+45.4
+48.2
+51.0
+49.4
+33.3
+45.5
+RTN group-wise, G = 128
+58.7
+71.2
+47.7
+39.5
+54.3
+57.9
+70.0
+58.0
+38.2
+56.0
+HQQ, G = 128
+56.3
+67.1
+58.0
+36.4
+54.4
+53.4
+60.8
+58.9
+37.8
+52.8
+Hadamard + RTN, G = 128
+55.6
+68.4
+42.1
+35.5
+50.4
+51.5
+59.7
+45.0
+36.1
+48.1
+ReRound
+57.7
+71.4
+51.4
+39.9
+55.1
+57.5
+71.0
+60.6
+38.3
+56.9
+Table 2: Calibration-free weight-only PTQ on OLMo 2 1B and SmolLM2 1.7B. All group-wise methods use G = 128, and all
+methods quantize lm_head. ReRound shares the scales and zero-points of group-wise RTN and changes only the rounding
+assignments. Avg. is the mean across four tasks. Best results for each model at each bit width are shown in bold.
+Model
+Method
+WinoGrande↑PIQA↑BoolQ↑SIQA↑Avg.↑
+Gemma 2 2B
+16 bits
+69.0
+79.3
+72.7
+51.4
+68.1
+GPTQ, G = 128
+66.5
+78.6
+70.9
+50.8
+66.7
+AdaRound, G = 128
+68.2
+78.5
+70.6
+50.2
+66.9
+SignRound, G = 128
+67.9
+78.4
+70.8
+51.1
+67.0
+CafeQ
+66.9
+78.0
+67.1
+51.4
+65.9
+ReRound
+68.7
+78.6
+72.0
+50.1
+67.4
+Gemma 3 1B
+16 bits
+58.8
+74.9
+66.5
+42.9
+60.8
+GPTQ, G = 128
+58.0
+73.9
+56.8
+42.3
+57.8
+AdaRound, G = 128
+59.1
+73.0
+61.4
+42.0
+58.9
+SignRound, G = 128
+58.5
+73.2
+63.5
+41.3
+59.1
+ReRound
+59.3
+73.3
+61.9
+42.6
+59.3
+Table 3: Comparison with calibration-based PTQ under
+W4A16 quantization on Gemma 2 2B and Gemma 3 1B,
+with CafeQ additionally reported on Gemma 2 2B. GPTQ,
+AdaRound, and SignRound use calibration data, whereas
+CafeQ and ReRound are calibration-free. All group-wise
+methods use G = 128, and all methods quantize lm_head.
+Avg. is the mean accuracy across the four tasks. Best quan-
+tized results for each model are shown in bold.
+0.2–1.3 points at 4 bits. Because the scales, zero-points,
+group size, and layer coverage are fixed, these gains come
+solely from revising selected quantized integer assignments.
+At 3 bits, ReRound achieves the highest four-task average
+on every model, showing the benefit of revisiting midpoint-
+ambiguous decisions under aggressive quantization. At 4
+bits, it achieves or matches the best average on four of the
+five models. On OLMo 2 1B, HQQ and BNB FP4 obtain av-
+erages of 60.4 and 61.1, respectively, compared with 59.4 for
+ReRound. Nevertheless, ReRound raises its matched group-
+wise RTN baseline from 58.1 to 59.4, the largest 4-bit gain
+in the comparison. Thus, even when another quantization pa-
+rameterization performs better, revising selected quantized
+integer assignments substantially improves the fixed RTN
+quantization setup.
+4.3
+Comparison with Calibration-Based PTQ
+Table 3 compares ReRound with calibration-based PTQ
+methods under W4A16 quantization, together with CafeQ
+Bits Method
+Rec. Pos. Spec. Wino. PIQA BoolQ SIQA Avg.
+W4A16
+RTN (group-wise, G = 128)
+–
+–
+–
+63.5
+74.9
+51.7
+42.3
+58.1
+Matched random flips
+–
+✓
+✓
+63.5
+75.3
+51.8
+43.3
+58.5
+Midpoint window
+✓
+–
+✓
+63.8
+75.6
+50.7
+43.6
+58.4
+Weight-MSE selection
+✓
+✓
+–
+64.6
+75.5
+50.6
+44.0
+58.7
+ReRound
+✓
+✓
+✓
+63.9
+75.4
+54.4
+43.7
+59.4
+W3A16
+RTN (group-wise, G = 128)
+–
+–
+–
+58.7
+71.2
+47.7
+39.5
+54.3
+Matched random flips
+–
+✓
+✓
+57.4
+70.2
+49.3
+39.3
+54.1
+Midpoint window
+✓
+–
+✓
+59.0
+71.2
+48.0
+39.6
+54.5
+Weight-MSE selection
+✓
+✓
+–
+58.7
+71.2
+47.7
+39.5
+54.3
+ReRound
+✓
+✓
+✓
+57.7
+71.4
+51.4
+39.9
+55.1
+Table 4: Component ablation on OLMo 2 1B. Each vari-
+ant replaces one ReRound component while keeping the
+other two. Rec., Pos., and Spec. denote reconstruction guid-
+ance, position-dependent tolerance, and spectral selection.
+Matched random flips make the same number of assignment
+changes as ReRound at random and are averaged over ten
+seeds. Midpoint window replaces position-dependent toler-
+ance with [0.5 −δ, 0.5 + δ], while weight-MSE selection re-
+places spectral discrepancy with element-wise weight MSE.
+All variants use the same group-wise W3/W4 quantization
+parameters, G = 128, 16-bit activations, and layer coverage.
+Best results at each bit width are bolded.
+on Gemma 2 2B. ReRound achieves the highest four-task
+average among the quantized methods on both models. The
+strongest calibration-based method, SignRound, reaches av-
+erages of 67.0 on Gemma 2 2B and 59.1 on Gemma 3 1B,
+whereas ReRound achieves 67.4 and 59.3, respectively. Thus,
+ReRound surpasses the best calibration-based result by 0.4
+and 0.2 points without using activation or text calibration
+data. These results show that revisiting midpoint-ambiguous
+rounding decisions with a weight prior learned from the pre-
+trained model’s own weights can compete effectively with
+calibration-data-driven PTQ.
+4.4
+Ablation of ReRound Components
+Table 4 isolates reconstruction guidance, the position-
+dependent tolerance metric, and spectral selection on OLMo
+
+
+Method
+WinoGrande↑
+PIQA↑
+BoolQ↑
+SIQA↑
+Acc Avg.↑
+Wiki2↓
+C4↓
+PPL Avg.↓
+16-bit
+60.9
+72.6
+77.5
+45.2
+64.1
+16.72
+19.25
+17.99
+W4A16
+SINQ-scale RTN, G = 64
+–
+–
+–
+–
+–
+17.14
+19.83
+18.49
+SINQ-scale RTN, G = 64
+59.0
+71.5
+75.1
+42.9
+62.1
+17.19
+19.87
+18.53
+SINQ-scale ReRound, G = 64
+59.7
+71.7
+74.8
+44.0
+62.6
+17.09
+19.83
+18.46
+W3A16
+SINQ-scale RTN, G = 64
+–
+–
+–
+–
+–
+22.39
+24.88
+23.64
+SINQ-scale RTN, G = 64
+54.1
+67.4
+66.1
+40.6
+57.1
+23.27
+25.25
+24.26
+SINQ-scale ReRound, G = 64
+55.6
+66.8
+65.9
+40.9
+57.3
+23.14
+24.97
+24.06
+Table 5: Rounding with SINQ quantization scales on Qwen3
+1.7B. All quantized rows use group size G = 64 and follow
+the layer coverage of SINQ, with the lm_head left unquan-
+tized. The SINQ-reported RTN perplexities are included for
+reference. For the reproduced results, ReRound differs from
+RTN only in the rounding rule. Acc. Avg. and PPL Avg.
+report the means over the four accuracy tasks and two per-
+plexity datasets, respectively. Bold compares the reproduced
+RTN and ReRound results.
+2 1B. Each ablation replaces one component while retain-
+ing the other two. Matched random flips remove reconstruc-
+tion guidance by randomly choosing the same number of
+quantized integer assignment changes as ReRound. Midpoint
+window replaces the position-dependent tolerance metric
+with [0.5 −δ, , 0.5 + δ], while weight-MSE selection uses
+element-wise weight MSE instead of spectral discrepancy.
+Full ReRound achieves the highest four-task average at both
+bit widths, improving group-wise RTN by 1.3 points at W4
+and 0.8 points at W3. Replacing any component lowers the
+average accuracy.
+4.5
+Alternative Quantization Parameters
+Table 5 evaluates ReRound using quantization parameters
+generated by another PTQ method. We use SINQ parameters
+and compare RTN with ReRound under the same reproduced
+setting, including SINQ’s reported RTN perplexities for ref-
+erence. At 4 bits, ReRound increases the four-task average
+from 62.1 to 62.6 and reduces average perplexity from 18.53
+to 18.46. At 3 bits, it increases the average from 57.1 to 57.3
+and reduces average perplexity from 24.26 to 24.06. Thus,
+ReRound also improves quantization setups from other PTQ
+methods.
+4.6
+RTN Improvements on Additional Models
+Figure 5 extends the five-model comparison with Llama 3.2
+1B, Pythia 1.4B, and Phi-2 2.7B. ReRound improves group-
+wise RTN for every model at both 3 and 4 bits. The gains
+range from 0.2 to 1.3 points at 4 bits and from 0.1 to 1.6
+points at 3 bits. Because ReRound and RTN use the same
+scales, zero-points, group size, and layer coverage, these dif-
+ferences arise solely from revising selected quantized inte-
+ger assignments. The positive gains on the three additional
+models extend the same trend beyond those used in the full
+calibration-free comparison. Complete per-task results for
+these models are provided in the supplementary material.
+4.7
+Offline Runtime
+Table 6 reports the offline cost of ReRound. Diffusion train-
+ing is performed once per model on two GPUs, and one-GPU
+diffusion inference produces the reconstructed matrix Wrec
+Model
+Diffusion Training (h)
+Diffusion Inference (h)
+ReRound PTQ (s)
+Gemma 2 2B
+2.52
+9.55
+105
+Gemma 3 1B
+2.69
+3.65
+42
+Qwen3 1.7B
+1.76
+6.29
+74
+OLMo 2 1B
+1.77
+9.32
+57
+SmolLM2 1.7B
+3.43
+6.25
+124
+Table 6: Offline runtime of ReRound. Diffusion training
+and inference are performed once per model, and the recon-
+structed matrix Wrec is reused for W3 and W4. ReRound
+PTQ reports the mean runtime over the two target bit widths.
+Gemma 2 2B
+Gemma 3 1B
+Qwen3 1.7B
+OLMo 2 1B
+SmolLM2 1.7B
+Llama 3.2 1B
+Pythia 1.4B
+Phi-2 2.7B
+0
+0.2
+0.4
+0.6
+0.8
+1
+1.2
+1.4
+1.6
+1.8
+W4A16
+W3A16
+Average accuracy gain over group-wise RTN (points)
+Main calibration-free comparison
+Additional architectures
++1.0
++0.5
++0.4
++1.3
++0.2
++0.9
++0.4
++0.3
++0.1
++0.2
++0.1
++0.8
++0.9
++0.6
++0.9
++1.6
+Phi-2 2.7B
+Pythia 1.4B
+Llama 3.2 1B
+SmolLM2 1.7B
+OLMo 2 1B
+Qwen3 1.7B
+Gemma 3 1B
+Gemma 2 2B
+1.8
+1.6
+1.4
+1.2
+1
+0.8
+0.6
+0.4
+0.2
+0
+Main calibration-free comparison
+Additional architectures
+W4A16
+W3A16
+Gain over RTN (pts)
+Figure 5: Average-accuracy gains of ReRound over group-
+wise RTN across eight LLMs, averaged over WinoGrande,
+PIQA, BoolQ, and SIQA. Both methods use identical quan-
+tization settings; positive values favor ReRound.
+for reuse across bit widths. With this shared reconstruction,
+ReRound PTQ averages 42 to 124 seconds across W3 and
+W4. All additional computation occurs before deployment;
+the resulting quantized model uses the same low-bit repre-
+sentation and inference procedure as RTN.
+5
+Discussion and Limitations
+ReRound revises RTN assignments while keeping scales and
+zero-points fixed, so it can refine quantization parameters
+produced by other PTQ methods. However, its candidate set
+remains constrained by these parameters, motivating joint
+optimization of quantization parameters and reconstruction-
+guided rounding. Although the approach may extend beyond
+LLMs, we evaluate only small LLMs.
+ReRound also requires a separate diffusion model for each
+pretrained LLM, introducing model-specific offline cost.
+Reusing reconstructed weights across bit widths reduces this
+cost, but scaling to many models remains expensive. In ad-
+dition, spectral selection operates only in weight space and
+may not identify the best candidate for every downstream
+task, while patch-based reconstruction may miss long-range
+and cross-layer dependencies. Reducing reconstruction cost,
+transferring weight priors across models, and using broader
+structural criteria are promising directions.
+6
+Conclusion
+We presented ReRound, a calibration-free framework that
+revisits midpoint-ambiguous RTN decisions after quantiza-
+tion parameters are fixed. ReRound learns a diffusion prior
+from the model’s own weights, uses it to guide floor-or-
+ceiling changes, and selects candidate matrices through spec-
+tral preservation. Across diverse LLMs, it consistently im-
+
+
+Package
+Version
+PyTorch
+2.5.1+cu124
+TorchVision
+0.20.1+cu124
+CUDA runtime
+12.4.127
+cuDNN
+9.1.0.70
+Accelerate
+1.1.1
+Transformers
+4.57.1
+Diffusers
+0.35.2
+Datasets
+5.0.0
+lm-eval
+0.4.11
+Hugging Face Hub
+0.36.0
+Tokenizers
+0.22.1
+Table 7: Software packages and versions used for diffusion
+weight recovery, PTQ, and language-model evaluation.
+proves 3- and 4-bit weight-only PTQ without activation or
+text calibration data. Because ReRound changes only selected
+quantized integer assignments, the quantization parameters,
+low-bit representation, and inference procedure remain un-
+changed. These results show that structural patterns in pre-
+trained weights can serve as an effective prior for resolving
+ambiguous rounding decisions.
+A
+Quantization Notation
+Let w be a full-precision weight in a quantization group with
+scale ∆and zero-point z. Applying these fixed quantization
+parameters gives
+˜w = w
+∆+z = ℓ+r,
+ℓ= ⌊˜w⌋,
+u = ℓ+1,
+r ∈[0, 1).
+(19)
+We refer to the continuous floating-point value ˜w before
+rounding as the quantized floating-point weight, or simply the
+quantized weight. Rounding ˜w produces a discrete quantized
+integer q ∈{ℓ, u}. Mapping q back to the original weight
+space gives the corresponding dequantized weight, ∆(q−z).
+B
+Software Environment
+We use the same software environment for diffusion-
+based weight recovery, post-training quantization (PTQ),
+and language-model evaluation. PyTorch is compiled with
+CUDA 12.4. Table 7 lists the main packages used in our
+experiments. For weight recovery, we follow the Deep-
+Floyd IF Stage-II (DeepFloyd Team 2023; Saharia et al.
+2022a) implementation used by Vavilala et al. (Vavilala,
+Shaik, and Forsyth 2025) and initialize the model from the
+IF-II-M-v1.0 pretrained checkpoint.
+C
+Diffusion Training and Inference Details
+Diffusion architecture and conditioning.
+Following Vav-
+ilala et al. (Vavilala, Shaik, and Forsyth 2025), we build
+the weight recovery model from DeepFloyd IF Stage II
+(IF-II-M-v1.0). We add a ControlNet to the pretrained
+U-Net and use the low-bit weight patch as the ControlNet
+condition. During training, the U-Net remains frozen and
+only the ControlNet is updated. The ControlNet text-encoder
+pooling and projection layers are also kept frozen.
+Because weight recovery does not require natural-
+language information, we use a precomputed T5 embedding
+of an empty prompt for all training and inference runs. Each
+weight patch and its low-bit condition contain one channel.
+We repeat each of them across three channels to match the
+input format of the pretrained diffusion model.
+Weight-patch construction.
+For each target LLM, we ex-
+tract its two-dimensional weight matrices, including the
+language-model head. We exclude token embeddings and
+normalization parameters. The extracted weights are con-
+verted to FP32 and divided into 64 × 64 patches.
+Before they are given to the diffusion model, the weights
+in each quantization group are normalized to the range [0, 1]
+using the minimum and range of that group. We use asym-
+metric group-wise quantization with a group size of 128 to
+generate the low-bit conditions.
+During training, we first randomly select a weight matrix
+and then randomly crop a 64×64 patch from that matrix. This
+allows the model to observe patches from different layers and
+different locations throughout training. If a matrix is smaller
+than the patch size, the patch is padded to 64 × 64, and a
+validity mask identifies the original, non-padded entries. We
+also horizontally flip each training patch with probability 0.5.
+Each normalized full-precision target patch is paired with
+a 2-bit condition generated by stochastic rounding (SR). SR
+rounds each quantized weight to its lower or upper neigh-
+boring integer according to its fractional part. The resulting
+2-bit patch is used only as the condition, while the training
+target remains the normalized full-precision patch.
+Optimization and hardware.
+We train a separate diffu-
+sion model for each target LLM using two NVIDIA GeForce
+RTX 4090 GPUs. Each model is trained for five epochs, with
+1,000,000 randomly sampled patches per epoch. The batch
+size is 32 per GPU, giving an effective batch size of 64 across
+the two GPUs, without gradient accumulation.
+We optimize the ControlNet using AdamW with a constant
+learning rate of 2 × 10−5 and no learning-rate scheduler.
+We use the default PyTorch AdamW settings: β1 = 0.9,
+β2 = 0.999, ϵ = 10−8, and weight decay 0.01. The script-
+level random seed is set to 1.
+Diffusion inference and matrix assembly.
+Diffusion in-
+ference is performed on one NVIDIA GeForce RTX 4090
+GPU with a batch size of 128. Unlike training, inference
+uses deterministic 2-bit RTN conditions. We use DDPM
+sampling with the super27 timestep-respacing schedule,
+which contains 27 reverse-diffusion steps.
+During inference, we process all 64 × 64 patches of each
+weight matrix in a fixed order. We begin at the top-left corner,
+move from left to right, and then continue to the next rows.
+If the matrix size is not divisible by 64, we add a final patch
+aligned with the bottom or right edge so that every weight is
+covered.
+The diffusion model predicts each patch in the normal-
+ized [0, 1] space. We then map the predicted values back to
+the original full-precision weight space using the minimum
+
+
+Model
+Tlinear
+Thead
+β
+Gemma 2 2B
+{0, 0.15, 0.25}
+{0, 0.15, 0.25}
+8
+Gemma 3 1B
+{0, 0.15, 0.25}
+{0, 0.15, 0.25}
+64
+Qwen3 1.7B
+{0, 0.15}
+{0}
+128
+OLMo 2 1B
+{0, 0.15, 0.25}
+{0, 0.15, 0.25}
+32
+SmolLM2 1.7B
+{0, 0.15, 0.25}
+{0}
+128
+Llama 3.2 1B
+{0, 0.15, 0.25, 0.35}
+{0, 0.15}
+64
+Pythia 1.4B
+{0, 0.15}
+{0}
+8
+Phi-2 2.7B
+{0, 0.15}
+{0}
+64
+Falcon 3-1B-Base
+{0, 0.15}
+{0}
+8
+Table 8: ReRound hyperparameters for each model.
+Tlinear is the tolerance candidate set used for the transformer
+linear layers, and Thead is the set used for the output logit
+layer. The parameter β controls the decrease of the position-
+dependent tolerance outside the midpoint ambiguity region.
+The same settings are used at 3 and 4 bits.
+and range of their corresponding quantization groups. Each
+recovered patch is written back to its original location. Af-
+ter all patches are processed, they are combined to form the
+complete recovered weight matrix Wrec.
+For ReRound, we train one diffusion model per target LLM
+using 2-bit SR conditions. During diffusion inference, the
+model reconstructs Wrec from deterministic 2-bit RTN con-
+ditions. The resulting Wrec is computed once and reused
+unchanged for both the 3-bit and 4-bit ReRound experiments.
+For the SINQ experiments, we instead train separate diffu-
+sion models for the 3-bit and 4-bit conditions. At each preci-
+sion, SR is used to generate the training conditions, whereas
+deterministic RTN is used to generate the conditions during
+diffusion inference.
+D
+ReRound Settings
+ReRound PTQ.
+For each target bit width, ReRound uses
+one GPU to map W and Wrec to the same quantized weight
+space, construct candidate quantized integer weight matri-
+ces over τ ∈T , and select one candidate for each weight
+matrix by matching the leading singular values of its de-
+quantized weight matrix to those of W. We use separate can-
+didate sets for the transformer linear layers and the output
+logit layer (lm_head). Table 8 reports these candidate sets
+and the position-dependent tolerance parameter β. The same
+settings are used for the 3-bit and 4-bit experiments. A can-
+didate with τ = 0 corresponds to retaining the RTN assign-
+ments. ReRound changes at most 1% of the RTN quantized
+integer assignments in each matrix and uses the same for-
+mulation across models. All diffusion-based reconstruction
+and ReRound PTQ stages use only the pretrained model’s
+weights, without activation or text calibration samples. In
+Eq. (13) of the main paper, we set δ = 0.1 for all models and
+bit widths, corresponding to the central midpoint ambiguity
+region r ∈[0.4, 0.6].
+ReRound with SINQ parameters.
+For the experiments
+using SINQ quantization parameters on Qwen3 1.7B, we
+follow SINQ’s layer coverage and leave the output logit layer
+(lm_head) unquantized. Table 9 reports the tolerance can-
+Weight precision
+Tlinear
+β
+W4
+{0, 0.15}
+8
+W3
+{0, 0.15, 0.25, 0.35}
+8
+Table 9: ReRound hyperparameters with SINQ quanti-
+zation parameters on Qwen3 1.7B. The lm_head is left
+unquantized following the SINQ layer coverage.
+Model
+Bits
+Method
+WinoGrande↑PIQA↑BoolQ↑SIQA↑Avg.↑
+Llama 3.2 1B
+16 bits
+–
+60.3
+74.6
+63.7
+43.0
+60.4
+W4A16 RTN group-wise, G = 128
+61.1
+72.4
+47.1
+41.8
+55.6
+ReRound, G = 128
+61.3
+72.5
+50.4
+41.7
+56.5
+W3A16 RTN group-wise, G = 128
+53.6
+63.0
+50.1
+37.7
+51.1
+ReRound, G = 128
+51.4
+62.8
+54.3
+38.3
+51.7
+Falcon 3-1B-Base
+16 bits
+–
+61.7
+74.5
+71.8
+45.2
+63.3
+W4A16 RTN group-wise, G = 128
+59.6
+73.8
+70.6
+44.4
+62.1
+ReRound, G = 128
+59.6
+74.2
+70.8
+45.0
+62.4
+W3A16 RTN group-wise, G = 128
+58.6
+71.9
+62.9
+41.3
+58.7
+ReRound, G = 128
+59.0
+72.4
+63.1
+40.6
+58.8
+Phi-2 2.7B
+16 bits
+–
+76.2
+78.6
+83.1
+55.5
+73.4
+W4A16 RTN group-wise, G = 128
+75.5
+78.6
+81.1
+54.7
+72.5
+ReRound, G = 128
+76.5
+78.2
+80.7
+55.6
+72.8
+W3A16 RTN group-wise, G = 128
+71.7
+77.6
+64.7
+51.3
+66.3
+ReRound, G = 128
+73.6
+78.4
+67.1
+52.3
+67.9
+Pythia 1.4B
+16 bits
+–
+57.5
+71.1
+63.2
+41.2
+58.3
+W4A16 RTN group-wise, G = 128
+55.9
+70.2
+61.6
+40.2
+57.0
+ReRound, G = 128
+56.1
+70.0
+62.3
+41.1
+57.4
+W3A16 RTN group-wise, G = 128
+52.7
+67.0
+52.8
+38.8
+52.8
+ReRound, G = 128
+53.0
+66.7
+55.9
+39.0
+53.7
+Table 10: Additional results across LLM architectures.
+We compare ReRound with group-wise RTN on Llama 3.2
+1B, Falcon 3-1B-Base, Phi-2 2.7B, and Pythia 1.4B. Both
+methods use the same asymmetric group-wise quantization
+setup with group size G = 128. W4A16 and W3A16 denote
+4-bit and 3-bit weight quantization with 16-bit activations, re-
+spectively. Avg. reports the mean accuracy over WinoGrande,
+PIQA, BoolQ, and SIQA. The better quantized result for each
+model and bit width is shown in bold.
+didate sets used for the remaining transformer linear layers.
+We use β = 8 at both bit widths. As before, τ = 0 corre-
+sponds to retaining the RTN assignments.
+E
+Additional PTQ Results
+E.1
+RTN Improvements on Additional Models
+Table 10 reports the complete per-task results for Llama
+3.2 1B (Grattafiori et al. 2024), Pythia 1.4B (Biderman
+et al. 2023), and Phi-2 2.7B (Javaheripi and Bubeck 2023),
+together with results on Falcon 3-1B-Base (Falcon LLM
+Team 2024). We compare ReRound with group-wise RTN
+under W4A16 and W3A16 quantization using the same
+scales, zero-points, group size G = 128, and layer cover-
+age. ReRound achieves a higher four-task average for every
+model at both bit widths, with improvements of up to 1.6
+points. Because the quantization setup remains unchanged,
+these gains result solely from revising selected quantized
+integer assignments.
+
+
+Model
+Method
+WinoGrande↑PIQA↑BoolQ↑
+SIQA↑Avg.↑
+OLMo 2 1B
+AdaRound, G = 128
+63.4
+74.9
+48.1
+43.7
+57.5
+ReRound, G = 128
+63.9
+75.4
+54.4
+43.7
+59.4
+SmolLM2 1.7B
+AdaRound, G = 128
+62.4
+76.0
+69.4
+42.7
+62.6
+ReRound, G = 128
+65.1
+76.7
+67.3
+42.3
+62.9
+Llama 3.2 1B
+AdaRound, G = 128
+61.2
+72.7
+46.2
+41.9
+55.5
+ReRound, G = 128
+61.3
+72.5
+50.4
+41.7
+56.5
+Falcon 3-1B-Base
+AdaRound, G = 128
+60.1
+74.0
+70.2
+44.4
+62.2
+ReRound, G = 128
+59.6
+74.2
+70.8
+45.0
+62.4
+Phi-2 2.7B
+AdaRound, G = 128
+75.9
+77.9
+80.7
+54.7
+72.3
+ReRound, G = 128
+76.5
+78.2
+80.7
+55.6
+72.8
+Qwen3 1.7B
+AdaRound, G = 128
+58.1
+70.4
+77.2
+42.0
+61.9
+ReRound, G = 128
+58.6
+70.3
+78.3
+43.2
+62.6
+Table 11: Comparison with AdaRound under W4A16 quan-
+tization on OLMo 2 1B, SmolLM2 1.7B, Llama 3.2 1B,
+Falcon 3-1B-Base, Phi-2 2.7B, and Qwen3 1.7B. AdaRound
+learns layer-wise rounding decisions using calibration data,
+while ReRound selects layer-wise rounding decisions with-
+out calibration data. Both methods use the same group-wise
+scale, zero-point, and group size G = 128. Avg. is over
+WinoGrande, PIQA, BoolQ, and SIQA. Higher is better.
+E.2
+Comparison with AdaRound
+Table 11 compares AdaRound and ReRound under W4A16
+quantization on OLMo 2 1B (OLMo Team et al. 2025),
+SmolLM2 1.7B (Allal et al. 2025), Llama 3.2 1B (Grattafiori
+et al. 2024), Falcon 3-1B-Base (Falcon LLM Team 2024),
+Phi-2 2.7B (Javaheripi and Bubeck 2023), and Qwen3
+1.7B (Yang et al. 2025). Both methods make layer-wise
+rounding decisions. AdaRound uses 128 calibration sam-
+ples from C4 (Raffel et al. 2020), while ReRound uses only
+the pretrained model weights. ReRound achieves a higher
+four-task average than AdaRound on all six models, with
+improvements of up to 1.9 points. Although AdaRound per-
+forms better on some individual tasks, ReRound consistently
+provides higher average accuracy without activation or text
+calibration data.
+F
+Baseline Implementation Details
+Unless otherwise stated, all reimplemented baselines use the
+model checkpoints and evaluation protocol described in Sec-
+tion G. The transformer linear layers and output logit layer
+are quantized in the main comparisons, and all group-wise
+methods use group size G = 128.
+RTN.
+We implement uniform asymmetric RTN using the
+minimum and maximum weight values for computing the
+scale and zero-point. Channel-wise RTN computes one pair
+of quantization parameters per output channel, whereas
+group-wise RTN computes one pair for every group of 128
+consecutive weights along the input dimension.
+HQQ.
+HQQ version 0.2.8.post1 is applied with the Py-
+Torch backend, quantization axis 1, and group size G = 128.
+BNB FP4.
+BitsAndBytes version 0.49.2 is applied with
+FP4 weight quantization and BF16 computation. BNB FP4
+is evaluated only under W4A16.
+Model
+Hugging Face checkpoint
+Gemma 2 2B
+google/gemma-2-2b
+Gemma 3 1B
+google/gemma-3-1b-pt
+Qwen3 1.7B
+Qwen/Qwen3-1.7B
+OLMo 2 1B
+allenai/OLMo-2-0425-1B
+SmolLM2 1.7B
+HuggingFaceTB/SmolLM2-1.7B
+Llama 3.2 1B
+meta-llama/Llama-3.2-1B
+Pythia 1.4B
+EleutherAI/pythia-1.4b
+Phi-2 2.7B
+microsoft/phi-2
+Falcon 3-1B-Base
+tiiuae/Falcon3-1B-Base
+Table 12: Exact model checkpoints used in our experi-
+ments.
+Hadamard-transformed RTN.
+We apply a normalized
+Hadamard transform independently to groups of 128 con-
+secutive weights along the input-feature dimension, perform
+asymmetric RTN in the transformed domain, and then apply
+the inverse transform.
+GPTQ.
+GPTQ is applied to all transformer linear layers
+using asymmetric group-wise quantization with group size
+G = 128. We use 128 calibration sequences of length 2048
+from the C4 training split (Raffel et al. 2020) and enable acti-
+vation ordering and true-sequential quantization. The output
+logit layer uses asymmetric group-wise RTN with G = 128.
+AdaRound.
+AdaRound uses asymmetric group-wise quan-
+tization with group size G = 128 and 128 calibration se-
+quences of length 2048 from the C4 training split (Raffel
+et al. 2020). Rounding variables are optimized for 200 itera-
+tions using up to 1024 calibration tokens per weight matrix,
+a learning rate of 10−2, and a regularization weight of 0.01.
+To accommodate the large output logit layer, we divide it into
+blocks covering 1024 vocabulary outputs and optimize each
+block for 50 iterations.
+SignRound.
+We use AutoRound version 0.13.1 with its
+default optimization settings, symmetric group-wise weight
+quantization, and group size G
+=
+128. The output
+logit layer is also quantized using AutoRound’s built-in
+quant_lm_head procedure.
+G
+Models and Evaluation Protocol
+Model checkpoints.
+Table 12 lists the exact Hugging Face
+checkpoints used in our experiments.
+Accuracy evaluation.
+All accuracy evaluations are zero-
+shot and use the standard task configurations in LM Eval-
+uation Harness v0.4.11. We report accuracy (acc) for
+WinoGrande, BoolQ, and SIQA, and normalized accuracy
+(acc_norm) for PIQA. Activations remain in 16-bit preci-
+sion for all weight-quantized experiments. Across all meth-
+ods, we use random seed 0 and set the NumPy and PyTorch
+seeds to 1234.
+
+
+Position-dependent tolerance
+Position-dependent tolerance
+Position-dependent tolerance
+Position-dependent tolerance
+0.35
+0.30
+0.25
+0.20
+0.15
+0.10
+0.05
+0.0
+0.35
+0.30
+0.25
+0.20
+0.15
+0.10
+0.05
+0.0 Lower 
+Level
+Upper 
+Level
+Upper 
+Level
+Fractional position 𝑟
+Fractional position 𝑟
+Fractional position 𝑟
+Fractional position 𝑟
+(2) 𝛽= 32
+(1) 𝛽= 8
+(4) 𝛽= 128
+(3) 𝛽= 64
+Figure 6: Visualization of the position-dependent tolerance metric. We plot τpos(r; τ) for the illustrative tolerance parameters
+τ ∈{0.15, 0.25, 0.35} with (1) β = 8, (2) β = 32, (3) β = 64, and (4) β = 128. The blue shaded interval denotes the midpoint
+ambiguity region r ∈[0.4, 0.6], defined by δ = 0.1, where τpos(r; τ) = τ. Outside this region, the tolerance metric decreases
+toward either adjacent quantized integer. Larger values of β produce sharper decreases at the boundaries of the midpoint
+ambiguity region.
+H
+Visualization of the Position-Dependent
+Tolerance Metric
+Figure 6 visualizes the position-dependent tolerance met-
+ric τpos(r; τ) for different values of β. For illustration, we
+show the tolerance parameters τ ∈{0.15, 0.25, 0.35}. With
+δ = 0.1, the midpoint ambiguity region is |r −0.5| ≤δ, or
+equivalently r ∈[0.4, 0.6]. Within this region, τpos(r; τ) =
+τ. Outside the midpoint ambiguity region, β controls how
+quickly the tolerance metric decreases toward either adja-
+cent quantized integer. A smaller β produces a more gradual
+decrease, whereas a larger β produces a sharper decrease at
+the boundaries of the midpoint region.
+I
+Matrix-Wise Revision of RTN Assignments
+For each weight matrix, we report the percentage of RTN
+assignments revised by ReRound. Figures 7 and 8 visualize
+these revision rates across layers and matrix types under W3
+and W4 quantization.
+The revision rates vary across matrices and bit widths.
+Although W3 and W4 reuse the same reconstructed weights,
+the same matrix can receive different revision rates at the two
+bit widths. This is because ReRound evaluates the rounding
+candidates under each target quantization grid and performs
+spectral selection separately for every matrix. Therefore, the
+amount of revision depends on both the weight matrix and
+the target bit width, rather than on the reconstructed weights
+alone.
+J
+Continuous Reconstruction for Low-Bit
+Rounding
+ReRound uses a DDPM-based conditional diffusion model
+(Ho, Jain, and Abbeel 2020; Saharia et al. 2022b) to pro-
+duce continuous reconstructed weights from low-bit weight
+observations. The reconstructed weights are not deployed
+as model parameters. They provide an additional signal for
+reconsidering midpoint-ambiguous RTN assignments.
+J.1
+Low-Bit Conditioning
+Let P denote a normalized patch cropped from a full-
+precision weight matrix W. During diffusion training,
+its low-bit condition is obtained by applying group-wise
+stochastic rounding (SR):
+Plow = Qsr(P; ∆c, zc),
+(20)
+where Qsr denotes the group-wise SR operation. The param-
+eters ∆c and zc are the scale and zero-point used to construct
+the 2-bit diffusion condition. The subscript c distinguishes
+these conditioning parameters from the target quantization
+parameters ∆and z used later for W3 or W4 rounding.
+During diffusion inference, the condition is instead gener-
+ated deterministically using RTN. For a patch Pk,
+Pcond,k = Qrtn(Pk; ∆c, zc).
+(21)
+For fixed ∆c and zc, deterministic low-bit quantization is
+many-to-one. Distinct continuous patches may produce the
+same RTN condition:
+P (1)̸ = P (2),
+Qrtn(P (1); ∆c, zc) = Qrtn(P (2); ∆c, zc).
+(22)
+
+
+(a) W4
+(b) W3
+Figure 7: Matrix-wise RTN revision rates for SmolLM2 1.7B. Each cell shows the percentage of RTN assignments revised by
+ReRound for one weight matrix; lighter and darker colors indicate lower and higher revision rates, respectively. The revisions
+are distributed nonuniformly across network depth and matrix type, and the W3 and W4 patterns differ despite reusing the same
+reconstructed weights. This shows that ReRound does not derive a fixed set of revisions from the reconstruction alone. Instead,
+each matrix is evaluated under its bit-specific quantization grid and spectral preservation objective. The same color scale is used
+in both panels.
+(a) W4
+(b) W3
+Figure 8: Matrix-wise RTN revision rates for Llama 3.2 1B. Each cell shows the percentage of RTN assignments revised
+by ReRound for one weight matrix; lighter and darker colors indicate lower and higher revision rates, respectively. Although
+W3 and W4 use the same reconstructed weights, they produce different matrix-wise revision patterns. ReRound evaluates the
+rounding candidates separately for each matrix and bit width, and selects the candidate that best preserves the leading singular
+values of the matrix. The same color scale is used in both panels.
+The low-bit condition therefore does not uniquely identify
+the original full-precision patch.
+The diffusion model represents a conditional distribution
+over full-precision patches given their low-bit conditions
+(Saharia et al. 2022b):
+pθ(P | Plow) ≈pdata(P | Plow).
+(23)
+Because the entries of a patch are reconstructed jointly, each
+reconstructed entry can depend on both its own low-bit ob-
+servation and the surrounding entries in the patch.
+J.2
+Conditional Denoising Relation
+The following relations are defined under the joint training
+distribution of the full-precision patch P, its stochastic con-
+dition Plow, the diffusion timestep t, and Gaussian noise ϵ.
+Define
+αt = √¯αt,
+σt =
+√
+1 −¯αt.
+(24)
+Following the DDPM forward process (Ho, Jain, and Abbeel
+2020), Gaussian noise is added as
+Pt = αtP + σtϵ,
+ϵ ∼N(0, I),
+(25)
+where ϵ is sampled independently of (P, Plow). For a fixed
+P and timestep t, the forward transition is
+qt(Pt | P) = N
+ Pt; αtP, σ2
+t I
+
+.
+(26)
+Let pt(Pt | Plow) denote the conditional marginal distri-
+bution of the noisy patch. Differentiating this marginal with
+respect to Pt gives
+∇Pt log pt(Pt | Plow) = E [∇Pt log qt(Pt | P) | Pt, Plow]
+= −Pt −αtE[P | Pt, Plow]
+σ2
+t
+. (27)
+The second equality follows from
+∇Pt log qt(Pt | P) = −Pt −αtP
+σ2
+t
+.
+(28)
+Rearranging Eq. (27) gives the conditional Gaussian form
+of Tweedie’s formula (Efron 2011):
+E[P | Pt, Plow] = Pt + σ2
+t ∇Pt log pt(Pt | Plow)
+αt
+.
+(29)
+We can also express the conditional score through the
+added noise. Taking the conditional expectation of Eq. (25)
+given (Pt, t, Plow) gives
+Pt = αtE[P | Pt, t, Plow] + σtE[ϵ | Pt, t, Plow].
+(30)
+Solving for the conditional noise mean yields
+E[ϵ | Pt, t, Plow] = Pt −αtE[P | Pt, t, Plow]
+σt
+.
+(31)
+Combining Eqs. (27) and (31) gives
+∇Pt log pt(Pt | Plow) = −1
+σt
+E[ϵ | Pt, t, Plow].
+(32)
+
+
+The conditional diffusion model minimizes
+Ldiff = EP,Plow,t,ϵ
+h
+∥ϵ −ϵθ(Pt, t, Plow)∥2
+2
+i
+.
+(33)
+For a fixed input (Pt, t, Plow), let
+µϵ = E[ϵ | Pt, t, Plow].
+(34)
+For any noise predictor f(Pt, t, Plow), the conditional
+squared error decomposes as
+E
+h
+∥ϵ −f(Pt, t, Plow)∥2
+2
+ Pt, t, Plow
+i
+= E
+h
+∥ϵ −µϵ∥2
+2
+ Pt, t, Plow
+i
++ ∥f(Pt, t, Plow) −µϵ∥2
+2 .
+(35)
+The first term does not depend on f, and the second term is
+minimized when
+f(Pt, t, Plow) = µϵ.
+(36)
+Therefore, the ideal noise predictor satisfies
+ϵ⋆
+θ(Pt, t, Plow) = E[ϵ | Pt, t, Plow].
+(37)
+Substituting Eq. (37) into Eq. (31) gives
+Pt −σtϵ⋆
+θ(Pt, t, Plow)
+αt
+= E[P | Pt, t, Plow].
+(38)
+Thus, for the ideal noise predictor, the clean estimate asso-
+ciated with one denoising step equals the conditional mean
+of the full-precision patch under Gaussian corruption (Efron
+2011; Ho, Jain, and Abbeel 2020). In practice, the learned
+denoiser approximates this predictor. In addition, the relation
+above is defined using the stochastic training condition Plow,
+whereas reverse diffusion is conditioned on the deterministic
+RTN patch Pcond during inference. The final multi-step out-
+put is therefore used as a continuous reconstruction, not as an
+exact recovery of the original patch or as an exact conditional
+mean.
+J.3
+Midpoint Distance of Accepted Revisions
+Consider a target W3 or W4 quantization group with fixed
+scale ∆and zero-point z. For corresponding entries w and
+wrec of the full-precision and reconstructed matrices, define
+˜w = w
+∆+ z = ℓ+ r,
+˜wrec = wrec
+∆
++ z,
+(39)
+where
+ℓ= ⌊˜w⌋,
+u = ℓ+ 1,
+r ∈[0, 1).
+(40)
+The RTN assignment, its opposite adjacent assignment, and
+the reconstruction-based assignment are
+qrtn = round( ˜w),
+qalt = ℓ+ u −qrtn,
+qrec = round( ˜wrec).
+(41)
+ReRound considers changing RTN only when
+qrec = qalt.
+(42)
+The acceptance threshold depends on the fractional position
+r. Define
+d(r) = min{r, 1 −r},
+(43)
+which equals 0.5 at the midpoint and decreases toward either
+adjacent quantized integer.
+For tolerance parameter τ, ReRound uses
+τpos(r; τ) = τ exp
+"
+−β
+[0.5 −δ −d(r)]+
+0.5 −δ
+2#
+,
+(44)
+where [x]+ = max{x, 0}. The parameter δ defines the cen-
+tral midpoint ambiguity region |r −0.5| ≤δ, in which
+τpos(r; τ) = τ. Outside this region, the tolerance decreases
+continuously according to β; it is not set to zero.
+The reconstruction deviation in quantization-step units is
+ρ(w, wrec) = | ˜wrec −˜w| = |wrec −w|
+|∆|
+.
+(45)
+A revision is accepted only when
+qrec = qalt
+and
+ρ(w, wrec) ≤τpos(r; τ).
+(46)
+The distance from the original quantized weight to the mid-
+point boundary is
+γ(r) =
+r −1
+2
+ .
+(47)
+For the reconstructed assignment to equal the opposite adja-
+cent integer, ˜wrec must reach the other side of the midpoint
+boundary. Its displacement must therefore be at least γ(r).
+Every accepted revision consequently satisfies
+r −1
+2
+ ≤ρ(w, wrec) ≤τpos(r; τ) ≤τ.
+(48)
+This relation follows directly from the realized reconstruc-
+tion and the ReRound acceptance conditions. It does not de-
+pend on the denoiser being ideal. An RTN assignment can
+be revised only when the quantized weight’s distance from
+the midpoint is no larger than the effective tolerance at that
+position.
+J.4
+Scalar Error of an Accepted Revision
+The squared errors of assigning ˜w = ℓ+ r to the lower and
+upper adjacent integers are
+eℓ(r) = ∆2r2,
+eu(r) = ∆2(1 −r)2.
+(49)
+Switching from RTN to the opposite adjacent assignment
+adds
+cflip(r) = |eu(r) −eℓ(r)|
+= ∆2|1 −2r|
+= 2∆2
+r −1
+2
+ .
+(50)
+Using Eq. (48), an accepted revision satisfies
+cflip(r) ≤2∆2τpos(r; τ) ≤2∆2τ.
+(51)
+The tolerance rule therefore bounds the additional scalar
+squared quantization error of each accepted revision relative
+to RTN. This is a scalar weight-space relation and does not
+characterize changes in model outputs or downstream task
+accuracy.
+
+
+J.5
+Spectral Comparison with RTN
+For each tolerance parameter τ ∈T , applying the ReRound
+rule element-wise produces a quantized integer matrix Qτ.
+Its dequantized matrix is
+Wτ = Dequant(Qτ; ∆, z),
+(52)
+where ∆and z are the fixed target quantization parameters.
+The candidate τ = 0 retains all RTN assignments:
+Q0 = Qrtn,
+W0 = Wrtn.
+(53)
+For each candidate, ReRound measures
+Dspec(τ) = ∥σ1:k(Wτ) −σ1:k(W)∥2
+∥σ1:k(W)∥2 + ϵ
+,
+(54)
+where σ1:k(·) denotes the leading k singular values, and
+ϵ > 0 provides numerical stability. For a matrix evaluated by
+the candidate search, ReRound selects
+τ ⋆= arg min
+τ∈T Dspec(τ).
+(55)
+Because τ = 0 is included in T , RTN is one of the candidates
+in this comparison. It follows directly from the selection rule
+that
+Dspec(τ ⋆) ≤Dspec(0).
+(56)
+The selected candidate therefore has no larger discrepancy
+than RTN under the spectral criterion used for selection. This
+inequality applies only to the spectral discrepancy used for
+candidate selection.
+The conditional model produces the continuous recon-
+struction used to propose alternative assignments. The
+position-dependent tolerance determines which proposals
+are accepted, while spectral selection compares the result-
+ing matrices with the unchanged RTN candidate.
+K
+Weight Reconstruction and ReRound
+Procedures
+Algorithms 1 and 2 present the complete procedures for con-
+ditional weight reconstruction and ReRound PTQ. All quan-
+tization operations are applied group-wise, and all matrix
+operations in Algorithm 2 are element-wise unless other-
+wise stated. The reconstructed matrices are produced once
+and reused for the W3 and W4 ReRound runs.
+Algorithm 1 reconstructs continuous weights from 2-bit
+conditions using the conditioning parameters ∆c and zc.
+Algorithm 2 then maps W and Wrec to the same target W3
+or W4 quantized space using ∆and z.
+Algorithm 1: Conditional Diffusion Weight Reconstruction
+Require: Full-precision weight matrices {W (j)}M
+j=1; diffu-
+sion schedule {¯αt}T
+t=1
+Ensure: Reconstructed weight matrices {W (j)
+rec }M
+j=1
+1: Training
+2: for each training iteration do
+3:
+Sample a matrix W (j), randomly crop a 64 × 64 re-
+gion, and normalize it to obtain P
+4:
+Compute its 2-bit conditioning parameters (∆c, zc)
+5:
+Plow ←Qsr(P; ∆c, zc)
+6:
+Sample t ∼Uniform{1, . . . , T} and ϵ ∼N(0, I)
+7:
+Pt ←√¯αtP + √1 −¯αtϵ
+8:
+Update θ using
+∥ϵ −ϵθ(Pt, t, Plow)∥2
+2
+9: end for
+10: Reconstruction
+11: for j = 1, . . . , M do
+12:
+Extract and normalize patches {P (j)
+k }Kj
+k=1 from W (j)
+13:
+for k = 1, . . . , Kj do
+14:
+Compute
+the
+2-bit
+conditioning
+parameters
+(∆c, zc) for P (j)
+k
+15:
+P (j)
+cond,k ←Qrtn(P (j)
+k ; ∆c, zc)
+16:
+Starting from PT ∼N(0, I), apply conditional re-
+verse diffusion to obtain P (j)
+rec,k
+17:
+Denormalize P (j)
+rec,k and return it to its original lo-
+cation
+18:
+end for
+19:
+Assemble the reconstructed patches into W (j)
+rec
+20: end for
+21: return {W (j)
+rec }M
+j=1
+
+
+Algorithm 2: ReRound for One Weight Matrix
+Require: Full-precision matrix W; reconstructed matrix
+Wrec; fixed target parameters (∆, z); integer range
+[qmin, qmax]; candidate set T with 0 ∈T ; δ, β; max-
+imum revision ratio η; spectral rank k
+Ensure: Selected quantized integer matrix Q⋆
+1: Map both matrices to the target quantized space:
+f
+W ←W/∆+ z,
+f
+Wrec ←Wrec/∆+ z
+2: Compute
+L ←⌊f
+W⌋,
+R ←f
+W −L,
+D ←min{R, 1 −R}
+3: Compute the rounding assignments:
+Qrtn ←clip(round(f
+W), qmin, qmax),
+Qalt ←clip(2L + 1 −Qrtn, qmin, qmax),
+Qrec ←clip(round(f
+Wrec), qmin, qmax)
+4: ρ ←|f
+Wrec −f
+W|,
+Q0 ←Qrtn,
+Tvalid ←{0}
+5: for each τ ∈T \ {0} do
+6:
+Tτ ←τ exp
+"
+−β
+[0.5 −δ −D]+
+0.5 −δ
+2#
+7:
+Mτ ←(Qrec = Qalt) ∧(ρ ≤Tτ)
+8:
+Qτ ←where(Mτ, Qalt, Qrtn)
+9:
+if ∥Qτ̸ = Qrtn∥0/|Qτ| ≤η then
+10:
+Tvalid ←Tvalid ∪{τ}
+11:
+end if
+12: end for
+13: for each τ ∈Tvalid do
+14:
+Wτ ←Dequant(Qτ; ∆, z)
+15:
+Dspec(τ) ←∥σ1:k(Wτ) −σ1:k(W)∥2
+∥σ1:k(W)∥2 + ϵ
+16: end for
+17: τ ⋆←arg
+min
+τ∈Tvalid Dspec(τ)
+18: return Q⋆←Qτ ⋆
+References
+Allal, L. B.; Lozhkov, A.; Bakouch, E.; Blázquez, G. M.;
+Penedo, G.; Tunstall, L.; Marafioti, A.; Kydlíček, H.; Lajarín,
+A. P.; Srivastav, V.; et al. 2025. SmolLM2: When Smol Goes
+Big—Data-Centric Training of a Fully Open Small Language
+Model. In COLM.
+Ashkboos, S.; Mohtashami, A.; Croci, M. L.; Li, B.;
+Cameron, P.; Jaggi, M.; Alistarh, D.; Hoefler, T.; and Hens-
+man, J. 2024. QuaRot: Outlier-Free 4-Bit Inference in Ro-
+tated LLMs. In NeurIPS, 100213–100240.
+Badri, H.; and Shaji, A. 2023. Half-Quadratic Quantization
+of Large Machine Learning Models.
+Biderman, S.; Schoelkopf, H.; Anthony, Q. G.; Bradley,
+H.; O’Brien, K.; Hallahan, E.; Khan, M. A.; Purohit, S.;
+Prashanth, U. S.; Raff, E.; et al. 2023. Pythia: A Suite for Ana-
+lyzing Large Language Models Across Training and Scaling.
+In ICML, 2397–2430.
+Bisk, Y.; Zellers, R.; Bras, R. L.; Gao, J.; and Choi, Y. 2020.
+PIQA: Reasoning about Physical Commonsense in Natural
+Language. In AAAI, 7432–7439.
+Chen, Y.; and Liu, Z. 2026. Diffusion Model Based Signal
+Recovery Under 1-Bit Quantization. In AAAI, 20400–20408.
+Cheng, W.; Zhang, W.; Guo, H.; and Shen, H. 2025. Sign-
+RoundV2: Closing the Performance Gap in Extremely Low-
+Bit Post-Training Quantization for LLMs. arXiv preprint
+arXiv:2512.04746.
+Cheng, W.; Zhang, W.; Shen, H.; Cai, Y.; He, X.; Lv, K.;
+and Liu, Y. 2024. Optimize Weight Rounding via Signed
+Gradient Descent for the Quantization of LLMs. In Findings
+of EMNLP, 11332–11350.
+Chung, H.; Kim, J.; McCann, M. T.; Klasky, M. L.; and Ye,
+J. C. 2023. Diffusion Posterior Sampling for General Noisy
+Inverse Problems. In ICLR.
+Clark, C.; Lee, K.; Chang, M.; Kwiatkowski, T.; Collins, M.;
+and Toutanova, K. 2019. BoolQ: Exploring the Surprising
+Difficulty of Natural Yes/No Questions. In NAACL-HLT,
+2924–2936.
+DeepFloyd Team. 2023. DeepFloyd IF: A Text-to-Image Dif-
+fusion Model. https://stability.ai/news-updates/deepfloyd-if-
+text-to-image-model. Stability AI.
+Dettmers, T.; Pagnoni, A.; Holtzman, A.; and Zettlemoyer,
+L. 2023. QLoRA: Efficient Finetuning of Quantized LLMs.
+In NeurIPS, 10088–10115.
+Dravid, A.; Gandelsman, Y.; Wang, K.-C.; Abdal, R.; Wet-
+zstein, G.; Efros, A. A.; and Aberman, K. 2024. Interpret-
+ing the Weight Space of Customized Diffusion Models. In
+NeurIPS, 137334–137371.
+Efron, B. 2011. Tweedie’s Formula and Selection Bias. Jour-
+nal of the American Statistical Association, 1602–1614.
+Falcon LLM Team. 2024. The Falcon 3 Family of Open
+Models.
+Frantar, E.; Ashkboos, S.; Hoefler, T.; and Alistarh, D. 2022.
+GPTQ: Accurate Post-Training Quantization for Generative
+Pre-Trained Transformers. arXiv preprint arXiv:2210.17323.
+Gao, L.; Tow, J.; Abbasi, B.; Biderman, S.; Black, S.; DiPofi,
+A.; Foster, C.; Golding, L.; Hsu, J.; Noac’h, A. L.; Li,
+H.; McDonell, K.; Muennighoff, N.; Ociepa, C.; Phang, J.;
+Reynolds, L.; Schoelkopf, H.; Skowron, A.; Sutawika, L.;
+Tang, E.; Thite, A.; Wang, B.; Wang, K.; and Zou, A. 2026.
+The Language Model Evaluation Harness. Zenodo. Version
+v0.4.11, released February 2026.
+Gemma Team; Kamath, A.; Ferret, J.; Pathak, S.; Vieillard,
+N.; Merhej, R.; Perrin, S.; Matejovicova, T.; Ramé, A.; Riv-
+ière, M.; et al. 2025. Gemma 3 Technical Report. arXiv
+preprint arXiv:2503.19786.
+Gemma Team; Riviere, M.; Pathak, S.; Sessa, P. G.; Hardin,
+C.; Bhupatiraju, S.; Hussenot, L.; Mesnard, T.; Shahriari, B.;
+Ramé, A.; et al. 2024. Gemma 2: Improving Open Language
+Models at a Practical Size. arXiv preprint arXiv:2408.00118.
+Grattafiori, A.; Dubey, A.; Jauhri, A.; Pandey, A.; Al-Dahle,
+A.; et al. 2024. The Llama 3 Herd of Models. arXiv preprint
+arXiv:2407.21783.
+
+
+Ho, J.; Jain, A.; and Abbeel, P. 2020. Denoising Diffusion
+Probabilistic Models. In NeurIPS, 6840–6851.
+Javaheripi, M.; and Bubeck, S. 2023. Phi-2: The Surprising
+Power of Small Language Models.
+Lee, J. H.; Kim, J.; Kwon, S. J.; and Lee, D. 2023. FlexRound:
+Learnable Rounding Based on Element-Wise Division for
+Post-Training Quantization. In ICML, 18913–18939.
+Lin, J.; Tang, J.; Tang, H.; Yang, S.; Xiao, G.; and Han, S.
+2025. AWQ: Activation-Aware Weight Quantization for On-
+Device LLM Compression and Acceleration. GetMobile:
+Mobile Computing and Communications, 12–17.
+Liu, Z.; Zhao, C.; Fedorov, I.; Soran, B.; Choudhary, D.;
+Krishnamoorthi, R.; Chandra, V.; Tian, Y.; and Blankevoort,
+T. 2025. SpinQuant: LLM Quantization with Learned Rota-
+tions. In ICLR.
+Meng, X.; and Kabashima, Y. 2022.
+Quantized Com-
+pressed Sensing with Score-Based Generative Models. arXiv
+preprint arXiv:2211.13006.
+Merity, S.; Xiong, C.; Bradbury, J.; and Socher, R. 2017.
+Pointer Sentinel Mixture Models. In ICLR.
+Müller, L. K.; Bich, P.; Zhuang, J.; Çelik, A.; Benfenati, L.;
+and Cavigelli, L. 2026. SINQ: Sinkhorn-Normalized Quan-
+tization for Calibration-Free Low-Precision LLM Weights.
+In ICML.
+Nagel, M.; Amjad, R. A.; van Baalen, M.; Louizos, C.; and
+Blankevoort, T. 2020. Up or Down? Adaptive Rounding for
+Post-Training Quantization. In ICML, 7197–7206.
+OLMo Team; Walsh, P.; Soldaini, L.; Groeneveld, D.; Lo, K.;
+Arora, S.; Bhagia, A.; Gu, Y.; Huang, S.; Jordan, M.; et al.
+2025. OLMo 2 Furious. arXiv preprint arXiv:2501.00656.
+Raffel, C.; Shazeer, N.; Roberts, A.; Lee, K.; Narang, S.;
+Matena, M.; Zhou, Y.; Li, W.; and Liu, P. J. 2020. Explor-
+ing the Limits of Transfer Learning with a Unified Text-to-
+Text Transformer. Journal of machine learning research, 21:
+140:1–140:67.
+Saharia, C.; Chan, W.; Saxena, S.; Li, L.; Whang, J.; Denton,
+E. L.; Ghasemipour, K.; Lopes, R. G.; Ayan, B. K.; Salimans,
+T.; et al. 2022a. Photorealistic Text-to-Image Diffusion Mod-
+els with Deep Language Understanding. In NeurIPS, 36479–
+36494.
+Saharia, C.; Ho, J.; Chan, W.; Salimans, T.; Fleet, D. J.; and
+Norouzi, M. 2022b. Image Super-Resolution via Iterative
+Refinement.
+IEEE Transactions on Pattern Analysis and
+Machine Intelligence, 4713–4726.
+Sakaguchi, K.; Bras, R. L.; Bhagavatula, C.; and Choi, Y.
+2020. WinoGrande: An Adversarial Winograd Schema Chal-
+lenge at Scale. In AAAI, 8732–8740.
+Sap, M.; Rashkin, H.; Chen, D.; Bras, R. L.; and Choi, Y.
+2019. Social IQa: Commonsense Reasoning about Social
+Interactions. In EMNLP-IJCNLP, 4462–4472.
+Shao, W.; Chen, M.; Zhang, Z.; Xu, P.; Zhao, L.; Li, Z.;
+Zhang, K.; Peng, G.; Qiao, Y.; and Luo, P. 2024. Omni-
+Quant: Omnidirectionally Calibrated Quantization for Large
+Language Models. In ICLR.
+Soro, B.; Andreis, B.; Lee, H.; Jeong, W.; Chong, S.; Hutter,
+F.; and Hwang, S. J. 2025. Diffusion-based Neural Network
+Weights Generation. In ICLR.
+Sun, Y.; Liu, R.; Bai, H.; Bao, H.; Zhao, K.; Li, Y.; Yu, X.;
+Hou, L.; Yuan, C.; Jiang, X.; et al. 2025a. FlatQuant: Flatness
+Matters for LLM Quantization. In ICML.
+Sun, Z.; Benton, A.; Kushnir, S.; Trockman, A.; Singh, V.;
+Diggavi, S.; and Suresh, A. T. 2025b. CafeQ: Calibration-
+Free Quantization via Learned Transformations and Adap-
+tive Rounding. arXiv preprint arXiv:2511.19705.
+Tang, A.; Chen, Y.; Xue, S.; and Liu, Z. 2025. Learning
+Single Index Models with Diffusion Priors. arXiv preprint
+arXiv:2505.21135.
+Vavilala, V.; Shaik, F.; and Forsyth, D. A. 2025. Dequanti-
+zation and Color Transfer with Diffusion Models. In WACV,
+9630–9639.
+Wang, K.; Tang, D.; Zeng, B.; Yin, Y.; Xu, Z.; Zhou, Y.;
+Zang, Z.; Darrell, T.; Liu, Z.; and You, Y. 2024. Neural
+Network Diffusion. arXiv preprint arXiv:2402.13144.
+Xiao, G.; Lin, J.; Seznec, M.; Wu, H.; Demouth, J.; and Han,
+S. 2023. SmoothQuant: Accurate and Efficient Post-Training
+Quantization for Large Language Models. In ICML, 38087–
+38099.
+Yang, A.; Li, A.; Yang, B.; Zhang, B.; Hui, B.; Zheng, B.; Yu,
+B.; Gao, C.; Huang, C.; Lv, C.; et al. 2025. Qwen3 Technical
+Report. arXiv preprint arXiv:2505.09388.
