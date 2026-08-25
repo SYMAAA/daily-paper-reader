@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-07-27 ~ 2026-08-25</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-25</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 47 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>0</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>47</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-25 16:45:31 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-25 19:38:56 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日速读47篇论文，覆盖多模态大模型、视频压缩与低比特推理三大热点。最值得关注的是多模态剪枝框架SepPrune与全局码本视频压缩方案，均获10分满分，效率提升思路极具参考价值。建议普通读者优先研读这两篇高分论文的摘要与实验部分，快速把握技术突破点。</p>
+<p>今日精读6篇、速读11篇，核心聚焦大模型量化与遥感图像理解。最值得关注《Quantization-Aware Healing》提出4-bit量化恢复配方，速读中多个工作也围绕量化干扰抑制。建议普通读者优先关注量化补偿方向，可有效缓解压缩后的性能损失。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">0 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p class="dpr-home-dashboard-empty">今日暂无推荐。</p>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Quantization-Aware Healing: A Practical Recipe for Recovering Compressed, 4-Bit LLMs">Quantization-Aware Healing: A Practical Recipe for Recovering Compressed, 4-Bit LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="HeatTok: Enhancing Remote Sensing Image Understanding via Thermodiffusion-based Tokenization">HeatTok: Enhancing Remote Sensing Image Understanding via Thermodiffusion-based Tokenization</span></li><li><span class="dpr-home-dashboard-paper-title" title="SEER: Long-Context Reasoning via Selective Visual-Text Compression">SEER: Long-Context Reasoning via Selective Visual-Text Compression</span></li></ul>
   </div>
-
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>6</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">47 篇</strong>
+    <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="SepPrune:A Separator-based Pruning Framework for Efficient Multimodal Large Language Models">SepPrune:A Separator-based Pruning Framework for Efficient Multimodal Large Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="Rethinking Video Token Compression with a Global Codebook: Learning Once, Compressing Everywhere">Rethinking Video Token Compression with a Global Codebook: Learning Once, Compressing Everywhere</span></li><li><span class="dpr-home-dashboard-paper-title" title="FluxBin: Flexible LUT-based Ultra-low-bit LLM Inference by Algorithm-Kernel Synergy">FluxBin: Flexible LUT-based Ultra-low-bit LLM Inference by Algorithm-Kernel Synergy</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Compress and Forget: bitsandbytes Quantization Amplifies Proactive Interference in LLMs">Compress and Forget: bitsandbytes Quantization Amplifies Proactive Interference in LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="Jacobian-guided Noise Injection for Quantization Robustness in Large Language Models">Jacobian-guided Noise Injection for Quantization Robustness in Large Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="SSDi8: Accurate and Efficient 8-bit Quantization for State Space Duality">SSDi8: Accurate and Efficient 8-bit Quantization for State Space Duality</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>47</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>11</strong></span></div>
 </section>
 </div>
 
