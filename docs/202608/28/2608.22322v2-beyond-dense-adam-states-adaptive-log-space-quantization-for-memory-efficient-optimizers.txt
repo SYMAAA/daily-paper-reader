@@ -1,0 +1,545 @@
+Title: Beyond Dense Adam States: Adaptive Log-Space Quantization for Memory-Efficient Optimizers
+
+URL Source: https://arxiv.org/pdf/2608.22322v2
+
+Published Time: Thu, 27 Aug 2026 00:44:12 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+# Beyond Dense Adam States: Adaptive Log-Space Quantization for Memory-Efficient Optimizers 
+
+Yan Wang 
+
+Independent Researcher 
+
+Implementation · Artifacts 
+
+# Abstract 
+
+Low-precision optimizer-state methods are commonly designed and evaluated for dense Adam-style first and second moments. Memory-efficient optimizers depart from this setting: Adafactor factorizes second mo-ments, CAME adds factored confidence states, and APOLLO maintains statistics in a projected gradient space. Consequently, an equal amount of state recon-struction error can induce different update errors de-pending on state topology and update semantics. We first characterize this heterogeneity in optimizer-state traces from language model pre-training. We then introduce Adaptive Log-Space ( AL ) quantization, a block-wise representation for non-negative states that adapts its nonzero range per block and enforces the exact-zero invariant q = 0 ⇔ x = 0. AL8 and AL16 
+
+are combined with independent signed-momentum encodings and state-specific precision choices rather than a single policy for every state. Across 96 runs totaling 214.7 GPU-hours, we eval-uate dense, factored, confidence, and projected states in AdamW, Adafactor, CAME, and APOLLO paths. On a 20K-step TinyLlama-1.1B pre-training bench-mark, an AdamW configuration with AL8 second moments and uniform 8-bit momentum reaches 72.90 perplexity, compared with 72.48 for FP32 AdamW and 73.54 for an 8-bit dynamic-quantization base-line, while reducing measured optimizer-state storage from 8392.7 to 2119.2 MiB. CAME exposes a different precision regime: promoting its non-negative states to AL16 recovers 86.16 perplexity versus 86.68 for the full-precision reference, whereas all-AL8 reaches 90.19. A 100K-step GPT-2 experiment further shows that topology-aware parameter protection reduces the late-loss gap of quantized Adafactor from +0 .1185 to +0 .0159 in the evaluated setup. These results sup-port a state- and topology-aware view of optimizer quantization. 
+
+# 1 Introduction 
+
+Optimizer states are a major component of training memory. Adam maintains a first moment and a second moment for each parameter, so storing these states in FP32 can require twice the parameter count in aux-iliary values [2]. Block-wise 8-bit optimizers demon-strated that this cost can be reduced while retaining useful training behavior [1], and later work extended optimizer states to still lower precision [3, 11]. These methods have made optimizer-state quantization a practical part of memory-efficient training. The dominant formulation, however, remains cen-tered on dense Adam states. This abstraction be-comes incomplete for optimizers that reduce memory by changing the structure of their state. Adafactor represents a matrix second moment using row and col-umn statistics [8]; CAME adds confidence states that modulate its momentum update [5]; and APOLLO derives scaling factors from moments maintained in a projected gradient space [14]. These states differ not only in size, but also in how a stored perturbation propagates to the parameter update. A quantization block can align with an element-wise state, cut across unrelated rows, span a factor vector, or operate in a 1arXiv:2608.22322v2 [cs.LG] 26 Aug 2026 low-rank space. Treating all of them as interchange-able arrays therefore hides a central design variable. This work asks a concrete question: what changes when optimizer-state quantization is applied beyond dense Adam moments? We address it at three lev-els. First, we trace full-rank, factored, and confidence states during language model pre-training and mea-sure their ranges and exact-zero patterns. Second, we evaluate fidelity in the optimizer-update domain, where inverse square roots, factor reconstruction, con-fidence modulation, and projected scaling expose dif-ferent sensitivities. Third, we test these observations in end-to-end pre-training across four optimizer paths. Our representation is Adaptive Log-Space ( AL )quantization. For each block, AL fits a logarithmic in-terval to the positive values while reserving code zero exclusively for exact zero. This produces the invariant 
+
+q = 0 ⇔ x = 0: positive second moments cannot collapse to zero, and genuinely dormant states are not assigned an artificial positive history. We instantiate the representation as AL8 and AL16 . Signed momen-tum is encoded independently, and confidence states may use a different precision from second moments. The resulting design is not a uniform low-bit pol-icy; it combines the representation with state-specific precision and topology-aware grouping. Our contributions are: 
+
+• We characterize optimizer states along three axes—representation, topology, and update semantics—covering dense AdamW, factored Adafactor, confidence-guided CAME, and pro-jected APOLLO states. 
+
+• We formulate a block-adaptive log-space repre-sentation for non-negative states with a bidirec-tional exact-zero invariant, then combine it with independent signed-momentum encoding and se-lectable confidence-state precision. 
+
+• We evaluate state reconstruction, update error, temporal drift, block granularity, and parame-ter grouping in controlled studies, then connect these diagnostics to 20K-step TinyLlama-1.1B and 100K-step GPT-2 pre-training experiments. 
+
+• We implement Python reference and fused CUDA paths and validate reference-algorithm alignment separately from CUDA numerical consistency. The evidence supports a deliberately bounded con-clusion. AL8 is competitive with the evaluated 8-bit AdamW baseline, but one precision is not uniformly sufficient for every structured state. In the evaluated configurations, CAME records lower PPL with higher-precision confidence storage, while factored Adafactor records lower final loss with sensitive-tensor protection and finer quantization blocks. These cases motivate the broader principle of this paper: optimizer-state quantization should follow the state that an optimizer actually maintains and the operator through which that state affects the update. 
+
+# 2 Background and Related Work 
+
+2.1 Quantized Optimizer States 
+
+Dettmers et al. introduced practical 8-bit optimizers based on block-wise dynamic quantization [1]. Inde-pendent blocks limit the effect of outliers, while a non-linear codebook allocates resolution across state mag-nitudes. This method is the principal 8-bit AdamW baseline in our end-to-end experiments. Li et al. sub-sequently studied 4-bit optimizer states and identi-fied a second-moment zero-point problem: mapping a small positive second moment to zero is dangerous be-cause the inverse-square-root preconditioner can am-plify the error [3]. Their linear second-moment quan-tizer excludes the zero point and combines smaller blocks with row- and column-wise information. Recent work analyzes additional sources of low-precision error. SOLO targets ultra-low-bit Adam-style EMA states using logarithmic quantization and precision-specific signed momentum [11]; we instead begin at 8 bits and study structured-state topologies. Logarithmic second-moment quantization is there-fore prior art. Our focus combines a block-adaptive nonzero interval, the bidirectional exact-zero invari-ant, and evaluation of states that depart from dense Adam in topology and update semantics. The two zero concerns are complementary: prior work prevents 2positive values from becoming zero, whereas our re-served code additionally prevents genuine zeros from becoming positive. COAT compresses optimizer states and activations in an FP8 training system and uses dynamic range expansion to better match state distributions to FP8 [10]. Other contemporary analyses study staleness in quantized EMA states and the effect of state resets [9], while STQuant allocates precision dynamically across layers, states, and training steps [4]. These methods address temporal adaptation or dynamic precision allocation. Our experiments instead hold the representation policy explicit and isolate how state topology, block boundaries, and update operators interact with quantization. 
+
+2.2 Memory-Efficient Optimizer Struc-ture 
+
+Adafactor reduces the quadratic state associated with a matrix parameter by factorizing its second moment into row and column statistics [8]. CAME augments this factored preconditioner with confidence-guided momentum, introducing additional factored residual statistics [5]. These algorithms reduce state size be-fore quantization, but factorization also changes how an error in one stored value propagates across a re-constructed matrix. Low-rank gradient methods provide another route to optimizer-state reduction. GaLore performs full-parameter learning while maintaining optimizer statis-tics for gradients projected into a low-rank subspace [13]. APOLLO further uses moments in a projected space to derive channel- or tensor-wise scaling of the original gradient [14]. We use APOLLO as a projected-state case: the purpose is to test whether the same quantization machinery remains useful when stored states affect a derived scaling operator rather than a directly reconstructed dense update. Taken together, prior work spans quantization preci-sion, state factorization, and gradient projection. Our point of departure is to analyze these axes jointly. We do not propose a new optimizer topology; instead, we ask how a quantized representation should be selected and grouped after an optimizer has already changed the geometry and semantics of its state. 
+
+# 3 Optimizer States Beyond Dense Adam 
+
+Low-precision optimizer-state compression is often described in the setting of Adam-like optimizers, where each parameter tensor is associated with two parameter-shaped states: a first moment and a second moment [2]. Recent memory-efficient optimizers, how-ever, increasingly alter not only the precision of these states but also their topology and their role in the update rule. Figure 1 illustrates four representative cases. 
+
+3.1 State Topology and Update Se-mantics 
+
+Consider a matrix parameter W ∈ Rm×n with gradi-ent Gt. A conventional Adam-style optimizer main-tains dense first- and second-moment states, Mt, V t ∈
+
+Rm×n. Ignoring bias correction for clarity, its adap-tive update has the form 
+
+Ut = Mt
+
+√Vt + ϵ . (1) Both optimizer states are therefore aligned element-wise with the parameter tensor. Adafactor changes this geometry by replacing the dense second-moment matrix with row and column statistics, V (r) 
+
+> t
+
+∈ Rm and V (c) 
+
+> t
+
+∈ Rn, from which an approximate element-wise preconditioner is recon-structed [8]. A perturbation to one stored statistic can therefore affect an entire row or column of the resulting update. CAME further separates optimizer-state roles. For a factored matrix parameter, it maintains a dense first-moment state Mt, factored second-moment states 
+
+V (r) 
+
+> t
+
+, V (c) 
+
+> t
+
+, and an additional pair of factored confi-dence states C(r) 
+
+> t
+
+, C (c) 
+
+> t
+
+[5]. The confidence states track the residual between the normalized update and its first-moment estimate and subsequently modulate the momentum update. Thus, although both V and C
+
+are non-negative exponential moving averages, they enter the optimizer through different operators and need not have identical numerical requirements. 3AdamW 
+
+> dense
+
+Mt
+
+Vt
+
+> parameter-shaped states
+
+Adafactor   
+
+> factored
+> reconstructed  ̂ Vt
+> Vr,t
+> Vc, t
+> row / column marginals
+
+CAME 
+
+> confidence + factored
+
+Mt         
+
+> Vr,t
+> Vc,t
+> Cr,t
+> Cc,t
+> dense M+ factored Vand C
+
+APOLLO       
+
+> projected
+> Gt
+> projection Pt
+> Rt
+> MRt
+> VRt
+> projected moments → scale on original Gt
+> representation ×topology ×update semantics
+
+Figure 1: Optimizer states differ in topology and update semantics. AdamW stores dense parameter-shaped moments; Adafactor reconstructs a second-moment estimate from row and column marginals; CAME adds factored confidence states; and APOLLO maintains moments in a projected auxiliary space that determine a scale applied to the original gradient. State shapes are schematic. 
+
+APOLLO provides a complementary projected-state case [14]. It maintains first- and second-moment states M (P ) 
+
+> t
+
+and V (P ) 
+
+> t
+
+in a low-rank gradient space. Rather than projecting the resulting low-rank up-date back to the original space, APOLLO derives a channel-wise or tensor-wise scaling factor that mod-ulates the original full-rank gradient. Quantization therefore perturbs a derived scaling operator rather than a directly reconstructed full-rank update. These examples expose a distinction that is ob-scured when optimizer states are treated as inter-changeable arrays of numbers. Quantization error may act locally on a dense state, propagate across rows or columns through factorization, alter a confi-dence modulation, or perturb a scaling factor derived in a projected space. We therefore distinguish three interacting properties throughout this work: state representation , state topology , and update semantics .
+
+3.2 Quantization Error in the Update Domain 
+
+Quantized optimizer states are commonly evaluated through reconstruction error, for example ∥St − bSt∥2,where St denotes a reference state tuple and bSt its quantized–dequantized counterpart. Such a metric is useful for characterizing the representation itself, but it does not directly measure the quantity that affects training: the optimizer update produced from that state. We therefore evaluate quantization fidelity in the update domain. Let U(St, G t) denote the optimizer-specific operator that maps the state tuple St and gradient Gt to an update. We define relative update error as 
+
+Eupd =
+
+U( bSt, G t) − U (St, G t) 2
+
+∥U (St, G t)∥2 + ε , (2) where ε is used only to avoid instability when the reference update norm is close to zero. State-space and update-space errors need not be proportional. A small perturbation to a second-moment estimate can be amplified by an inverse square root; an error in a factored statistic can influ-ence many reconstructed elements; and a perturbation in a projected state can alter a scaling factor applied to the original gradient. Conversely, a comparatively large state reconstruction error may have little ef-4fect on the final update when it lies in a numerically insensitive region of the operator. We use Eupd as a controlled diagnostic rather than as a substitute for end-to-end training quality. State reconstruction error, temporal state drift, loss trajec-tories, and final evaluation metrics remain complemen-tary measurements. Equation (2) provides a common fidelity measure across optimizer states whose shapes and update semantics differ. 
+
+3.3 State and Tensor Heterogeneity 
+
+To ground the structural distinctions in actual train-ing, we inspect optimizer-state traces collected during TinyLlama-1.1B pre-training on WikiText-103. Un-less otherwise specified, the statistics below use seed 921, batch size 4, sequence length 512, a nominal block size of 2048, and step 10K. For each block, we define its bit range as max xi>0 log 2 xi − min xi>0 log 2 xi. For each parameter-state component, we compute the me-dian of its block ranges. Parameter-type summaries use a state-size-weighted mean of these component medians. Figure 3 places the selected state compo-nents on one common scale and separately tracks the exact-zero fraction over training. In a factored Adafactor run, the state-size-weighted summaries at step 10K are 76.7 bits for embedding second-moment statistics, compared with 3.5 for at-tention, 4.3 for MLP, and 2.4 for normalization pa-rameters; the output-head summary is 33.0. The embedding row statistics are particularly extreme, with a median block range of 81.5 bits. Sparsity introduces a separate source of hetero-geneity. In a full-rank AdamW trace, 84.8% of the embedding second-moment state is exactly zero at step 50, and 40.3% remains zero at step 10K, while traced attention, MLP, normalization, and output-head states are dense. We therefore treat numerical range, exact zeros, and tensor topology as distinct properties rather than collapsing them into a single notion of quantization difficulty. These observations motivate the adaptive nonzero range and explicit zero representation introduced in Section 4. CAME traces reinforce the distinction between state type and tensor type. Its embedding row second-moment statistic exhibits a median block range of 84.3 bits, while the embedding confidence row reaches 53.3 bits. Most attention confidence vectors are much nar-rower, yet the confidence state enters a residual-driven EMA and subsequently modulates momentum. Range alone therefore does not determine a safe precision: temporal feedback and the downstream operator must also be tested. We return to this point in Sections 4.3 and 6. 
+
+# 4 Adaptive Log-Space Quanti-zation 
+
+Figure 2 summarizes Adaptive Log-Space (AL ) quanti-zation, our block-wise representation for non-negative optimizer states that accommodates the wide, locally varying nonzero ranges and exact zeros identified in Section 3. 
+
+4.1 Adaptive Nonzero Log-Space En-coding 
+
+Consider a block x ∈ RB 
+
+> ≥0
+
+with block size B. For its nonzero elements, we define the logarithmic interval 
+
+ℓmin = max 
+
+
+
+ℓfloor , min  
+
+> i:xi>0
+
+log 2 xi
+
+
+
+,ℓmax = max  
+
+> i:xi>0
+
+log 2 xi.
+
+(3) Here, ℓfloor is a numerical lower bound. Unlike a fixed global logarithmic range, the represented nonzero in-terval adapts independently to each block. Writing ∆ ℓ = ℓmax − ℓmin for the represented log-arithmic width, we normalize each positive value as 
+
+zi = clip((log 2 xi − ℓmin )/∆ℓ, 0, 1). Let L denote the total number of available codes. We reserve code zero exclusively for exact zeros and map positive values to the remaining L − 1 codes: 
+
+qi =
+
+(0, xi = 0 ,
+
+1 + round[( L − 2) zi] , xi > 0. (4) Dequantization maps the nonzero codes uniformly across the stored logarithmic interval: 
+
+bxi =
+
+(0, qi = 0 ,
+
+2ℓmin + qi−1  
+
+> L−2∆ℓ
+
+, qi > 0. (5) 5exact zero 
+
+# 0     
+
+> qi= 0
+> 2ℓmin 2ℓmax
+> nonzero levels in value space
+> uniform code steps in log 2x⇒nonuniform levels in value space
+
+qi = 0 ⇔ xi = 0      
+
+> AL8: 255 nonzero codes •AL16: 65,535 nonzero codes
+> each block adapts [ℓmin ,ℓmax ]to its observed nonzero range
+
+Figure 2: Adaptive Log-Space quantization reserves code zero exactly and places positive reconstruction levels uniformly in log space over a block-local observed interval. Marker density is schematic; the stated AL8 and AL16 
+
+code counts are exact. 
+
+We instantiate this representation at two precisions. 
+
+AL8 uses L = 256, providing one exact-zero code and 255 nonzero levels, while AL16 uses L = 65 ,536, providing one exact-zero code and 65,535 nonzero levels. Each block additionally stores ℓmin and ∆ ℓ
+
+as metadata. An all-zero block retains zero codes. When the positive range collapses to one value, the implementation expands the stored log interval by one unit before quantization and clamps its width to at least 10 −12 . The CUDA path also caps ℓmax 
+
+at 126, below overflow in FP32 exponentiation. The lower floor is supplied by the optimizer path—typically the log of the squared numerical floor used for its second-moment update. These safeguards affect only degenerate or out-of-range inputs and preserve the code semantics above. 
+
+4.2 Exact-Zero Reservation 
+
+Exact zero is qualitatively different from an arbitrar-ily small positive optimizer state. This distinction is especially relevant for sparse or partially updated parameters, such as embedding rows whose corre-sponding tokens may remain inactive for long periods. A dormant second-moment state can remain exactly zero until the parameter first receives a gradient. Re-constructing such a state as a small positive value does not necessarily change the parameter immedi-ately, but it changes the optimizer history seen when that parameter is eventually activated. 
+
+AL therefore assigns zero a dedicated code rather than treating it as the lower endpoint of the nonzero logarithmic range. Equation (4) enforces the invariant 
+
+qi = 0 ⇐⇒ xi = 0 . (6) Every nonzero input is mapped to a nonzero code, while code zero reconstructs exactly to zero. This separation prevents two ambiguities: a nonzero state cannot be quantized into an exact zero, and a truly dormant state is not assigned artificial positive history. Reserving one code slightly reduces the levels available to nonzero values, but Section 5 shows that this cost is negligible for dense states and becomes important when exact zeros are common. The invariant complements the second-moment zero-point analysis of Li et al. [3]. Their failure case is a small positive value that rounds to zero and is amplified by an inverse square root. Our additional failure case is a genuinely zero state reconstructed as a positive value, which assigns artificial history to a dormant parameter. 60 15 30 45 60 75 90                  
+
+> Tensor-wise median block log 2range (bits)
+> AdamW dense V
+> Adafactor Vr
+> Adafactor Vc
+> CAME Vr
+> CAME Vc
+> CAME Cr
+> CAME Cc
+> 84.3 0.62
+> Attention MLP Embedding LM head
+> 50 100 500 1K 2K 10K
+> Training step
+> 020 40 60 80 100
+> Exact zeros (%)  84.8% 40.3%
+> Other traced tensor types: 0%
+
+a Optimizer states occupy distinct numerical regimes  
+
+> boxes + raw points: multiple tensors diamonds: one tensor
+
+b Exact zeros persist in the embedding second moment  
+
+> Selected 2D state paths; each range observation is one parameter-state tensor at step 10K TinyLlama-1.1B / WikiText-103 / seed 921
+
+Figure 3: Optimizer states occupy distinct numerical regimes in a TinyLlama-1.1B trace. (a) Tensor-wise median block log 2 ranges at step 10K for selected two-dimensional state paths. Boxes summarize multiple attention or MLP parameter-state tensors and retain the raw observations; diamonds denote singleton embedding and output-head tensors. All values use one common linear bit-range axis. (b) The exact-zero fraction of the AdamW embedding second moment decreases from 84.8% at step 50 to 40.3% at step 10K, while the other traced tensor types remain dense. These are trace observations, not uncertainty estimates. 
+
+4.3 State-Specific Precision and Mo-mentum Encoding 
+
+Optimizer states do not share identical numerical roles. Non-negative adaptive statistics and signed momentum states exhibit different distributions and participate in the update through different operators. Therefore, we do not apply one quantization scheme to all states. For non-negative exponential moving averages, in-cluding second-moment states V and confidence states 
+
+C, we use AL as the primary representation. De-pending on state sensitivity and the memory budget, we use AL8 , AL16 , or full-precision storage. The first-moment state M follows a different regime: it is signed and contains both positive and negative values. We therefore use signed low-bit encodings based on uniform quantization rather than an unsigned AL 
+
+mapping. In controlled momentum experiments, uniform 8-bit quantization ( UF8 ) achieves lower reconstruction er-ror and update drift than the Dettmers-style dynamic mapping at the same bit width for the evaluated con-figurations. We treat this as an empirical observation about the tested momentum distributions, not a uni-versal property of uniform quantization. Dynamic mapping remains a useful baseline, while UF8 is the 7default momentum representation in our experiments. 
+
+4.4 Block Granularity and Memory Cost 
+
+AL adapts its logarithmic interval independently for each block. Smaller blocks provide more local ranges, while larger blocks amortize metadata across more values. For each block, we store two FP32 meta-data values: ℓmin and ∆ ℓ. Ignoring tensor-boundary padding, the storage cost per state element is approx-imately 
+
+cAL8 ≃ 1 + 8
+
+B , cAL16 ≃ 2 + 8
+
+B , (7) where the first term is the quantized code in bytes and the second term is shared FP32 metadata. Section 5 evaluates the resulting localization–metadata trade-off. 
+
+AL16 codes are stored in a 16-bit integer container and interpreted as unsigned values during quantiza-tion and dequantization. Metadata remains FP32 for both precisions. The equations above describe the logical code space independently of the signedness of the host tensor container. 
+
+# 5 Controlled Analysis 
+
+End-to-end loss alone does not reveal where a quanti-zation policy succeeds or fails. We therefore use con-trolled simulations to separate one-step reconstruction error, update-domain error, and error accumulated through an EMA. All values in this section are pro-duced by the executed analysis notebook; synthetic distributions are fixed across methods within each comparison. The experiments are diagnostics rather than substitutes for the language-model results in Section 6. Figure 4 summarizes the main sensitivity, adaptation, and temporal-drift results. 
+
+5.1 Adaptive Versus Fixed Log Ranges 
+
+Table 1 compares the relative update error from Eq. (2) for a 2048-element block. The tested distri-butions are three log-normal regimes in base-2 space,                     
+
+> Table 1: Single-step update error (%, lower is better) for fixed and adaptive logarithmic ranges, block size 2048. Distribution Fixed −126 Fixed −53 Fixed −40 Adaptive Narrow 4.200 1.568 1.052 0.039
+> Medium 5.140 1.835 1.574 0.688
+> Wide 2.934 1.993 44.505 0.704
+
+denoted narrow, medium, and wide according to their relative sampled log-spans. A single fixed logarith-mic floor cannot serve all three regimes: a high floor improves resolution for narrow states but clips wide states, whereas a very low floor wastes most codes on an unused range. Fitting the nonzero interval per block avoids this choice and keeps update error below 1% in these cases. The same pattern compounds over time. In a 5K-step second-moment EMA with new-observation weight α = 0 .001 (equivalently, β2 = 0 .999) and block size 2048, adaptive quantization produces 0.736% state drift. Fixed floors at −126, −53, −40, and −28 produce 56.914%, 52.956%, 74.463%, and 25.254%, re-spectively; the evaluated block-wise dynamic baseline produces 10.032%. These values motivate adaptive range fitting, but they do not imply the same ordering for every real state distribution. 
+
+5.2 Exact Zero and Sparse States 
+
+Reserving one of 256 codes has almost no effect for dense blocks. For the narrow dense distribution, the reserved and unreserved variants yield 0.079% and 0.078% state reconstruction error and the same 0.039% update error. Their behavior diverges when true zeros are present. In the 90%-sparse case in Table 2, the no-zero variant reconstructs dormant entries as posi-tive values. RMS clipping can hide their immediate contribution to the measured update, but removing that clipping exposes an error exceeding 100%. The reserved design retains exact zeros and reduces the unclipped update error to 0.122%. 8Table 2: Exact-zero ablation at block size 2048. “No clip” removes the optimizer clipping that otherwise masks dormant entries in this single-step probe. Distribution Codes State error (%) No-clip update (%) Dense, narrow 1 + 255 0.079 0.039 Dense, narrow 0 + 255 0.078 0.039 Sparse, 90% 1 + 255 0.243 0.122 Sparse, 90% 0 + 255 8.963 > 100 
+
+This probe explains why exact-zero preservation is most relevant for cold embedding entries. The > 100% value is a constructed no-clipping diagnostic intended to expose the artificial state history introduced when exact zeros are mapped to positive values, rather than a prediction of end-to-end sparse-training failure. 
+
+5.3 EMA and Update Fidelity 
+
+For a 5K-step Adam-style EMA with FP32 momen-tum, AL8 reduces both state drift and steady-state update error relative to the selected dynamic map-ping. At block size 256, AL8 yields 0.562% V drift and 0.280% update error, versus 7.282% and 3.436% for the baseline. At block size 2048, the corresponding values are 0.736% and 0.357%, versus 10.032% and 4.577%. Factored states can behave differently: when a constructed row statistic spans heterogeneous hot, normal, and cold groups, AL8 has lower reconstructed update error even when an L2 state-drift metric favors the baseline on the largest values. This disagreement motivates measuring the operator output, not only the stored tensor. 
+
+5.4 Block Granularity and Tensor Topology 
+
+Smaller blocks improve localization but add meta-data. For a hypothetical 1.1B-element second-moment state, AL8 uses 8.25 bits/element at B = 256 and 8.031 bits/element at B = 2048; the corresponding estimates are 1081.8 and 1053.1 MiB. In an indepen-dently generated 5K-step EMA Pareto sweep over block size and representation, the measured drift rises from 0.577% to 0.814% between these block sizes, while the dynamic baseline rises from 8.243% to 12.259%. The numerical gap favors larger blocks as a memory-efficient default in this synthetic setting. Topology places an additional constraint on that choice. A 2048-element flat block aligns naturally with the hidden width of the TinyLlama configuration, but spans more than two 768-wide rows in GPT-2. The 100K experiment in Section 6.4 reports two observed contrasts: block size under G0, and G1 protection at 
+
+B = 256. Because G1 at B = 2048 was not evaluated, that long-horizon experiment does not identify an in-teraction between grouping and block size. We there-fore describe the 100K result as evidence consistent with topology alignment rather than as a complete factorial analysis; the 20K Adafactor grid in Table 3 contains all four cells. 
+
+5.5 Signed Momentum Encoding 
+
+For signed first moments, uniform 8-bit quantization is the default empirical choice. At block size 256, UF8 
+
+produces 0.6954% relative L2 error on the step-100 momentum sample, compared with 1.0711% for the evaluated dynamic map; both have cosine similarity above 0.9999 and no measured sign flips. At step 1000, the errors are 0.7126% and 1.1134%. These results motivate the default used for the traced momentum distributions. 
+
+5.6 Precision as an Independent State Decision 
+
+Increasing a dense 1.1B-element second moment from 
+
+AL8 to AL16 roughly doubles its state storage, elim-inating most of the memory benefit relative to native FP16. A factored confidence state is much smaller. This asymmetry makes mixed precision attractive: 
+
+AL8 can remain the default for large V states while a sensitive, low-cardinality C state receives AL16 or FP32. The end-to-end CAME ablation in Table 3 tests this policy. 90.001 0.01 0.1 1 10 100        
+
+> Single-step update error (%)
+> VrAttention
+> VrMLP
+> VrEmbedding
+> CrAttention
+> CrMLP
+> CrLM head
+> CrEmbedding
+> <0.001 >100; 26.9K false zeros >100; 15.5K false zeros
+
+a Trace-calibrated state sensitivity     
+
+> AL8 AL16 Dyn8
+> Narrow Medium Wide 0.03 0.1 110
+> Update error (%)
+
+b No fixed floor fits every regime    
+
+> Adaptive AL8 Fixed -126 Fixed -40
+> 8.00 8.125 8.25 8.50
+> Stored bits / element
+> 0.5 1510 20
+> 5K V drift (%)
+> B=2048 B=256
+> B=2048 B=256
+
+c AL stays on the low-drift frontier 
+
+> AL8 Dyn8
+> Lower is better
+
+Figure 4: Controlled diagnostics separate state-specific sensitivity, range adaptation, and temporal drift. (a) Single-step update error for synthetic blocks calibrated to the step-10K CAME trace by tensor-wise median and median block range. Vr and Cr denote row factors of the factored second-moment and residual-confidence states. Hollow left triangles mark AL16 values below 0.001%; filled right triangles mark Dyn8 values above 100%, whose labels also report nonzero values mapped to zero. (b) A block-adaptive interval avoids the failure modes of two fixed logarithmic ranges across narrow, medium, and wide synthetic regimes. (c) In a 5K-step second-moment EMA, AL8 
+
+remains on a lower drift–storage frontier than the evaluated dynamic mapping. Panels report controlled diagnostics rather than end-to-end training quality. 
+
+# 6 LLM Pre-training Evaluation 
+
+6.1 Experimental Setup 
+
+We evaluate randomly initialized causal language mod-els on the WikiText-103 raw corpus [6]. The core benchmark uses the TinyLlama-1.1B architecture [12] for 20K optimizer steps with sequence length 512, per-device batch size 4, and seed 921. Validation is run every 1000 steps. The long-horizon benchmark uses GPT-2 124M [7] for 100K steps with sequence length 512, batch size 16, and the same seed; it records training metrics without periodic validation. Models are initialized from configuration rather than from pre-trained weights, trained with BF16 computation and FP32 parameters, and use gradient checkpointing. The long-horizon run is used to compare stability and late training loss, not held-out quality. The learning-rate schedule is constant after 1000 warmup steps. The effective learning rate is 10 −4 for AdamW, CAME, and APOLLO configurations and 10 −3 for Adafactor. Weight decay and gradient clip-ping are disabled in the reported presets. Adam-style paths use ( β1, β 2) = (0 .9, 0.999); CAME additionally uses β3 = 0 .9999; APOLLO uses rank 256, channel-wise scaling, and a projection update gap of 200. The dynamic 8-bit AdamW baseline is the bitsandbytes implementation corresponding to Dettmers et al. [1]. HF Adafactor, the official CAME implementation, and the official APOLLO implementation provide the other reference paths. We distinguish two parameter-grouping policies. 10 G0 applies the selected optimizer configuration without special protection, except where the opti-mizer requires dedicated routing. G1 separates one-dimensional tensors, biases, normalization parameters, token embeddings, and the language-model head; it leaves optimizer states for this group unquantized, while the remaining tensors retain the selected low-precision path. G1 is a deliberately coarse semantic grouping rather than a hand-tuned claim of optimal routing. In total, the evidence package contains 96 runs and 214.7 GPU-hours. The reported optimizer-state mem-ory is the sum of CUDA tensor storage owned by the optimizer. Peak allocation is PyTorch’s maximum allocated memory and excludes allocator fragmenta-tion; when a 20K run lacks the counter, the analysis report uses a configuration-matched 1K proxy because the peak is reached early. Throughput is measured in input tokens per second. End-to-end comparisons are observed trajectories rather than uncertainty esti-mates. The executed notebook additionally reports 10-seed stability checks for selected controlled syn-thetic comparisons; the controlled values displayed in this paper use the fixed generators recorded there. 
+
+6.2 Core 20K-Step Results 
+
+Table 3 reports representative configurations from the core benchmark, while Figure 5 shows their validation trajectories. For AdamW, AL8 second moments with 
+
+UF8 momentum reaches 72.90 perplexity, a gap of 0.42 from FP32 and 0.64 lower than the evaluated 8-bit dynamic baseline. Measured optimizer-state storage is 2119.2 MiB, compared with 8392.7 MiB for FP32 AdamW, and throughput increases from 2502 to 2960 tokens/s. The peak-allocation reduction is smaller than the state reduction because parameters, gradients, activations, and temporary buffers remain. The CAME ablation demonstrates why precision must remain state-specific. The all-AL8 configura-tion saves most optimizer-state memory but has a 3.51 perplexity gap from the reference. Keeping C
+
+in FP32 reduces this gap to 1.73 with only 2.3 MiB additional measured state. Using AL16 for both V
+
+and C reaches 86.16, close to the 86.68 reference while preserving the dominant saving from 8-bit momentum. We do not interpret the small numerical difference between 86.16 and 86.68 as a generalization improve-ment. The supported observation is that CAME is more sensitive to the precision of its non-negative states than AdamW in this setup. Adafactor’s factored reference uses only 3.6 MiB of measured optimizer state, making this path primarily a test of topology sensitivity rather than an absolute-memory headline. In the completed 2 ×2 grid, B = 256 is better than B = 2048 under both G0 (78.72 versus 79.36) and G1 (78.15 versus 78.29), while G1 records lower final PPL at both block sizes. On the projected APOLLO path, our configuration records a 0.56 PPL gap and 384.0 MiB lower measured state, with lower throughput than the reference in this implementation. 
+
+6.3 Learning-Rate and Batch-Size Sen-sitivity 
+
+The 10K sensitivity grid applies {0.1, 1, 10 } to a com-mon 10 −3 preset at batch size 4; 0 .1× is nominal for AdamW, CAME, and APOLLO, and 1 × for Adafac-tor. No method dominates the full range. The dy-namic 8-bit AdamW baseline collapses at 10 ×, while our UF8 + AL8 AdamW remains finite; all-AL8 
+
+CAME also collapses at 10 ×, whereas the CAME reference, FP32-C variant, and AL16 variant remain finite. Adafactor and APOLLO configurations remain finite across the three tested multipliers. Stability is therefore path-specific across the evaluated configura-tions. At the nominal learning rate, the batch-size sweep uses batches 4, 8, and 16. AdamW UF8 +AL8 has trajectory mean absolute errors of 0.0078, 0.0053, and 0.0050 relative to FP32, compared with 0.0098, 0.0118, and 0.0111 for the dynamic baseline. CAME’s corresponding errors are 0.0495, 0.0603, and 0.0572; Adafactor’s are 0.0266, 0.0249, and 0.0283; and APOLLO’s are 0.0119, 0.0138, and 0.0148. The batch sweep supports the AdamW result over the tested range but also shows that the CAME precision gap is not an isolated final-step fluctuation. Appendix A.2 reports the complete selected learning-rate and batch-size sensitivity tables. 11 Table 3: TinyLlama-1.1B, WikiText-103, 20K steps, batch size 4. Memory: MiB; single runs, seed 921. “Dyn8” is the evaluated dynamic 8-bit encoding; BV is the non-negative-state block size (momentum blocks: 256). Path Group Configuration M V C BV PPL ↓ Peak ↓ State ↓ tok/s ↑
+
+AdamW G0 FP32 reference FP32 FP32 – – 72.48 21046.0 8392.7 2502 AdamW G0 Dyn8 baseline Dyn8 Dyn8 – 256 73.54 10608.6 2131.8 2640 AdamW G0 Ours UF8 AL8 – 2048 72.90 10596.8 2119.2 2960 CAME G0 FP32 reference FP32 FP32 FP32 – 86.68 13428.5 4203.2 1866 CAME G0 Ours, all AL8 UF8 AL8 AL8 2048 90.19 9509.0 1068.0 2432 CAME G0 Ours, FP32 C UF8 AL8 FP32 2048 88.41 9510.0 1070.3 2423 CAME G0 Ours, AL16 UF8 AL16 AL16 2048 86.16 9510.8 1069.8 2428 Adafactor G0 HF reference – FP32 factored – – 77.56 8934.7 3.6 2206 Adafactor G0 Ours – AL8 factored – 256 78.72 8442.6 1.2 2740 Adafactor G0 Ours – AL8 factored – 2048 79.36 8442.7 1.3 2734 Adafactor G1 Ours – mixed/ AL8 – 256 78.15 8999.2 1.4 2708 Adafactor G1 Ours – mixed/ AL8 – 2048 78.29 8999.3 1.5 2698 APOLLO G0 FP32 reference FP32 FP32 – – 74.68 11560.2 2078.7 2331 APOLLO G0 Ours UF8 AL8 – 2048 75.24 10290.9 1694.7 2077 
+
+6.4 Long-Horizon Training 
+
+Table 4 reports late training loss for the 100K-step GPT-2 benchmark. No listed configuration collapses. AdamW remains close to its reference at both block sizes, with a smaller gap at B = 256. CAME and APOLLO show the same block-size direction. The largest change occurs for Adafactor: G0 with B = 256 has a late-loss gap of +0 .1185, whereas G1 with the same block size reduces the gap to +0 .0159. This is consistent with the hypothesis that flat quantization blocks and uniform parameter treatment are poor matches for sensitive tensors in the 768-wide GPT-2 topology. The table provides two long-horizon contrasts: block size under G0 and G1 at B = 256. Unlike the complete 20K Adafactor grid in Table 3, this 100K experiment lacks G1/ B = 2048 and therefore cannot estimate a long-horizon grouping–block-size interac-tion. The aggregate G1 policy also does not identify which protected tensor class drives the observed dif-ference. The contrast is consistent with parameter semantics and state topology materially affecting the quality of an otherwise identical low-precision repre-sentation. 
+
+Table 4: GPT-2 124M, 100K steps, batch size 16. Late training loss and the change from the path-specific full-precision reference. Path/configuration Group Late loss ∆AdamW FP32 G0 3.4564 –AdamW Dyn8, B = 256 G0 3.4648 +0.0084 AdamW ours, B = 256 G0 3.4603 +0.0039 AdamW ours, B = 2048 G0 3.4679 +0.0115 CAME FP32 G0 3.4271 –CAME ours, B = 256 G0 3.4447 +0.0176 CAME ours, B = 2048 G0 3.4555 +0.0284 Adafactor HF G0 3.8522 –Adafactor ours, B = 256 G0 3.9707 +0.1185 Adafactor ours, B = 2048 G0 4.0026 +0.1504 Adafactor ours, B = 256 G1 3.8681 +0.0159 APOLLO FP32 G0 3.8551 –APOLLO ours, B = 256 G0 3.8683 +0.0132 APOLLO ours, B = 2048 G0 3.8789 +0.0238 
+
+# 7 Implementation 
+
+7.1 Reference and CUDA Paths 
+
+The implementation exposes AdamW-style, Adafac-tor, CAME, and APOLLO update paths through 12 0 5K 10K 15K 20K 100 150 200 250 300 
+
+> Validation perplexity
+
+a AdamW        
+
+> FP32 72.48
+> Dyn8 73.54
+> Ours AL8 72.90
+> 05K 10K 15K 20K 100 150 200 250
+
+b CAME         
+
+> FP32 86.68
+> AL8 90.19
+> AL8 + FP32 C 88.41
+> AL16 86.16
+> 05K 10K 15K 20K
+> Training step
+> 100 150 200 250 300 350
+> Validation perplexity
+
+c Adafactor        
+
+> HF FP32 77.56
+> G0 AL8 78.72
+> G1 AL8 78.15
+> 05K 10K 15K 20K
+> Training step
+> 100 150 200 250 300 350
+
+d APOLLO    
+
+> FP32 74.68
+> Ours AL8 75.24
+> TinyLlama-1.1B / WikiText-103 / 20K steps / seed 921 Single runs; plotted evaluations begin at step 2K
+
+Figure 5: Validation perplexity across the 20K-step TinyLlama-1.1B benchmark for AdamW, CAME, Adafactor, and APOLLO. The horizontal axis begins at step 0, while the displayed curves begin at step 2K after omitting the 1K evaluation for legibility; endpoint labels give the step-20K values in Table 3. Each curve is one run with seed 921, and path-specific vertical axes are used for legibility. For Adafactor, G0 is the default grouping and G1 protects selected sensitive tensors as defined in the experimental setup. 
+
+one PyTorch optimizer interface. Non-negative states support AL8 , AL16 , and FP32 storage; signed mo-mentum supports uniform and dynamic low-bit en-codings or FP32. CAME confidence precision is con-figured independently from second-moment precision. A Python implementation serves as the semantic ref-erence, while a JIT-compiled CUDA extension fuses state dequantization, EMA updates, requantization, and parameter updates where the selected path per-mits it. The public reproducibility artifact is available at yanfeiwong/al-quantization . It identifies the frozen source revision rather than assigning a ver-sion to the smoke suite. The optimizer source is hosted at yanfeiwong/adafactor-8bit ; the experi-ments analyzed in this paper use Adafactor8Bit v0.4.3 at 4f544d8 . This revision anchors the optimizer im-plementation used by the experiments; it does not contain the manuscript or paper-figure sources, which are assembled and released separately. Later commits that only change author metadata, documentation, manuscript sources, or figure scripts do not replace this experiment anchor. The implementation stores quantization type and metadata in optimizer check-points, supports round-trip save/load and resumption, and can migrate selected M , V , and C precisions be-tween runs. The artifact includes scripts for every table and figure, together with a manifest mapping generated files to experiment names. 
+
+7.2 Validation Policy 
+
+We separate semantic alignment from backend nu-merical consistency. Reference Algorithm Alignment compares the unquantized Python path with PyTorch AdamW and RMSprop, Hugging Face Adafactor, of-ficial CAME, and official APOLLO using a strict parameter-difference tolerance of 10 −5. CUDA Nu-13 merical Consistency uses a predeclared three-level policy: PASS below 10 −5, WARN from 10 −5 to below 5 × 10 −3, and FAIL at or above 5 × 10 −3. This cate-gory is used only for paths whose parallel reductions can change floating-point accumulation order. The current complete smoke run reports 171 PASS, 0 FAIL, 4 WARN, and 0 SKIP. The Python CAME mixed-shape reference comparison has a maximum parameter difference of 3 .26 × 10 −6. Its CUDA coun-terpart is 1 .24 × 10 −5 and is reported as a warning at-tributed to accumulation order in factored atomicAdd 
+
+reductions. CUDA–Python comparisons for all-AL8 
+
+CAME produce differences around 1 .25 × 10 −4, while 
+
+AL16 and FP32 confidence variants return below the strict threshold. We report these warnings rather than relabeling them as strict reference matches. 
+
+7.3 Reproducibility Checklist 
+
+The current experiment package fixes the following settings: 
+
+• seed 921; WikiText-103 raw data shuffled through a 10,000-example streaming buffer; empty records removed; 
+
+• sequence length 512, dynamic padding to a mul-tiple of eight, causal language-model collation, and gradient checkpointing; 
+
+• BF16 computation, FP32 model parameters, con-stant learning rate after 1000 warmup steps, and no checkpoint selection by validation score; 
+
+• TinyLlama-1.1B for 20K-step core and 10K-step sensitivity runs; GPT-2 124M for the 100K-step horizon; 
+
+• a single NVIDIA RTX 3090 Ti for the reported runs, with peak memory measured by PyTorch allocation counters and optimizer memory com-puted from live CUDA tensors. The captured experiment environment uses Win-dows 11 build 26200, Python 3.13.9, PyTorch 2.12.1 built for CUDA 13.2, cuDNN 9.2, NVIDIA driver 610.62, and MSVC 19.44.35223. The result-relevant Python packages include Transformers 5.13.0, Datasets 4.4.1, Accelerate 1.14.0, bitsand-bytes 0.50.0.dev0, came-pytorch 0.1.3, and apollo-torch 1.0.3. The curated Markdown and JSON reports also retain the filenames and SHA-256 digests of local bitsandbytes and flash-attention wheels without expos-ing machine-local paths. The public artifact preserves the executed analysis notebook rather than a cleared copy and exports the machine-readable TensorBoard and smoke-test summaries used by this manuscript. 
+
+7.4 Limitations 
+
+Scale and task coverage. The study covers one 1.1B architecture for 20K steps and one 124M ar-chitecture for 100K steps on WikiText-103. It does not establish transfer beyond these architectures, this corpus, and the single-device pre-training setting. 
+
+End-to-end uncertainty. The 20K and 100K comparisons use seed 921; their endpoint differences are measurements rather than uncertainty estimates. The evidence combines controlled diagnostics with optimizer, learning-rate, batch-size, topology, and horizon sweeps. Repeated end-to-end seeds would quantify variation in final losses. 
+
+Coupled topology interventions. The 20K Adafactor grid covers G0/G1 at both tested block sizes, but G1 jointly protects one-dimensional tensors, biases, normalization parameters, token embeddings, and the language-model head. Its improvement there-fore does not identify which protected tensor class is responsible. The 100K benchmark lacks G1 at 
+
+B = 2048 and cannot estimate the corresponding long-horizon interaction. 
+
+State-dependent losses. All-AL8 CAME has a visible quality gap in the core benchmark. Higher precision for confidence and second-moment states recovers much of this gap at small absolute state cost, but the preferred policy may change with model, learning rate, or residual distribution. 
+
+Memory and speed accounting. Optimizer-state bytes are not total training memory. Peak alloca-tion excludes allocator fragmentation and some values are drawn from matched 1K proxy runs. Throughput reflects one implementation and GPU; it should not be generalized to other hardware or software stacks. 
+
+Controlled distributions. Synthetic families 14 make failure modes measurable but cannot enumer-ate real optimizer-state distributions. Update-domain error is a diagnostic and not a guarantee of final task quality. 
+
+# 8 Conclusion 
+
+This study shows that quantization policies designed for two dense Adam states do not transfer uniformly to factored, confidence, and projected states. Adap-tive Log-Space quantization provides an exact-zero-preserving, block-adaptive representation for non-negative states, but its behavior still depends on state precision, block topology, and the downstream update operator. Controlled experiments show that adaptive ranges improve update fidelity and EMA drift across the evaluated distributions, while exact-zero reservation matters when dormant state entries are common. End-to-end experiments provide a more qualified picture. 
+
+AL8 with UF8 is competitive with the evaluated 8-bit AdamW baseline; CAME requires greater care for its confidence and second-moment states; and the evaluated Adafactor runs record lower loss with sensitive-tensor protection and finer block granularity. APOLLO extends the evaluation to a projected-state path but does not provide a throughput win in the reported implementation. The main conclusion is that effective low-precision optimizer design should preserve the distinction be-tween state representation, state topology, and up-date semantics; no single quantizer was uniformly best across the evaluated paths. Future work should separate the components of topology-aware grouping, develop automatic precision policies that spend addi-tional bits only where the optimizer’s state semantics justify them, and quantify end-to-end variation across seeds and larger models. 
+
+# References 
+
+[1] Tim Dettmers, Mike Lewis, Sam Shleifer, and Luke Zettle-moyer. 8-bit optimizers via block-wise quantization. In 
+
+International Conference on Learning Representations ,2022. [2] Diederik P. Kingma and Jimmy Ba. Adam: A method for stochastic optimization. In International Conference on Learning Representations , 2015. [3] Bingrui Li, Jianfei Chen, and Jun Zhu. Memory efficient optimizers with 4-bit states. In Advances in Neural Infor-mation Processing Systems , volume 36, 2023. [4] Minglu Liu, Cunchen Hu, Liangliang Xu, Fengming Tang, Ruijia Wang, and Fu Yu. STQuant: Spatio-temporal adap-tive framework for optimizer quantization in large multi-modal model training. arXiv preprint arXiv:2604.06836 ,2026. [5] Yang Luo, Xiaozhe Ren, Zangwei Zheng, Zhuo Jiang, Xin Jiang, and Yang You. CAME: Confidence-guided adaptive memory efficient optimization. In Proceedings of the 61st Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 4442–4453, Toronto, Canada, 2023. Association for Computational Linguistics. [6] Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer sentinel mixture models. In 
+
+International Conference on Learning Representations ,2017. [7] Alec Radford, Jeffrey Wu, Rewon Child, David Luan, Dario Amodei, and Ilya Sutskever. Language models are unsupervised multitask learners. Technical report, OpenAI, 2019. [8] Noam Shazeer and Mitchell Stern. Adafactor: Adaptive learning rates with sublinear memory cost. In Interna-tional Conference on Machine Learning , 2018. [9] Kristi Topollai and Anna Choromanska. Understanding quantization of optimizer states in llm pre-training: Dy-namics of state staleness and effectiveness of state resets. 
+
+arXiv preprint arXiv:2603.16731 , 2026. [10] Haocheng Xi, Han Cai, Ligeng Zhu, Yao Lu, Kurt Keutzer, Jianfei Chen, and Song Han. Coat: Compressing optimizer states and activation for memory-efficient fp8 training. 
+
+arXiv preprint arXiv:2410.19313 , 2024. [11] Cong Xu, Wenbin Liang, Mo Yu, Anan Liu, Ke-Yue Zhang, Shunli Wang, Lizhuang Ma, Jianyong Wang, Jun Wang, and Wei Zhang. Pushing the limits of low-bit optimizers: A focus on ema dynamics. arXiv preprint arXiv:2505.00347 ,2025. [12] Peiyuan Zhang, Guangtao Zeng, Tianduo Wang, and Wei Lu. Tinyllama: An open-source small language model. 
+
+arXiv preprint arXiv:2401.02385 , 2024. [13] Jiawei Zhao, Zhenyu Zhang, Beidi Chen, Zhangyang Wang, Anima Anandkumar, and Yuandong Tian. Galore: Memory-efficient llm training by gradient low-rank projec-tion. In International Conference on Machine Learning ,2024. [14] Hanqing Zhu, Zhenyu Zhang, Wenyan Cong, Xi Liu, Sem Park, Vikas Chandra, Bo Long, David Z. Pan, Zhangyang Wang, and Jinwon Lee. APOLLO: SGD-like memory, AdamW-level performance. In Proceedings of Machine Learning and Systems , volume 7, 2025. 
+
+15 A Additional Results 
+
+The appendix exposes numeric results that support the main figures without moving their visual narra-tive out of the paper. Unless stated otherwise, the language-model measurements use seed 921 and the controlled probes use the fixed random generators recorded in the executed analysis notebook. 
+
+A.1 Trace-Calibrated State Sensitivity 
+
+Table 5 gives the complete values summarized in Fig-ure 4a. Each 32,768-element synthetic state is cali-brated to the tensor-wise median and median block log 2 range of the corresponding step-10K CAME trace. These are controlled one-step operator probes, not samples of the empirical block distribution. Values be-yond the plotting range remain censored rather than being assigned invented magnitudes. The table supports two bounded observations. First, the precision required by a state depends jointly on its traced range and the operator that consumes it. Second, the two Dyn8 embedding failures coin-cide with many positive entries being reconstructed as zero. It does not establish that every real embedding update has error above 100%, nor that the one-step ranking alone predicts final training quality. 
+
+A.2 Sensitivity Tables 
+
+Table 6 reports trajectory mean absolute error relative to the path-specific full-precision reference in the 10K learning-rate sweep. A collapsed run is reported at its observed failure step rather than assigned a finite error. Table 7 gives the corresponding batch-size sweep at the nominal path-specific learning rate. The sensitivity tables are diagnostic rather than repeated-seed uncertainty estimates. In particular, the finite 10 × AdamW result does not imply a uni-versal stability advantage, and the CAME ordering changes with the precision assigned to its non-negative states. 
+
+A.3 Artifact and Source Map 
+
+The public implementation anchor is Adafactor8Bit v0.4.3, commit 4f544d8 . That commit contains the optimizer implementation used for the experiments, not this manuscript or its figure-generation sources. The public reproducibility artifact at 
+
+yanfeiwong/al-quantization uses the follow-ing claim-to-source map: 
+
+• Figures 1–2 are generated by the matching scripts under scripts/paper_figures/ and are exported as PDF, SVG, and PNG. 
+
+• Figure 3 uses fig03_trace_components.csv , a tidy export from the raw state traces produced by export_fig03_trace_data.py .
+
+• Figure 4 uses three checked CSV tables exported from executed notebook cells F7, A1, and D4. 
+
+• Figure 5 and the benchmark tables use tb_ analysis_report.md , generated from the Ten-sorBoard events by analyze_tb.py .
+
+• Reference/CUDA validation and environment claims use the paired Markdown/JSON smoke-test and environment reports generated by their reproducibility scripts. Raw TensorBoard events and state-trace snapshots are included as ancillary repository artifacts rather than LaTeX submission inputs. The machine-readable reports retain the values used by the manuscript. Win-dows peak memory is reported from PyTorch alloca-tion counters and optimizer-state storage from live CUDA tensors; neither quantity should be interpreted as an operating-system measurement of total resident VRAM. 16 Table 5: Trace-calibrated single-step update error (%, lower is better). Dyn8 false-zero counts report positive state entries reconstructed as zero out of 32,768 elements. State Tensor role AL8 AL16 Dyn8 Dyn8 false zeros 
+
+Vr Attention 0.154 0.001 0.434 0
+
+Vr MLP 0.652 0.003 4.361 0
+
+Vr Embedding 1.069 0.006 > 100 26,857 
+
+Cr Attention 0.034 < 0.001 0.133 0
+
+Cr MLP 0.320 0.001 0.745 0
+
+Cr LM head 0.470 0.002 1.402 0
+
+Cr Embedding 1.162 0.006 > 100 15,461 
+
+Table 6: 10K-step learning-rate sensitivity at batch size 4, using multipliers of the common 10 −3 preset. Entries are training-trajectory MAE from the path-specific full-precision reference. Path Configuration 0.1× 1× 10 ×
+
+AdamW Dyn8 baseline 0.0098 0.0777 collapse at 2.9K AdamW UF8 + AL8 0.0078 0.0890 0.2687 CAME UF8 + AL16 V, C 0.0143 0.1499 0.2429 CAME UF8 + AL8 V, C 0.0495 0.1091 collapse at 4.96K CAME UF8 + AL8 V + FP32 C 0.0298 0.2811 0.2794 Adafactor AL8 , B = 2048 0.0253 0.0266 0.0298 APOLLO UF8 + AL8 0.0119 0.0157 0.1464 
+
+Table 7: 10K-step batch-size sensitivity at the nominal path-specific learning rate. Entries are training-trajectory MAE from the corresponding full-precision reference. Path Configuration Batch 4 Batch 8 Batch 16 AdamW Dyn8 baseline 0.0098 0.0118 0.0111 AdamW UF8 + AL8 0.0078 0.0053 0.0050 CAME UF8 + AL8 V, C 0.0495 0.0603 0.0572 Adafactor AL8 , B = 2048 0.0266 0.0249 0.0283 APOLLO UF8 + AL8 0.0119 0.0138 0.0148 
+
+17
