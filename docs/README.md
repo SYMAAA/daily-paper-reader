@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-28</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-29</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 13 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 1 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>7</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>0</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>1</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-28 03:05:07 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-29 02:51:45 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读聚焦LLM量化与视觉注意力剪枝，速读覆盖长视频理解等方向；最值得看的是Fisher信息引导的混合精度量化（9.0）和头感知剪枝（9.0），均指向更高效的推理与关键token选择；建议优先精读这两篇高分论文，并搭配速读中的长视频因果测试时训练作为补充。</p>
+<p>今日共速读1篇论文，无精读，聚焦大模型剪枝后的文本退化问题。</p>
+<p>最值得关注的是《FOCUS &amp; RePAIR》提出的Token级引导方法，为缓解剪枝模型生成质量下降提供了新思路。</p>
+<p>建议下一步精读该文，并对比其他剪枝补偿策略，评估实际效果。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">0 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="FAMPWQ: Fisher Information-based Adaptive Mixed Precision Weight Quantization for Effective LLM Inference">FAMPWQ: Fisher Information-based Adaptive Mixed Precision Weight Quantization for Effective LLM Inference</span></li><li><span class="dpr-home-dashboard-paper-title" title="Not All Attention Heads Contribute to Critical Visual Token Selection: Head-Aware Pruning Matters More">Not All Attention Heads Contribute to Critical Visual Token Selection: Head-Aware Pruning Matters More</span></li><li><span class="dpr-home-dashboard-paper-title" title="Activation Outliers Matter: Robust Recovery for Quantized Multimodal LLMs">Activation Outliers Matter: Robust Recovery for Quantized Multimodal LLMs</span></li></ul>
+<p class="dpr-home-dashboard-empty">今日暂无推荐。</p>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>6</strong></span></div>
+
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">7 篇</strong>
+    <strong class="dpr-home-dashboard-count">1 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="LongVU-TTT: Causal Test-Time Training for Visual Resampling in Long Video Understanding">LongVU-TTT: Causal Test-Time Training for Visual Resampling in Long Video Understanding</span></li><li><span class="dpr-home-dashboard-paper-title" title="A Layer Importance Metric for Quantization Accounting for the Speed-Quality Trade-off in Autoregressive Models">A Layer Importance Metric for Quantization Accounting for the Speed-Quality Trade-off in Autoregressive Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="Learning to Look Again: Loss-Gap Supervision for Free-form Crop Routing in Vision-Language Models">Learning to Look Again: Loss-Gap Supervision for Free-form Crop Routing in Vision-Language Models</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="FOCUS &amp; RePAIR: Mitigating Text Degeneration via Token-Level Guidance for Pruned Large Language Models">FOCUS &amp; RePAIR: Mitigating Text Degeneration via Token-Level Guidance for Pruned Large Language Models</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>7</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>1</strong></span></div>
 </section>
 </div>
 

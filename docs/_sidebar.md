@@ -1,6 +1,9 @@
 * <a class="dpr-sidebar-root-link" href="#/">首页</a>
 * <a class="dpr-sidebar-root-link dpr-sidebar-noactive-link" href="javascript:void(0)" data-dpr-hash="#/tutorial/README">使用教程</a>
 * Daily Papers
+  * 2026-08-29 <!--dpr-date:20260829-->
+    * 速读区
+      * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202608/29/2608.26676v1-focus--repair-mitigating-text-degeneration-via-token-level-guidance-for-pruned-large-language-models" data-sidebar-item="{&quot;title&quot;: &quot;FOCUS &amp; RePAIR: Mitigating Text Degeneration via Token-Level Guidance for Pruned Large Language Models&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2608.26676v1-focus--repair-mitigating-text-degeneration-via-token-level-guidance-for-pruned-large-language-models&quot;, &quot;score&quot;: &quot;6.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;el&quot;}], &quot;evidence&quot;: &quot;剪枝后LLM的token级引导微调，围绕压缩与适配主题&quot;}">FOCUS &amp; RePAIR: Mitigating Text Degeneration via Token-Level Guidance for Pruned Large Language Models</a>
   * 2026-08-28 <!--dpr-date:20260828-->
     * 精读区
       * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202608/28/2608.24945v1-fampwq-fisher-information-based-adaptive-mixed-precision-weight-quantization-for-effective-llm-inference" data-sidebar-item="{&quot;title&quot;: &quot;FAMPWQ: Fisher Information-based Adaptive Mixed Precision Weight Quantization for Effective LLM Inference&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2608.24945v1-fampwq-fisher-information-based-adaptive-mixed-precision-weight-quantization-for-effective-llm-inference&quot;, &quot;score&quot;: &quot;9.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;el&quot;}], &quot;evidence&quot;: &quot;基于Fisher信息的自适应混合精度权重量化用于LLM推理&quot;}">FAMPWQ: Fisher Information-based Adaptive Mixed Precision Weight Quantization for Effective LLM Inference</a>
