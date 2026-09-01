@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-31</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-01</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 11 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 9 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>5</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-31 23:32:08 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-01 22:51:11 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读6篇、速读5篇，聚焦大模型量化与多模态理解。最值得关注的是HyQuant与层位宽分配方法，双双斩获9.0高分，为注意力机制量化与性能约束优化提供新思路。建议优先精读这两篇高分论文，速读可关注DAMP的衰减感知混合精度方案。</p>
+<p>今日9篇论文聚焦多模态模型与压缩优化，精读4篇、速读5篇，核心围绕视觉令牌剪枝与量化技术。</p>
+<p>最值得看：两篇9.0高分工作——视觉令牌剪枝的轻量几何校正，以及MoE大模型混合精度的层次化位分配，兼顾效果与效率。</p>
+<p>建议普通读者优先关注这两篇，后续可留意KV缓存压缩与视觉幻觉缓解的速读论文。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">4 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="HyQuant: Hybrid-Precision Quantization for LLM Attention">HyQuant: Hybrid-Precision Quantization for LLM Attention</span></li><li><span class="dpr-home-dashboard-paper-title" title="A Method for Layer Bit-Width Allocation in LLM Quantization via Performance Maximization Under a Quality-Degradation Constraint">A Method for Layer Bit-Width Allocation in LLM Quantization via Performance Maximization Under a Quality-Degradation Constraint</span></li><li><span class="dpr-home-dashboard-paper-title" title="Visual Token Coding for Video Multimodal Large Language Models">Visual Token Coding for Video Multimodal Large Language Models</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Centering before Pruning: Lightweight Geometry Correction for Diversity-Based Visual Token Pruning in LVLMs">Centering before Pruning: Lightweight Geometry Correction for Diversity-Based Visual Token Pruning in LVLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="Q-Strata: Hierarchical Bit Allocation for Mixed-Precision Quantization of Mixture-of-Experts LLMs">Q-Strata: Hierarchical Bit Allocation for Mixed-Precision Quantization of Mixture-of-Experts LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="SemKV: Semantic Mixed-Precision KV Cache Quantization Guided by the Quality Cliff for Long-Context LLM Inference">SemKV: Semantic Mixed-Precision KV Cache Quantization Guided by the Quality Cliff for Long-Context LLM Inference</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>6</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>4</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -87,7 +89,7 @@
     <strong class="dpr-home-dashboard-count">5 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="DAMP: Decay-Aware Mixed-Precision Recurrent-State Quantization">DAMP: Decay-Aware Mixed-Precision Recurrent-State Quantization</span></li><li><span class="dpr-home-dashboard-paper-title" title="StreamEMS: Streaming Video Understanding with Self-Evolving Memory Scheme for Vision-Language Models">StreamEMS: Streaming Video Understanding with Self-Evolving Memory Scheme for Vision-Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="Task-disentangled Low-Rank Adaptation for Versatile Audio-visual Multi-modal Learning Tasks within a Unified Framework">Task-disentangled Low-Rank Adaptation for Versatile Audio-visual Multi-modal Learning Tasks within a Unified Framework</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="PuzzleKV: Page-Wise Low-Rank Decomposition for KV Cache Compression">PuzzleKV: Page-Wise Low-Rank Decomposition for KV Cache Compression</span></li><li><span class="dpr-home-dashboard-paper-title" title="EviAnchor: Mitigating Hallucinations in Large Vision-Language Models via Regional Visual Evidence Compensation">EviAnchor: Mitigating Hallucinations in Large Vision-Language Models via Regional Visual Evidence Compensation</span></li><li><span class="dpr-home-dashboard-paper-title" title="Fine-Tuning Low-Bit Models with Gradient in Quantized Code Space">Fine-Tuning Low-Bit Models with Gradient in Quantized Code Space</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>5</strong></span></div>
 </section>
