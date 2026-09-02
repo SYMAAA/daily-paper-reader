@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-01</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-02</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 9 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 11 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>5</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>7</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>4</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-01 22:51:11 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-02 22:07:51 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日9篇论文聚焦多模态模型与压缩优化，精读4篇、速读5篇，核心围绕视觉令牌剪枝与量化技术。</p>
-<p>最值得看：两篇9.0高分工作——视觉令牌剪枝的轻量几何校正，以及MoE大模型混合精度的层次化位分配，兼顾效果与效率。</p>
-<p>建议普通读者优先关注这两篇，后续可留意KV缓存压缩与视觉幻觉缓解的速读论文。</p>
+<p>今日聚焦大模型量化，精读两篇高分数值优化与三元量化新法；速读另涉NVFP4量化、视觉编码压缩等方向。最值得关注REAL-Q的动态梯度下降端到端量化，以及QTEA的稀疏残差与逐列优化思路。建议读者优先看这两篇精读，后续可探索实际部署中的精度与速度权衡。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">4 篇</strong>
+    <strong class="dpr-home-dashboard-count">7 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Centering before Pruning: Lightweight Geometry Correction for Diversity-Based Visual Token Pruning in LVLMs">Centering before Pruning: Lightweight Geometry Correction for Diversity-Based Visual Token Pruning in LVLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="Q-Strata: Hierarchical Bit Allocation for Mixed-Precision Quantization of Mixture-of-Experts LLMs">Q-Strata: Hierarchical Bit Allocation for Mixed-Precision Quantization of Mixture-of-Experts LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="SemKV: Semantic Mixed-Precision KV Cache Quantization Guided by the Quality Cliff for Long-Context LLM Inference">SemKV: Semantic Mixed-Precision KV Cache Quantization Guided by the Quality Cliff for Long-Context LLM Inference</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="REAL-Q: E2E LLM Quantization via Dynamic Gradient Descent">REAL-Q: E2E LLM Quantization via Dynamic Gradient Descent</span></li><li><span class="dpr-home-dashboard-paper-title" title="QTEA: Ternary LLMs with Sparse Residual Salient Weight and By-Column Optimization">QTEA: Ternary LLMs with Sparse Residual Salient Weight and By-Column Optimization</span></li><li><span class="dpr-home-dashboard-paper-title" title="HBQ: Hierarchical Scaling Block Quantization with Hardware-Efficiency-Aware Design for Accurate LLM Inference">HBQ: Hierarchical Scaling Block Quantization with Hardware-Efficiency-Aware Design for Accurate LLM Inference</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>4</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>7</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">5 篇</strong>
+    <strong class="dpr-home-dashboard-count">4 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="PuzzleKV: Page-Wise Low-Rank Decomposition for KV Cache Compression">PuzzleKV: Page-Wise Low-Rank Decomposition for KV Cache Compression</span></li><li><span class="dpr-home-dashboard-paper-title" title="EviAnchor: Mitigating Hallucinations in Large Vision-Language Models via Regional Visual Evidence Compensation">EviAnchor: Mitigating Hallucinations in Large Vision-Language Models via Regional Visual Evidence Compensation</span></li><li><span class="dpr-home-dashboard-paper-title" title="Fine-Tuning Low-Bit Models with Gradient in Quantized Code Space">Fine-Tuning Low-Bit Models with Gradient in Quantized Code Space</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="OCGQuant: Outlier-Companion Grouping for NVFP4 Quantization">OCGQuant: Outlier-Companion Grouping for NVFP4 Quantization</span></li><li><span class="dpr-home-dashboard-paper-title" title="Compressing AI Traffic: Standardized Neural Network Coding of Visual-Token Representations in Split Vision-Language Inference">Compressing AI Traffic: Standardized Neural Network Coding of Visual-Token Representations in Split Vision-Language Inference</span></li><li><span class="dpr-home-dashboard-paper-title" title="A Target-Centric Survey of Quantization-Aware Training">A Target-Centric Survey of Quantization-Aware Training</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>5</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>4</strong></span></div>
 </section>
 </div>
 
