@@ -1,0 +1,356 @@
+Title: SCULPT: Training Edge Vision Models for Post-Training Quantization Readiness
+
+URL Source: https://arxiv.org/pdf/2609.01743v1
+
+Published Time: Thu, 03 Sep 2026 00:05:51 GMT
+
+Number of Pages: 8
+
+Markdown Content:
+# SCULPT: Training Edge Vision Models for Post-Training Quantization Readiness 
+
+Bharadwaj Kavuri, Sourav Babu-PK, Varadhraj Ellapan, Pullarao Maddu, Prasad Deshpande 
+
+Valeo Vision Systems, Tuam, Ireland Valeo India Pvt. Ltd, Chennai, India 
+
+Abstract 
+
+Edge vision models are difficult to deploy on resource-constrained hardware, making low-bit post-training quantization (PTQ) attractive. In practice, standard FP32 training often produces heavy-tailed activation distributions whose outliers destabilize activation quantization: preserving the full range wastes quantization bins on rare extremes, while aggressive clipping causes information loss. Existing solutions typically rely on quantization-aware training (QAT), which adds training complexity and bit-width coupling, or advanced PTQ procedures that repair the model after training. We present SCULPT (Statistical Clipping and Uniform Loss for Post-Training), a training-time method that improves PTQ readiness during ordinary FP32 fine-tuning. SCULPT combines a topology-aware acti-vation regularizer that suppresses quantization-hostile skewness and kurtosis with a stable percentile-based clipping mechanism that learns deployment-ready activation bounds. Unlike QAT, SCULPT does not sim-ulate quantization during optimization; unlike post hoc outlier-repair PTQ methods, it does not require runtime activation transformations. The learned clipping bounds can be exported directly into a standard PTQ workflow for low-bit deployment, including INT8 and lower-bit settings such as W4A8. 
+
+Keywords: Post-training quantization, Activation outliers, Edge vision, Model compression 
+
+# 1 Introduction 
+
+Edge vision and perception models remain difficult to deploy on resource-constrained hardware due to tight latency, memory, and power budgets. Low-bit quantization is attractive because it enables efficient integer in-ference while preserving existing model architectures and deployment pipelines. In practice, however, post-training quantization (PTQ) often degrades sharply at low precision when activations exhibit heavy-tailed or highly asymmetric distributions. If the quantizer preserves rare outliers, the effective resolution for the dense bulk of the distribution becomes too coarse; if it clips aggressively, those rare extremes are truncated [Banner et al., 2019]. Figure 1 illustrates this failure mode on a representative hard layer. Most activations remain concentrated in a narrow operating region, but a small number of extreme values drive the maximum far beyond the normal scale of the layer. This mismatch makes min/max calibration brittle and is a major source of PTQ error. Existing methods typically address this problem either during quantized training or after the full-precision model has already been trained. Quantization-aware training (QAT) and related approaches learn clipping thresholds or quantizer parameters during optimization, but they add training complexity and are often tied to a specific quantization setting [Choi et al., 2018, Jain et al., 2020, Esser et al., 2020]. On the other hand, ad-vanced PTQ methods improve low-bit accuracy through post hoc calibration, adaptive rounding, reconstruction, or activation smoothing after training [Nagel et al., 2020, Li et al., 2021, Xiao et al., 2023]. These methods can be effective, but they also add workflow complexity or transformations that are unattractive in deployment-constrained settings. arXiv:2609.01743v1 [cs.CV] 1 Sep 2026 Figure 1: Outlier-threshold marker comparison for a representative hard layer (post.features.4.2.block.1.2 ). Rare extremes drive the calibration maximum far outward in standard FP32 PTQ and, to a lesser extent, in QAT. SCULPT keeps the maximum much closer to the normal layer scale, reducing outlier sensitivity during PTQ calibration. In this paper, we investigate a different point in the design space: rather than repairing quantization failure only after training, can a model be trained in full precision so that it is already easier to quantize later? Our cen-tral hypothesis is that a substantial part of PTQ brittleness originates from activation distributions produced by ordinary FP32 optimization, especially the emergence of structured activation outliers that are poorly matched to low-bit uniform quantizers. To test this idea, we propose SCULPT (Statistical Clipping and Uniform Loss for Post-Training), a training-time method for improving PTQ readiness during ordinary FP32 fine-tuning. SCULPT combines two components. First, Uniform Activation Distribution Regularization (UADR) penal-izes excess skewness and kurtosis in selected intermediate activations. Second, StablePercentileClip introduces stable percentile-based clipping bounds that are adaptive during training and frozen by the end of optimiza-tion, yielding activation limits that can be exported directly to a standard PTQ workflow. In contrast to QAT, SCULPT does not simulate quantization during training; in contrast to post hoc outlier-repair methods, it does not require runtime activation transformations. Our contributions are: • We identify structured activation outliers from standard FP32 training as a major obstacle to low-bit PTQ. • We propose SCULPT, combining topology-aware activation regularization with stable percentile clipping to improve PTQ readiness. • We evaluate SCULPT under a matched quantization contract and analyze accuracy, efficiency, and acti-vation outlier behavior. 
+
+# 2 Related Work 
+
+PTQ converts a trained full-precision network into a lower-precision representation, typically using affine or symmetric quantizers [Jacob et al., 2018]. Its accuracy depends heavily on how well the learned activation distributions match the target quantizer. For a uniform quantizer with clipping range [−α, α] or [0, α], increasing  
+
+> α
+
+preserves outliers but coarsens the quantization grid, while decreasing α improves resolution for the dense central mass but clips the tails [Banner et al., 2019]. This tradeoff becomes especially severe at low bit-widths. There is a large body of prior work on improving quantization robustness during training. PACT learns activation clipping parameters [Choi et al., 2018], TQT learns quantization thresholds through backpropaga-tion [Jain et al., 2020], LSQ learns step sizes for low-bit training [Esser et al., 2020], and Robust Quantization studies training models resilient across quantization settings [Shkolnik et al., 2020]. These methods typically optimize under simulated quantization and are therefore naturally viewed as QAT-style approaches. Another line of work improves PTQ after training through post hoc correction. AdaRound adapts rounding decisions [Nagel et al., 2020], BRECQ performs block-wise reconstruction [Li et al., 2021], and SmoothQuant reduces activation outliers by shifting difficulty from activations to weights through an equivalent offline trans-formation [Xiao et al., 2023]. Recent vision PTQ work has also shown that activation distributions after nonlin-earities can be poorly matched to standard uniform quantizers, motivating specialized activation quantization schemes such as PTQ4ViT [Yuan et al., 2022]. SCULPT targets a different operating point: instead of simulat-ing quantization during training or repairing the model after training, it modifies the FP32 fine-tuning trajectory so that the resulting model is more compatible with a later PTQ step. 
+
+# 3 Method 
+
+We propose SCULPT , a training-time method for improving the post-training quantization (PTQ) readiness of neural networks during ordinary FP32 fine-tuning. SCULPT combines two complementary components: (1) a topology-aware activation regularizer that suppresses quantization-hostile skewness and heavy tails, and (2) a stable percentile-based clipping layer that learns deployment-ready activation bounds. The regularizer provides soft distribution shaping, while the clipping layer provides hard boundary enforcement. Figure 2 summarizes the full SCULPT pipeline. During fine-tuning, Adaptive Stable Percentile Clipping (Adaptive-SPC) wraps standard activations with percentile-based clamped activations whose bounds are stabi-lized over time and frozen for deployment. In parallel, UADR tracks activation statistics from selected inter-mediate tensors and penalizes excess skewness and kurtosis using topology-aware one-sided targets. 
+
+3.1 Problem Setup 
+
+Let fθ denote a model trained in full precision on task loss Ltask . Our goal is not to quantize the model during training, but to modify the FP32 training trajectory so that the final model is more robust to later PTQ at low precision. We focus on intermediate activations, which are often a dominant source of PTQ error when their dynamic ranges are governed by rare but large outliers. SCULPT seeks to reduce this tradeoff at its source by shaping activation statistics during FP32 fine-tuning. 
+
+3.2 StablePercentileClip 
+
+StablePercentileClip learns stable activation bounds during training and exports them directly for later PTQ. Unlike fixed clipping functions such as ReLU6, the clipping range is estimated from observed activation statis-tics and refined throughout fine-tuning. Given an input tensor X (t ) at step t , we first apply the wrapped activation function:        
+
+> A(t)=φ¡X(t)¢,
+
+(1) where φ(·) denotes the original activation (e.g., SiLU, ReLU, ReLU6, or Hardswish). Adaptive-SPC estimates percentile bounds on the output of the wrapped activation, not on the pre-activation tensor. StablePercentileClip therefore wraps the original activation rather than replacing it, preserving the underlying nonlinearity while adding learned post-activation bounds. Let V (t ) ∈ RN denote the flattened version of A(t ). To control sorting cost, we form a strided subsample eV (t )
+
+using     
+
+> s=max
+> μ
+> 1,
+> ¹NNmax
+> º¶
+> ,
+
+(2) and 
+
+eV (t ) =
+
+n
+
+V (t ) 
+
+> i·s
+
+o⌊N /s⌋− 1  
+
+> i=0
+
+. (3) We then compute detached lower and upper percentile estimates: 
+
+Q(t ) 
+
+> lower
+
+= Quantile ¡ eV (t ), plower 
+
+¢ , Q(t ) 
+
+> upper
+
+= Quantile ¡ eV (t ), pupper 
+
+¢ , (4) 
+
+bQ(t ) 
+
+> lower
+
+= sg 
+
+³
+
+Q(t )
+
+> lower
+
+´
+
+, bQ(t ) 
+
+> upper
+
+= sg 
+
+³
+
+Q(t )
+
+> upper
+
+´
+
+. (5) We maintain running lower and upper bounds updated with inverse-time momentum: 
+
+αt = α0
+
+1 + γt , (6) 
+
+M (t ) 
+
+> lower
+
+= (1 − αt )M (t −1)  
+
+> lower
+
++ αt bQ(t )
+
+> lower
+
+, (7) 
+
+M (t ) 
+
+> upper
+
+= (1 − αt )M (t −1)  
+
+> upper
+
++ αt bQ(t )
+
+> upper
+
+. (8) The clipped activation is then 
+
+Y (t ) = clip 
+
+³
+
+A(t ), M (t )
+
+> lower
+
+, M (t )
+
+> upper
+
+´
+
+. (9) Because the running bounds are updated through detached statistics, gradients do not propagate through the quantile computation itself. During backpropagation, the layer behaves like a hard clamp applied after the wrapped activation. 
+
+3.3 UADR 
+
+Stable clipping constrains activation range but does not explicitly discourage skewed or heavy-tailed activa-tion shapes. To complement it, we apply UADR to selected learnable-layer outputs. Here, “topology-aware” refers to the functional position of an activation within a computation block, such as pre-activation linear out-puts versus post-activation tensors. Although we retain the acronym UADR, the regularizer does not force activations toward a strictly uniform distribution; instead, it suppresses excess skewness and heavy tails using topology-aware one-sided targets. Let X (l ) ∈ RN denote the flattened output tensor of learnable layer l . We compute the empirical mean and standard deviation: 
+
+μl = 1
+
+N
+
+> N
+
+X 
+
+> i=1
+
+X (l ) 
+
+> i
+
+, σl =
+
+vuut 1
+
+N
+
+> N
+
+X 
+
+> i=1
+
+³
+
+X (l ) 
+
+> i
+
+− μl
+
+´2
+
++ ϵ, (10) and standardized activations 
+
+Z (l ) 
+
+> i
+
+= X (l ) 
+
+> i
+
+− μl
+
+σl
+
+. (11) Skewness and kurtosis are then 
+
+γ
+
+³
+
+X (l )´
+
+= 1
+
+N
+
+> N
+
+X 
+
+> i=1
+
+³
+
+Z (l )
+
+> i
+
+´3
+
+, κ
+
+³
+
+X (l )´
+
+= 1
+
+N
+
+> N
+
+X 
+
+> i=1
+
+³
+
+Z (l )
+
+> i
+
+´4
+
+. (12) In the experiments of this paper, we use the simpler setting 
+
+γ(l ) 
+
+> T
+
+= 0 (13) for all regularized layers, and a shared upper target κT = 3.The per-layer UADR loss is 
+
+L (l ) 
+
+> UADR
+
+= α max 
+
+³
+
+0, γ
+
+³
+
+X (l )´
+
+− γ(l )
+
+> T
+
+´2
+
++ β max 
+
+³
+
+0, κ
+
+³
+
+X (l )´
+
+− κT
+
+´2
+
+. (14) Figure 2: Overview of SCULPT. Adaptive-SPC learns stable activation bounds for PTQ export, while UADR penalizes excess skewness and kurtosis. Let S denote the set of layers to which UADR is applied. In our implementation, UADR is applied to Conv2d and Linear outputs, while Adaptive-SPC is inserted after SiLU, ReLU, ReLU6, and Hardswish activations. The total training objective is          
+
+> Ltotal =Ltask +λX
+> l∈S
+> L(l)
+> UADR .
+
+(15) UADR and StablePercentileClip play complementary roles: UADR reduces the tendency of intermediate activations to develop excessive skewness and heavy tails, while StablePercentileClip enforces explicit acti-vation bounds that stabilize into deployment-time clipping limits. After fine-tuning, the learned bounds are frozen and exported as layerwise activation limits for deployment, so the resulting model can be quantized us-ing a standard PTQ workflow without simulated quantization during training and without runtime outlier-repair transforms. 
+
+# 4 Experimental Setup 
+
+We evaluate SCULPT on EfficientNet-B0 [Tan and Le, 2019] with ImageNette [Howard, 2019, Deng et al., 2009] as a controlled low-bit quantization testbed. The baseline model is initialized from Torchvision ImageNet-1K EfficientNet-B0 weights, adapted to 10 classes, and trained in FP32 for 80 epochs using AdamW, label smoothing of 0.1, RandAugment, automatic mixed precision (AMP), batch size 128, and a cosine OneCycle learning-rate schedule. Starting from the trained FP32 checkpoint, SCULPT fine-tunes the model with Adaptive Stable Percentile Clipping inserted after all SiLU, ReLU, ReLU6, and Hardswish activations, and with UADR regularization applied to all Conv2d and Linear outputs. Adaptive-SPC estimates lower and upper activation percentile bounds at 0.001 and 0.999, respectively, using an inverse-time exponential moving average. We set Nmax = 100000 
+
+for percentile estimation in all experiments. These bounds are frozen after epoch 2 and converted into static activation-plus-clamp modules for deployment-time PTQ. For UADR, we use a one-sided hinge penalty with target skewness γT = 0, target kurtosis κT = 3, α = 0.01 ,  
+
+> β=0.01
+
+, and global regularization weight λ = 5 × 10 −4, which is reduced by a factor of 0.1 after SPC freezing. We compare standard FP32 PTQ, SCULPT PTQ, and QAT under an identical supergroup QDQ contract. The PTQ setup uses per-channel symmetric weight quantization, per-tensor asymmetric activation quantization, and min/max calibration over 32 calibration batches. QDQ nodes are placed before Conv/Linear modules and after activation or SPC clamp modules, with no QDQ inserted between Conv and SiLU/ReLU/SPC. The QAT baseline uses native PyTorch fake quantizers under the same supergroup boundaries. Checkpoint selection is based on quantized validation accuracy under the matched supergroup PTQ contract rather than FP32 validation accuracy. For FP32, SCULPT, and QAT runs, epoch-level PTQ tracking is used to identify the best deployment-relevant checkpoint. 
+
+# 5 Experimental Results 
+
+5.1 Main Quantization Results 
+
+Table 1 compares standard FP32 PTQ, SCULPT-conditioned PTQ, and QAT baselines under the same super-group QDQ contract. SCULPT substantially improves low-bit PTQ relative to naive FP32 PTQ. In the pri-mary W8A8 setting, standard FP32 PTQ achieves 90.5478% top-1 accuracy, whereas SCULPT PTQ reaches 99.3631%, an absolute gain of 8.8153 percentage points. Under the same W8A8 setting, the tested QAT base-line reaches 98.2420%, which remains below SCULPT PTQ by 1.1211 points. The same trend holds at W4A8. Standard FP32 PTQ drops sharply to 40.5605%, whereas SCULPT PTQ reaches 80.2803%, slightly exceeding the tested QAT W8A8 PTQ baseline at 79.4395%. These results sug-gest that conditioning activation statistics during FP32 fine-tuning can substantially improve downstream PTQ robustness, even without simulated quantization during training. Method FP32 W8A8 PTQ W4A8 PTQ Best PTQ Step FP32 99.2866 90.5478 40.5605 3577 SCULPT 99.5159 99.3631 80.2803 584 QAT W8A8 97.7325 98.2420 79.4395 2044 QAT W4A8 93.1465 89.9618 98.2675 2044 Table 1: Main results under the shared QDQ contract. SCULPT reaches its best W8A8 PTQ result after 584 optimizer steps, compared with 2044 for the tested W8A8 QAT baseline and 3577 for naive FP32 PTQ. Its full run is also shorter: 16 epochs / 1168 steps, versus 30 epochs / 2190 steps for both QAT baselines and 80 epochs / 5840 steps for the original FP32 run. Although dedicated low-bit QAT remains stronger in its target setting, SCULPT is designed to improve PTQ readiness without simulated quantization during training, and is therefore most directly compared against naive PTQ and the matched W8A8 QAT baseline in the primary deployment setting. 
+
+5.2 Activation Distribution Analysis 
+
+To understand why SCULPT improves PTQ accuracy, we analyze the activation distributions observed after training. Across the 131 encoded activation boundaries used in the quantized model, our layer-wise analysis shows that SCULPT reduces the mean PTQ NRMSE/std from 0.04818 for standard FP32 PTQ to 0.01519, Figure 3: Scalar metrics for a representative hard layer. Lower is better in all three cases. SCULPT sharply reduces outlier score, absmax/std, and PTQ NRMSE/std relative to both standard FP32 PTQ and the tested W8A8 QAT baseline. and reduces the mean absmax/std from 42.04 to 11.56. These reductions are consistent with the intended role of SCULPT: suppressing the rare extreme values that otherwise dominate min/max calibration and stretch the quantization range. Figure 3 summarizes a representative hard layer ( post.features.4.2.block.1.2 ) using scalar metrics. SCULPT reduces the outlier score from 325.08 in FP32 PTQ and 129.12 in QAT to 19.99, reduces abs-max/std from 317.6 and 125.8 to 14.4, and reduces normalized PTQ error from 0.2841 and 0.1452 to 0.0163, re-spectively. These results indicate that SCULPT does not merely shift calibration slightly; it materially changes the tail behavior that makes PTQ brittle in the first place. 
+
+5.3 Discussion 
+
+These results suggest that a substantial portion of PTQ brittleness can be mitigated before quantization itself, by modifying the activation statistics learned during FP32 fine-tuning. In this controlled benchmark, SCULPT yields a substantially stronger PTQ checkpoint than naive FP32 PTQ and also compares favorably to the tested W8A8 QAT baseline while requiring fewer optimization steps to reach its best quantized result. 
+
+# 6 Conclusion 
+
+We presented SCULPT , a training-time method for improving post-training quantization (PTQ) readiness dur-ing ordinary FP32 fine-tuning. SCULPT combines a topology-aware activation regularizer that suppresses quantization-hostile skewness and heavy tails with a stable percentile-based clipping mechanism that learns deployment-ready activation bounds. Together, these components condition the full-precision model so that later low-bit PTQ becomes substantially more robust without simulated quantization during training or runtime outlier-repair transforms. On EfficientNet-B0/ImageNette under an identical supergroup QDQ contract, SCULPT substantially out-performs naive FP32 PTQ and compares favorably to the tested W8A8 QAT baseline. In the primary W8A8 setting, SCULPT PTQ reaches 99.3631% top-1 accuracy, compared with 90.5478% for standard FP32 PTQ and 98.2420% for the tested W8A8 QAT baseline. These results support the hypothesis that a substantial portion of PTQ brittleness can be mitigated before quantization itself. Extending the same analysis to more complex perception models remains an important next step. Acknowledgments 
+
+Generative AI assisted with language refinement and structural editing; the authors verified all technical claims and remain responsible for the manuscript. The authors gratefully acknowledge Valeo Vision Systems, Tuam, Ireland, for providing support and resources for this work. 
+
+# References 
+
+[Banner et al., 2019] Banner, R., Nahshan, Y., Hoffer, E., and Soudry, D. (2019). ACIQ: Analytical clipping for integer quantization of neural networks. In International Conference on Learning Representations (ICLR) .[Choi et al., 2018] Choi, J., Wang, Z., Venkataramani, S., Chuang, P. I.-J., Srinivasan, V., and Gopalakrish-nan, K. (2018). PACT: Parameterized clipping activation for quantized neural networks. arXiv preprint arXiv:1805.06085 .[Deng et al., 2009] Deng, J., Dong, W., Socher, R., Li, L.-J., Li, K., and Fei-Fei, L. (2009). Imagenet: A large-scale hierarchical image database. In 2009 IEEE Conference on Computer Vision and Pattern Recognition ,pages 248–255. IEEE. [Esser et al., 2020] Esser, S. K., McKinstry, J. L., Bablani, D., Appuswamy, R., and Modha, D. S. (2020). Learned Step Size Quantization. In International Conference on Learning Representations (ICLR) .[Howard, 2019] Howard, J. (2019). Imagenette: A smaller subset of 10 easily classified classes from imagenet. 
+
+https://github.com/fastai/imagenette .[Jacob et al., 2018] Jacob, B., Kligys, S., Chen, B., Zhu, M., Tang, M., Howard, A., Adam, H., and Kalenichenko, D. (2018). Quantization and training of neural networks for efficient integer-arithmetic-only inference. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR) .[Jain et al., 2020] Jain, S., Gural, A., Wu, M., and Dick, C. (2020). Trained quantization thresholds for accurate and efficient fixed-point inference of deep neural networks. In Proceedings of Machine Learning and Systems (MLSys) .[Li et al., 2021] Li, Y., Gong, R., Tan, X., Yang, Y., Hu, P., Zhang, Q., Yu, F., Wang, W., and Gu, S. (2021). BRECQ: Pushing the limit of post-training quantization by block reconstruction. In International Confer-ence on Learning Representations (ICLR) .[Nagel et al., 2020] Nagel, M., Amjad, R. A., Van Baalen, M., Louizos, C., and Blankevoort, T. (2020). Up or down? adaptive rounding for post-training quantization. In Proceedings of the 37th International Conference on Machine Learning (ICML) .[Shkolnik et al., 2020] Shkolnik, M., Chmiel, B., Banner, R., Shomron, G., Nahshan, Y., Bronstein, A., and Weiser, U. (2020). Robust quantization: One model to rule them all. In Advances in Neural Information Processing Systems (NeurIPS) .[Tan and Le, 2019] Tan, M. and Le, Q. (2019). Efficientnet: Rethinking model scaling for convolutional neural networks. In International conference on machine learning , pages 6105–6114. PMLR. [Xiao et al., 2023] Xiao, G., Lin, J., Seznec, M., Wu, H., Demouth, J., and Han, S. (2023). Smoothquant: Accurate and efficient post-training quantization for large language models. In Proceedings of the 40th International Conference on Machine Learning (ICML) .[Yuan et al., 2022] Yuan, Z., Xue, C., Chen, Y., Wu, Q., and Sun, G. (2022). PTQ4ViT: Post-training quanti-zation for vision transformers with twin uniform quantization. In European Conference on Computer Vision (ECCV) .
