@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-03</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-05</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 5 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 6 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>0</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>5</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>3</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>3</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-03 22:43:30 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-05 21:28:20 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日共生成 5 篇推荐（精读 0 篇，速读 5 篇）</p>
-<p>速读：《Tensor Methods for Language Models: From Token Representation to Training, Adaptation, Inference, Compression, and Interpretability》（7.0/10）, 《Scalable Kronecker-Fisher Approximation: Efficient Hessian Analysis for Billion-Parameter Language Models Compression》（7.0/10）, 《A Target-Centric Survey of Quantization-Aware Training》（6.0/10）</p>
-<p>这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。</p>
+<p>今日共读6篇，其中3篇精读、3篇速读，聚焦视觉Token剪枝与混合大模型量化等前沿议题。最值得关注的是两篇9.0分工作：可视Token剪枝被建模为覆盖率优化问题，以及门控DeltaNet在4比特量化下的强健存活性。建议普通读者优先精读这两篇高分论文，速读其余三篇以了解近似检索、低秩初始化与视频理解的新进展。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">0 篇</strong>
+    <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p class="dpr-home-dashboard-empty">今日暂无推荐。</p>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Who Speaks for the Pruned? Visual Token Pruning as Coverage Optimization">Who Speaks for the Pruned? Visual Token Pruning as Coverage Optimization</span></li><li><span class="dpr-home-dashboard-paper-title" title="Why Gated DeltaNet Survives 4-Bit Quantization: NVFP4 W4A4 for the Recurrent Half of a Hybrid 27B LLM">Why Gated DeltaNet Survives 4-Bit Quantization: NVFP4 W4A4 for the Recurrent Half of a Hybrid 27B LLM</span></li><li><span class="dpr-home-dashboard-paper-title" title="CoFiE: Coarse-to-Fine Evidence Selection for Efficient Streaming Video Understanding">CoFiE: Coarse-to-Fine Evidence Selection for Efficient Streaming Video Understanding</span></li></ul>
   </div>
-
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>3</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">5 篇</strong>
+    <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Tensor Methods for Language Models: From Token Representation to Training, Adaptation, Inference, Compression, and Interpretability">Tensor Methods for Language Models: From Token Representation to Training, Adaptation, Inference, Compression, and Interpretability</span></li><li><span class="dpr-home-dashboard-paper-title" title="Scalable Kronecker-Fisher Approximation: Efficient Hessian Analysis for Billion-Parameter Language Models Compression">Scalable Kronecker-Fisher Approximation: Efficient Hessian Analysis for Billion-Parameter Language Models Compression</span></li><li><span class="dpr-home-dashboard-paper-title" title="A Target-Centric Survey of Quantization-Aware Training">A Target-Centric Survey of Quantization-Aware Training</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="RSLM: Training-Free Vector Quantization for Approximate Nearest Neighbor Search">RSLM: Training-Free Vector Quantization for Approximate Nearest Neighbor Search</span></li><li><span class="dpr-home-dashboard-paper-title" title="TaRA: Training-Aware Low-Rank Adaptation Initialization">TaRA: Training-Aware Low-Rank Adaptation Initialization</span></li><li><span class="dpr-home-dashboard-paper-title" title="Beyond Retrieval: Progressive Latent Memory Evolution for Streaming Video Understanding">Beyond Retrieval: Progressive Latent Memory Evolution for Streaming Video Understanding</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>5</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>3</strong></span></div>
 </section>
 </div>
 
