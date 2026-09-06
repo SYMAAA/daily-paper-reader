@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-05</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-06</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 6 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 5 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>3</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>3</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-05 21:28:20 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-06 20:53:42 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日共读6篇，其中3篇精读、3篇速读，聚焦视觉Token剪枝与混合大模型量化等前沿议题。最值得关注的是两篇9.0分工作：可视Token剪枝被建模为覆盖率优化问题，以及门控DeltaNet在4比特量化下的强健存活性。建议普通读者优先精读这两篇高分论文，速读其余三篇以了解近似检索、低秩初始化与视频理解的新进展。</p>
+<p>今日5篇论文，聚焦长视频理解与量化训练，其中2篇精读、3篇速读。最值得关注RIDGE（9.0分）的长期视频证据选择与Progressive Latent Memory（8.0分）的流式记忆进化，均立足视频理解痛点。建议后续优先精读这两篇论文，并留意视频时间建模与高效训练等衍生方向。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">3 篇</strong>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Who Speaks for the Pruned? Visual Token Pruning as Coverage Optimization">Who Speaks for the Pruned? Visual Token Pruning as Coverage Optimization</span></li><li><span class="dpr-home-dashboard-paper-title" title="Why Gated DeltaNet Survives 4-Bit Quantization: NVFP4 W4A4 for the Recurrent Half of a Hybrid 27B LLM">Why Gated DeltaNet Survives 4-Bit Quantization: NVFP4 W4A4 for the Recurrent Half of a Hybrid 27B LLM</span></li><li><span class="dpr-home-dashboard-paper-title" title="CoFiE: Coarse-to-Fine Evidence Selection for Efficient Streaming Video Understanding">CoFiE: Coarse-to-Fine Evidence Selection for Efficient Streaming Video Understanding</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="RIDGE: Region-Informed Derivative-Guided Evidence Selection for Long Video Understanding">RIDGE: Region-Informed Derivative-Guided Evidence Selection for Long Video Understanding</span></li><li><span class="dpr-home-dashboard-paper-title" title="Beyond Retrieval: Progressive Latent Memory Evolution for Streaming Video Understanding">Beyond Retrieval: Progressive Latent Memory Evolution for Streaming Video Understanding</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>3</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>2</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -87,7 +87,7 @@
     <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="RSLM: Training-Free Vector Quantization for Approximate Nearest Neighbor Search">RSLM: Training-Free Vector Quantization for Approximate Nearest Neighbor Search</span></li><li><span class="dpr-home-dashboard-paper-title" title="TaRA: Training-Aware Low-Rank Adaptation Initialization">TaRA: Training-Aware Low-Rank Adaptation Initialization</span></li><li><span class="dpr-home-dashboard-paper-title" title="Beyond Retrieval: Progressive Latent Memory Evolution for Streaming Video Understanding">Beyond Retrieval: Progressive Latent Memory Evolution for Streaming Video Understanding</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="The Shape of Time: Video-Token Contrast for Temporal Understanding in VideoLMs">The Shape of Time: Video-Token Contrast for Temporal Understanding in VideoLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="A Target-Centric Survey of Quantization-Aware Training">A Target-Centric Survey of Quantization-Aware Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="Tensor Methods for Language Models: From Token Representation to Training, Adaptation, Inference, Compression, and Interpretability">Tensor Methods for Language Models: From Token Representation to Training, Adaptation, Inference, Compression, and Interpretability</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>3</strong></span></div>
 </section>
