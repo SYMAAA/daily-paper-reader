@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-06</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-07</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
     <strong class="dpr-home-dashboard-count">共 5 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>3</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>1</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>4</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-06 20:53:42 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-07 22:47:05 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日5篇论文，聚焦长视频理解与量化训练，其中2篇精读、3篇速读。最值得关注RIDGE（9.0分）的长期视频证据选择与Progressive Latent Memory（8.0分）的流式记忆进化，均立足视频理解痛点。建议后续优先精读这两篇论文，并留意视频时间建模与高效训练等衍生方向。</p>
+<p>今日精读5篇AI论文，聚焦KV缓存量化与MoE压缩，其中1篇高价值深度分析。最值得关注量化KV缓存的质量恢复新法，及MoE模型稀疏化压缩方向。建议普通读者优先浏览精读论文的Low-Rank Attention Adaptation方法与实验结果。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">1 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="RIDGE: Region-Informed Derivative-Guided Evidence Selection for Long Video Understanding">RIDGE: Region-Informed Derivative-Guided Evidence Selection for Long Video Understanding</span></li><li><span class="dpr-home-dashboard-paper-title" title="Beyond Retrieval: Progressive Latent Memory Evolution for Streaming Video Understanding">Beyond Retrieval: Progressive Latent Memory Evolution for Streaming Video Understanding</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Quality Recovery for Quantized KV Caches via Low-Rank Attention Adaptation">Quality Recovery for Quantized KV Caches via Low-Rank Attention Adaptation</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>1</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">3 篇</strong>
+    <strong class="dpr-home-dashboard-count">4 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="The Shape of Time: Video-Token Contrast for Temporal Understanding in VideoLMs">The Shape of Time: Video-Token Contrast for Temporal Understanding in VideoLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="A Target-Centric Survey of Quantization-Aware Training">A Target-Centric Survey of Quantization-Aware Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="Tensor Methods for Language Models: From Token Representation to Training, Adaptation, Inference, Compression, and Interpretability">Tensor Methods for Language Models: From Token Representation to Training, Adaptation, Inference, Compression, and Interpretability</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Residual Sparsification via Output Importance for Compressing Mixture-of-Experts LLMs">Residual Sparsification via Output Importance for Compressing Mixture-of-Experts LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="Visual Attention Faithfulness in Vision-Language Models is Heterogeneous">Visual Attention Faithfulness in Vision-Language Models is Heterogeneous</span></li><li><span class="dpr-home-dashboard-paper-title" title="TAME: Temporal-Aware Mixture-of-Experts for Text-Video Retrieval">TAME: Temporal-Aware Mixture-of-Experts for Text-Video Retrieval</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>3</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>4</strong></span></div>
 </section>
 </div>
 
