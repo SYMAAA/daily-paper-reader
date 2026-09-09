@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-08</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-09</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 2 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 13 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>1</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>1</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>7</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-08 22:14:44 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-09 22:18:56 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读一篇、速读一篇，聚焦长视频多模态大模型与张量方法在语言模型中的应用。最值得关注的是《Select, Compress, Reinvest》提出的视觉令牌分配控制研究，对长视频理解效率有明确启发。建议普通读者优先跟进该精读结论，速读篇目可作为扩展视野的入门参考。</p>
+<p>今日13篇论文聚焦大模型量化与高效推理，其中6篇精读、7篇速读，核心围绕压缩与效率优化。</p>
+<p>最值得精读的两篇：STAR-Pro以渐进式裁剪实现LVLM高效推理（9.0分），All for 1-Bit探索LLM真正1-bit量化（9.0分）。</p>
+<p>建议普通读者重点关注量化压缩对模型能力的影响，以及LoRA自适应学习率等轻量调优方向，作为后续阅读切入点。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">1 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Select, Compress, Reinvest: A Controlled Study of Visual-Token Allocation in Long-Video MLLMs">Select, Compress, Reinvest: A Controlled Study of Visual-Token Allocation in Long-Video MLLMs</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="STAR-Pro: Stage-Wise Token Adaptive Reduction with Progressive Refinement for Efficient Large Vision-Language Models">STAR-Pro: Stage-Wise Token Adaptive Reduction with Progressive Refinement for Efficient Large Vision-Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="All for 1-Bit: Towards Genuine 1-Bit Post-Training Quantization for LLMs">All for 1-Bit: Towards Genuine 1-Bit Post-Training Quantization for LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="KBBQ: A Predictive Noise Law and the Limits of Spectrum Flattening in FP4 Quantization">KBBQ: A Predictive Noise Law and the Limits of Spectrum Flattening in FP4 Quantization</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>6</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">1 篇</strong>
+    <strong class="dpr-home-dashboard-count">7 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Tensor Methods for Language Models: From Token Representation to Training, Adaptation, Inference, Compression, and Interpretability">Tensor Methods for Language Models: From Token Representation to Training, Adaptation, Inference, Compression, and Interpretability</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="A Note on Scaling in Randomly Rotated Quantization and Its Connection to the CDEF +1 Pythagorean Relation">A Note on Scaling in Randomly Rotated Quantization and Its Connection to the CDEF +1 Pythagorean Relation</span></li><li><span class="dpr-home-dashboard-paper-title" title="One Rate Is Not Enough: Adaptive Anisotropic Learning Rates for LoRA Fine-Tuning">One Rate Is Not Enough: Adaptive Anisotropic Learning Rates for LoRA Fine-Tuning</span></li><li><span class="dpr-home-dashboard-paper-title" title="Steering Under Compression: Dose-Response, Capability Cost, and Failure Asymmetry in Quantized LLMs">Steering Under Compression: Dose-Response, Capability Cost, and Failure Asymmetry in Quantized LLMs</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>7</strong></span></div>
 </section>
 </div>
 
