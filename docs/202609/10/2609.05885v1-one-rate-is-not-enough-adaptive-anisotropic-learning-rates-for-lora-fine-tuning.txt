@@ -1,0 +1,1290 @@
+Title: One Rate Is Not Enough: Adaptive Anisotropic Learning Rates for LoRA Fine-Tuning
+
+URL Source: https://arxiv.org/pdf/2609.05885v1
+
+Published Time: Wed, 09 Sep 2026 00:27:01 GMT
+
+Number of Pages: 20
+
+Markdown Content:
+# One Rate Is Not Enough: Adaptive Anisotropic Learning Rates for LoRA Fine-Tuning 
+
+Huiyi Wang *, Daijiao Liu, Lina Yao, Dong Gong *
+
+University of New South Wales 
+
+{huiyi.wang, daijiao.liu, lina.yao, dong.gong}@unsw.edu.au 
+
+Abstract 
+
+Low-rank adaptation (LoRA) has become the standard for parameter-efficient fine-tuning of large language models. Most LoRA variants follow a uniform-LR convention , applying a single global learning rate across every rank-one component of every adapter. We show that this convention overlooks substantial within-module heterogeneity, where the rank-one com-ponents of a LoRA adapter update at highly uneven rates and low-velocity modules con-verge to concentrated singular spectra that un-derutilize the nominal rank budget. To ad-dress this, we propose an adaptive anisotropic learning-rate model that assigns each rank-one component its own effective learning rate, computed online from training-time signals and mean-normalized per module to preserve the global LR budget. AnLR-LoRA instan-tiates this model with two signals available during AdamW optimization, namely function-space velocity and Adam SNR, as a lightweight scheme with no extra trainable parameters. Across commonsense reasoning, natural lan-guage generation and visual instruction-tuning benchmarks, AnLR-LoRA consistently im-proves over LoRA while encouraging broader use of rank capacity, with gains that remain ro-bust across a wide range of global learning rates and transfer cleanly to other LoRA variants. 
+
+1 Introduction 
+
+Large language models (LLMs) have become the foundation of modern natural language process-ing, but adapting them to downstream tasks via full fine-tuning is prohibitively expensive. Parameter-efficient fine-tuning (PEFT) methods address this cost by training only a small subset of parame-ters (Houlsby et al., 2019; Li and Liang, 2021; Jia et al., 2022). Low-Rank Adaptation (LoRA) (Hu et al., 2022) has emerged as a standard choice for 
+
+> *
+
+Corresponding authors. 1 2 3 4 5 6 7 8       
+
+> rank index
+> 0.0 0.5 1.0 1.5 2.0 2.5
+> velocity / module mean  2.2× 0.55×
+> o_proj @ Layer 8 12345678
+> rank index
+> 0.0 0.5 1.0 1.5 2.0 2.5
+> velocity / module mean  2.5× 0.24×
+> v_proj @ Layer 20
+
+Figure 1: Per-rank-one update velocity of LoRA mod-ules. Within a single LoRA, the r rank-one components do not update at the same rate. 
+
+LLM adaptation, with its low-rank update param-eterization offering a favorable balance between adaptation quality and computational cost. Yet re-cent work identifies the learning rate (LR) as the dominant factor in LoRA tuning (Lee et al., 2026), which makes the form of the learning-rate conven-tion, not just its value, a worthwhile object of study. Standard LoRA training uses AdamW with a sin-gle global learning rate applied uniformly across every rank-one component of every adapter. We refer to this design as the uniform-LR convention ,which is inherited by most LoRA variants. Our analysis (Sec. 3), however, shows that under this convention the r rank-one components within a sin-gle adapter exhibit anisotropic per-step velocities (Fig. 1). This anisotropy emerges early in train-ing and persists throughout. This imbalance com-pounds over training, as modules whose rank-one components evolve slowly converge to a concen-trated spectrum of the LoRA update BA , leaving much of the nominal rank budget underutilized. The anisotropy is within-module and arises only during training, and it cannot be corrected by tun-ing a single global LR. This suggests that both the granularity and adaptivity of LoRA’s LR allocation deserve closer examination. This anisotropy in LoRA training motivates assigning learning rates at the level of individ-ual rank-one components and adjusting them as training proceeds. However, existing approaches 1arXiv:2609.05885v1 [cs.LG] 5 Sep 2026 still allocate learning rates at coarser granularities. LoRA+ (Hayou et al., 2024) partially relaxes the uniform-LR convention by assigning separate learn-ing rates to matrices A and B, but the adjustment remains at the matrix level and is fixed analytically before training. Beyond LoRA+, per-matrix and per-adapter schemes (Chen et al., 2026; Huang and Balestriero, 2024) adjust the learning rate above the rank-one level, while methods that operate at the rank-one level intervene through gating (Ding et al., 2023) or singular-triplet pruning (Zhang et al., 2023) rather than learning-rate scheduling. No ex-isting method assigns a distinct, online adaptive learning rate to each rank-one component within a LoRA adapter. We propose an adaptive anisotropic learning-rate model for LoRA fine-tuning, with a prin-cipled instantiation, Anisotropic Learning-Rate LoRA (AnLR-LoRA). AnLR-LoRA assigns per-rank-one multipliers that redistribute a fixed global LR across the r rank-one components of each adapter, driven online by two training-time sig-nals: velocity , the rate of change of each rank-one contribution to the adapter update, which cap-tures function-space activity; and Adam SNR , the signal-to-noise ratio of each component’s param-eters, which captures parameter-space confidence. The two signals are fused log-additively and mean-normalized per module, then applied as a post-step scaling of the AdamW update, equivalent to run-ning AdamW with an effective per-component LR (Proposition 2). These signals adaptively encour-age learning on low-velocity rank-one components that follow a reliable update direction. AnLR-LoRA thus promotes effective learning with no architectural changes and negligible computational overhead. Our contributions are summarized as follows: • We identify anisotropic learning rates, with distinct rates per rank-one component, as the natural next granularity in the adaptive-LR lineage and show per-rank-one dynamics are anisotropic within modules, persistent through training and tied to a measurable spectral con-centration of BA below its nominal rank. • We propose an adaptive anisotropic LR model that redistributes a fixed LR budget across rank-one components using training-time sig-nals, and instantiate it as AnLR-LoRA with signals of velocity and Adam SNR ratio. AnLR-LoRA enables low-velocity rank-one components with reliable update directions to actively engage in the training process. • Extensive experiments show that adaptive anisotropic learning rate encourages utiliza-tion of rank budget and improves the adapta-tion of LoRA across various settings. This benefit remains robust under varying learning rate and transfers to LoRA variants. 
+
+2 Related Work 
+
+2.1 Parameter-Efficient Fine-Tuning 
+
+Parameter-efficient fine-tuning (PEFT) reduces fine-tuning cost by training only a small subset of model parameters. Representative approaches include adapter modules inserted between trans-former layers (Houlsby et al., 2019; Chen et al., 2022), prompt and prefix tuning that prepend learn-able tokens to the input or to the attention state (Li and Liang, 2021; Jia et al., 2022), and methods that perform full-parameter training inside a low-rank gradient subspace (Zhao et al., 2024; Chen et al., 2025). PEFT modules can also be composed into expandable mixtures of experts for continual learn-ing (Wang et al., 2025b; Zhao et al., 2026). We focus on low-rank adaptation, the standard PEFT approach for LLMs, reviewing its variants and op-timization choices below. 
+
+2.2 Architectural Variants of LoRA 
+
+LoRA (Hu et al., 2022) introduces a low-rank up-date to a frozen pretrained model, parameterized by two factor matrices initialized so that the up-date is zero at the start of training. DoRA modify this parameterization by separating magnitude and direction (Liu et al., 2024b). Initialization-based variants place the factors on informative starting di-rections, from the principal or minor singular com-ponents (Meng et al., 2024; Wang et al., 2025a) to the first-step gradient (Wang et al., 2024; Zhang et al., 2025b; Si et al., 2025). Some methods adjust the effective rank during training, such as SoRA (Ding et al., 2023) with learnable gates, AdaLoRA (Zhang et al., 2023) with singular-triplet pruning, and DyLoRA (Valipour et al., 2023) with sub-rank sampling. Low-rank structure is similarly exploited in continual learning, where rank-one components serve as incremental experts (Lu et al., 2026) and rank minimization acts as an implicit regularizer against forgetting (Lu et al., 2024). Across these designs, all retain LoRA’s single global learning rate, applied uniformly across all parameters. 20 5000 10000 15000 
+
+> step
+> 0.5 1.0 1.5 2.0 2.5
+> velocity / module mean
+> v_proj @ Layer 20
+> rank 0 rank 1 rank 2 rank 3 rank 4 rank 5 rank 6 rank 7
+
+(a) Visualization of per-rank-one velocity across training steps. 0 2500 5000 7500 10000 12500 15000 
+
+> training step
+> 0.04 0.06 0.08 0.10 0.12 0.14 0.16
+> mean magnitude per rank
+> Top velocity quartile Upper-middle quartile Lower-middle quartile Bottom velocity quartile
+
+(b) Rank-one velocity vs magnitude ac-cumulated over training. 1 2 3 4 5 6 7 8
+
+> singular index
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> cumulative energy
+> Top velocity quartile Upper-middle quartile Lower-middle quartile Bottom velocity quartile uniform (max capacity)
+
+(c) Module velocity vs singular spec-trum concentration at convergence. 
+
+Figure 2: Per-rank-one anisotropy in LoRA training on math reasoning. (a) The within-module velocity ordering is established early and persists in training. (b) High-velocity components accumulate larger contribution magnitude throughout training. (c) Lower mean per-rank-one velocity is associated with more concentrated singular spectra of 
+
+BA at convergence, under-utilizing the available rank budget. 
+
+2.3 Optimization and Hyperparameter Choices for LoRA 
+
+A parallel line studies how LoRA is trained rather than parameterized. The learning rate is the load-bearing hyperparameter across LoRA variants once well-tuned (Lee et al., 2026). Hayou et al. (2024) observe that the two factor matrices play asymmet-ric roles during fine-tuning and assign each its own learning rate. Chen et al. (2026) characterize how the global rate should scale with adapter rank, and rsLoRA (Kalajdzievski, 2023) introduces a rank-stabilized output scaling. Other methods modify the optimizer update itself: LoRA-Pro (Wang et al., 2025c), AltLoRA (Yu et al., 2025) and RefLoRA (Zhang et al., 2025a) adjust the per-step gradient or factorization to better approximate a full fine-tuning step. These works operate at module or ma-trix granularity and none assigns a separate learn-ing rate per rank component or derives one from training-time signals. LoRA+ (Hayou et al., 2024) is closest to ours in showing that per-component learning rates outperform the single-LR convention, but its two matrix-level learning rates are fixed at training start. As we show in Sec. 3, rank-one components within a matrix remain heterogeneous throughout training, so per-matrix allocation dis-cards information preserved by per-rank learning rates. We derive these rates from two training-time signals: the rate of change of each rank’s contribu-tion and the consistency of its Adam gradient. 
+
+3 Analysis of Rank-One Training Dynamics in LoRA 
+
+This analysis provides the empirical basis for the intervention proposed in Sec. 4. We establish three observations from a LoRA fine-tuning run of LLaMA2-7B on MetaMathQA. The analysis covers 224 LoRA modules in total. We refer to the Frobenius-norm rate of change of each rank-one contribution B:,k Ak, : as its per-rank-one velocity ,defined formally in Sec. 4.3. We further define its 
+
+per-rank-one magnitude as the cumulative Frobe-nius norm of B:,k Ak, : at each training step. These measures allow us to characterize how adaptation is distributed across rank-one components, both dynamically during optimization and cumulatively over training. 
+
+3.1 Per-Rank-One Velocity is Anisotropic within Each Module 
+
+Within a single LoRA adapter, the r rank-one com-ponents do not update at the same rate. Fig. 1 shows the normalized update velocity of individual rank-one components in LoRA modules, with the dashed line indicating the module-wise mean. The update activity is clearly uneven. Some ranks move much faster than the module average, whereas oth-ers remain substantially slower. Across 224 LoRA modules in our analysis, the median max/min veloc-ity ratio is 2×, the 90th percentile reaches 4×, and the most imbalanced 1% exceed 8×. This hetero-geneity appears across different projection layers, suggesting that LoRA rank-one components are not optimized uniformly under a shared learning rate. This anisotropy is within-module : every rank inside a LoRA adapter shares the same global learning rate by construction, so the imbalance cannot be addressed by conventional uniform learning-rate scheduling. A more direct mechanism is therefore to redistribute the learning rate among the r rank-one components within each module, rather than increasing the overall learning rate. 33.2 The Anisotropy is Established Early and Persists 
+
+The velocity heterogeneity is not a transient effect. Within each module, the rank-one components that are the most and the least active early in training re-main so through to convergence. Fig. 2a shows per-rank-one velocity trajectories in a LoRA module, with each rank colored by its index. The ordering is established early in training, within approximately the first 1k steps and preserved thereafter. The persistent velocity ordering translates directly to a contribution-magnitude ordering. Fig. 2b shows the mean contribution magnitude of the top-velocity quartile pulls ahead in early training and the gap persists throughout the training process. Under uniform LR there is no mechanism to redistribute capacity, so the imbalance compounds. The order-ing is not predictable from A(0) , B (0) alone , but is stabilized within the early training stage. The right per-rank-one allocation should therefore be discovered during training and applied throughout, not preset analytically. 
+
+3.3 Low-Velocity Modules Under-Utilize their Nominal Rank Budget 
+
+The within-module magnitude imbalance has a fur-ther consequence: modules whose rank-one com-ponents evolve most slowly under uniform LR end up with the most concentrated singular spectra in the learned composite update BA , packing their squared-Frobenius energy into only a few singular directions and leaving the rest of the nominal rank budget effectively unused. As shown in Fig. 2c, low-velocity modules exhibit a much sharper cu-mulative energy curve than high-velocity modules, indicating that their learned update is dominated by a small number of directions. In other words, despite having the same nominal rank budget, slow-moving modules exploit only a fraction of the avail-able capacity under uniform learning rate. The concentration is induced by the optimiza-tion process rather than being an inherent property of the downstream update. Full fine-tuning pro-vides a reference for what an update at this rank can look like. In a full fine-tuning experiment on Commonsense170K with LLaMA2-7B, the best rank-32 approximation to the full fine-tuning up-date has an effective rank of 27.2 out of 32, whereas LoRA at the same rank learns an update with an effective rank of only 12.7. Concentration under uniform LR thus leaves rank capacity under-used and limits how much of the update energy a LoRA adapter can capture, as discussed in Appendix D.1. The spectral concentration is the handle our inter-vention pulls on: by redistributing learning rate toward slower rank-one components, AnLR-LoRA aims to encourage broader use of the available rank capacity. We verify in Sec. 5 whether this translates into downstream task gains. 
+
+4 Methodology 
+
+Sec. 3 shows that LoRA rank-one components ex-hibit anisotropic training dynamics within each module, and that this anisotropy emerges early and persists throughout fine-tuning. We now formal-ize a learning-rate scheme that responds to this anisotropy. The proposed adaptive anisotropic LR model attaches a per-rank-one multiplier s(t) 
+
+> k
+
+to the global learning rate within each adapter, redistribut-ing the module-level LR across the r rank-one com-ponents. AnLR-LoRA instantiates this model by computing s(t) 
+
+> k
+
+online from the velocity and Adam SNR signals available during Adam optimization. 
+
+4.1 The Uniform-LR Convention 
+
+Standard LoRA fine-tuning trains θ = {A, B } for each adapter under AdamW with a single global learning rate schedule ηt and decoupled weight-decay coefficient λ. At step t, AdamW maintains exponential moving averages of the gradient and its element-wise square, 
+
+m(t) = β1m(t−1) + (1 − β1)g(t),v(t) = β2v(t−1) + (1 − β2)g(t) ⊙ g(t),
+
+with bias-corrected estimates ˆm(t) = m(t)/(1 −βt
+
+> 1
+
+)
+
+and ˆv(t) = v(t)/(1 − βt
+
+> 2
+
+). The AdamW update direction is 
+
+u(t) = ˆm(t)
+
+√ˆv(t) + ε + λ θ (t), (1) the sum of a preconditioned momentum term and a decoupled weight-decay offset. The parameter update is 
+
+θ(t+1) = θ(t) − ηt u(t). (2) In this formulation, the per-parameter effective learning rate is ηt,θ i = ηt for every parameter 
+
+θi in every rank-one component of every adapter, because the only place ηt enters is as the outer scalar multiplying u(t). We call this the uniform-LR 
+
+4convention . It assumes both uniform granularity ,where all r rank-one components of an adapter share a single LR, and uniform schedule shape ,where the same global LR schedule ηt is applied to every parameter. 
+
+4.2 Adaptive Anisotropic Learning-rate 
+
+The analysis in Sec. 3 motivates two changes to the uniform-LR convention: adaptivity and granular-ity. Adaptivity means that the learning rate should depend on the training-time state, rather than be-ing fixed by a global schedule alone. This follows the broader principle of preconditioned optimiza-tion (Kingma and Ba, 2014; Duchi et al., 2011; You et al., 2017, 2019), but has not been explored at the level of individual LoRA rank-one compo-nents. Granularity refers to the unit of learning-rate control, which should match the structure of the LoRA update. Since the LoRA update decom-poses into ∆W = BA = Prk=1 B:,k Ak, :, the rank-one component is the finest structured unit of the LoRA parameterization and is where the empirical anisotropy emerges. Per-parameter (Kingma and Ba, 2014; Huang and Balestriero, 2024) and per-matrix (Hayou et al., 2024) granularities leave it unaddressed. We attach a positive, time-varying multiplier s(t)
+
+> k
+
+to each rank-one component θk = ( Ak, :, B :,k ). Let 
+
+u(t) 
+
+> k
+
+denote the restriction of the AdamW direction in Eq. 1 to the parameters of component k. The adaptive-LR model uses a per-component effective learning rate ηt,k = s(t) 
+
+> k
+
+ηt with the update 
+
+θ(t+1)  
+
+> k
+
+= θ(t) 
+
+> k
+
+− s(t) 
+
+> k
+
+ηt u(t) 
+
+> k
+
+, k = 1 , . . . , r, (3) which multiplies ηt by s(t) 
+
+> k
+
+in Eq. 2 and leaves AdamW’s state unchanged. Guided by these ob-servations, we impose two requirements on the multipliers. First, because the anisotropy is within-module, the multipliers should redistribute the module-level learning rate rather than change its average scale. We therefore enforce Ek
+
+s(t)
+
+> k
+
+ = 1 
+
+within each module. Second, because the rank ordering emerges during training, the multipliers should be computed online from training-time state, 
+
+s(t) 
+
+> k
+
+= ϕ(S(t) 
+
+> k
+
+), without introducing extra train-able parameters or additional forward/backward passes. Vanilla LoRA is recovered as the spe-cial case s(t) 
+
+> k
+
+= 1 , while coarser schemes such as LoRA+ can be viewed as fixed, matrix-level al-ternatives. AnLR-LoRA instantiates this model by specifying the state S(t) 
+
+> k
+
+and the mapping function 
+
+ϕ in the following section. 
+
+4.3 AnLR-LoRA: Instantiating the Model with Two Training-Time Signals 
+
+AnLR-LoRA instantiates the adaptive anisotropic LR model by defining the state S(t) 
+
+> k
+
+with two com-plementary training-time signals and specifying the mapping ϕ as a log-additive and mean-normalized function. 
+
+What information should the multiplier use? 
+
+To decide whether to boost or dampen rank-one component k, s(t) 
+
+> k
+
+should capture two aspects of its training dynamics: how actively the compo-nent is currently changing, and whether its change direction is reliable. These two aspects are comple-mentary. A slow-moving component may follow a consistent but under-exploited direction, in which case increasing its LR is beneficial. Alternatively, it may receive noisy gradients with no stable di-rection, in which case boosting it too much would amplify noise. We therefore use velocity to mea-sure component activity and Adam SNR to measure update reliability. 
+
+Velocity: function-space activity. The k-th rank-one component contributes the rank-one matrix 
+
+B:,k Ak, : to the LoRA update. We define its velocity 
+
+as the Frobenius norm of the instantaneous change in this contribution, 
+
+νk = ddt 
+
+ B:,k Ak, :
+
+
+
+> F
+
+, (4) approximated from the current LoRA gradients 
+
+∇AL, ∇B L via the product rule: 
+
+ν(t) 
+
+> k
+
+= (∇B L)(t):,k A(t) 
+
+> k, :
+
++ B(t):,k (∇AL)(t)  
+
+> k, :F
+
+.
+
+(5) To reduce step-level noise, we maintain an EMA-smoothed velocity ¯ν(t) 
+
+> k
+
+= ρ¯ν(t−1)  
+
+> k
+
++ (1 − ρ)ν(t) 
+
+> k
+
+.Velocity is defined on the output of the rank-one component rather than on its parameters, so it cap-tures the multiplicative coupling between Ak, : and 
+
+B:,k , which is not reflected by per-parameter statis-tics alone. It is computable from quantities the op-timizer step already produces, without additional forward/backward passes. 
+
+Adam SNR: parameter-space confidence. Let 
+
+ˆm and ˆv denote Adam’s bias-corrected first and second moment estimates. For each parameter, the 5element-wise SNR is defined as snr( θi) = | ˆmi|√ˆvi+ε ,where ε is a small constant for numerical stability. For rank component k, we aggregate the SNR val-ues over the corresponding row of A and column of B and obtain 
+
+snr k =
+
+ | ˆmAk, : |
+
+pˆvAk, : + ε
+
+> 22
+
++ | ˆmB:,k |
+
+pˆvB:,k + ε
+
+> 22
+
+
+
+> 1/2
+
+.
+
+(6) High snr k indicates that the gradient direction has been consistent across recent batches, iden-tifying a stable update direction, while low snr k
+
+indicates noisy and less reliable updates. The SNR can be obtained directly from AdamW’s optimizer state and AnLR-LoRA merely promotes this quan-tity from an implicit step modulator to an explicit per-component meta-signal. 
+
+Log-additive fusion. The two signals are com-bined multiplicatively in the multiplier space. Ve-locity suppresses the multiplier for fast-moving components, while SNR increases it for compo-nents with reliable update directions. This suggests an additive formulation in log space. After per-module mean-normalization on ¯νk and snr k, we obtain ˜νk and fsnr k, and the AnLR-LoRA multi-plier is defined as 
+
+log s(t) 
+
+> k
+
+= α log 1˜ν(t)
+
+> k
+
++ β log fsnr (t) 
+
+> k
+
+. (7) The velocity term boosts slow-moving compo-nents and dampens fast-moving ones, while the SNR term favors components with more reliable update directions. For numerical stability, we clamp the log-multiplier to [− log κ, log κ] with a clamp bound κ > 1. The resulting multipliers are then normalized within each module to sat-isfy Ek[ηt · sk] = ηt. In practice, we activate anisotropic scheduling after a short warmup period, during which all multipliers are set to s(t) 
+
+> k
+
+= 1 .This avoids using unstable early-step velocity and SNR estimates before the optimizer statistics be-come reliable. Thus, AnLR-LoRA redistributes the learning rate across rank components rather than amplifying the overall learning rate. 
+
+4.4 Application of Per-Rank-One LR via Post-Step Delta Scaling 
+
+We apply the effective per-component learning rate 
+
+s(t) 
+
+> k
+
+ηt through post-step delta scaling. At each step, we first perform a standard AdamW update 
+
+ˆθ(t+1)  
+
+> k
+
+= θ(t) 
+
+> k
+
+− ηtu(t) 
+
+> k
+
+. (8) We then rescale the resulting per-component pa-rameter delta: 
+
+θ(t+1)  
+
+> k
+
+= θ(t) 
+
+> k
+
++s(t)
+
+> k
+
+ ˆθ(t+1)  
+
+> k
+
+−θ(t)
+
+> k
+
+ = θ(t) 
+
+> k
+
+−s(t) 
+
+> k
+
+ηtu(t) 
+
+> k
+
+.
+
+(9) This update directly realizes the adaptive-LR model in Eq. 3. For fixed AdamW direction u(t) 
+
+> k
+
+, it is equivalent to using the effective per-component learning rate s(t) 
+
+> k
+
+ηt.We use post-step scaling for two reasons. First, 
+
+s(t) 
+
+> k
+
+is computed from signals of the current opti-mizer step and cannot be preset in advance. Second, scaling the parameter delta avoids the cancellation that would occur if the gradient were scaled be-fore AdamW normalization. The implementation is lightweight. It requires one parameter snapshot and one element-wise rescaling per step, while leav-ing AdamW’s first- and second-moment states un-changed. 
+
+5 Experiments 
+
+We evaluate AnLR-LoRA across commonsense reasoning, math reasoning, code generation, di-alogue and visual instruction tuning, spanning 
+
+18 datasets across four backbones, including LLaMA2-7B (Touvron et al., 2023), LLaMA3-8B (Grattafiori et al., 2024), Qwen2.5-7B (Qwen et al., 2025) and LLaVA-1.5-7B (Liu et al., 2024a). We compare AnLR-LoRA against LoRA (Hu et al., 2022) as well as the optimization-related variants rsLoRA (Kalajdzievski, 2023) and LoRA+ (Hayou et al., 2024). All experiments run on NVIDIA H100 and H200 GPUs. Full implementation de-tails are in Appendix B.2. 
+
+5.1 Main Results Commonsense Reasoning. We finetune three language backbones on Commonsense170K (Hu et al., 2023) and evaluate on eight tasks: BoolQ (Clark et al., 2019), PIQA (Bisk et al., 2020), SIQA (Sap et al., 2019), HellaSwag (Zellers et al., 2019), WinoGrande (Sakaguchi et al., 2021), ARC-e, ARC-c (Clark et al., 2018) and OBQA (Mihaylov et al., 2018). As shown in Tab. 1, AnLR-LoRA achieves the best average accuracy on all three backbones, outperforming standard LoRA by up to 4.3% under the same parameter and learning-rate budget. It also consistently surpasses the optimization-related baselines rsLoRA and LoRA+ across models of different families and sizes, sug-gesting that the improvement comes from redis-6Model Method #Params (%) BoolQ PIQA SIQA HellaSwag WinoGrande ARC-e ARC-c OBQA Avg. 
+
+LLaMA2-7B LoRA 0.83 72.2 84.6 77.4 90.1 82.6 81.2 67.4 64.8 77.5 rsLoRA 0.83 71.1 81.6 78.8 87.7 81.6 82.6 67.2 81.4 79.0 LoRA+ 0.83 70.7 81.8 78.8 89.5 82.1 83.8 68.6 79.8 79.4 AnLR-LoRA 0.83 72.5 84.1 78.9 91.4 82.8 85.0 71.3 82.4 81.0 
+
+LLaMA3-8B LoRA 0.70 70.8 85.2 79.9 91.7 84.3 84.2 71.2 79.0 80.8 rsLoRA 0.70 72.0 85.8 79.7 92.8 83.7 85.9 73.7 81.2 81.9 LoRA+ 0.70 73.8 88.5 80.0 95.1 86.8 89.9 78.6 85.6 84.8 AnLR-LoRA 0.70 75.2 88.2 80.5 95.3 87.2 89.9 79.6 85.0 85.1 
+
+Qwen2.5-7B LoRA 0.71 64.3 89.8 80.5 93.7 84.5 95.0 86.7 91.4 85.7 rsLoRA 0.71 73.8 88.4 79.3 93.8 83.2 93.1 84.1 89.4 85.6 LoRA+ 0.71 66.2 88.7 79.4 95.0 85.2 94.4 86.4 90.2 85.7 AnLR-LoRA 0.71 74.3 88.7 80.6 95.3 86.9 95.1 87.5 90.8 87.4 
+
+Table 1: Commonsense reasoning accuracy (%) with LLaMA2-7B, LLaMA3-8B and Qwen2.5-7B. 2500 5000 7500 10000 12500 15000 17500 
+
+> training step
+> 01234567
+> rank index q_proj @ Layer 0
+> 1.0
+> 0.5
+> 0.0 0.5 1.0
+> log  sk
+
+(a) Per-rank-one LR multiplier log sk
+
+over training. 1 2 3 4 5 6 7 8
+
+> singular index
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> cumulative energy
+> q_proj @ Layer 0
+> LoRA AnLR-LoRA uniform (max capacity)
+
+(b) Singular spectrum concentration of the update BA at convergence. 1 2 3 4 5 6 7 8    
+
+> singular index
+> 10
+> 5
+> 0510
+> spectral energy shift (%)
+> -11.0 -3.1 +0.3 +4.2 +3.8 +2.7 +1.5 +1.5
+> q_proj @ Layer 0
+
+(c) Per-index spectral energy shift from LoRA to AnLR-LoRA. 
+
+Figure 3: Effect of AnLR-LoRA’s anisotropic learning rate. 
+
+Method MT-Bench GSM8K HumanEval 
+
+LoRA 6.11 59.59 24.39 LoRA+ 5.98 60.27 24.39 AnLR-LoRA 6.36 61.87 28.05 
+
+Table 2: Evaluation results for dialogue, math and cod-ing with LLaMA2-7B. 
+
+tributing a fixed learning-rate budget across rank-one components rather than tuning a single global learning rate. 
+
+Natural Language Generation. We further fine-tune LLaMA2-7B on the 100K subset of Wiz-ardLM (Xu et al., 2024), MetaMathQA (Yu et al., 2024) and Code-Feedback (Zheng et al., 2024), and evaluate AnLR-LoRA on dialogue with MT-Bench (Zheng et al., 2023), math reasoning with GSM8K (Cobbe et al., 2021) and code genera-tion with HumanEval (Chen et al., 2021), respec-tively. As shown in Tab. 2, AnLR-LoRA improves over both LoRA and LoRA+ on all three tasks, with the largest gain on HumanEval ( +3 .66% over LoRA). The gains suggest that adaptive anisotropic learning-rate also benefits open-ended generation. 5000 10000 15000 
+
+> step
+> 0.6 0.8 1.0 1.2 1.4
+> velocity / module mean
+> q_proj @ Layer 0
+> rank 0 rank 1 rank 2 rank 3 rank 4 rank 5 rank 6 rank 7
+
+Figure 4: Visualization of per-rank-one velocity of AnLR-LoRA. 
+
+Visual Instruction Tuning. We extend AnLR-LoRA to the multimodal setting by finetun-ing LLaVA-1.5-7B on the instruction tuning dataset (Liu et al., 2024a) and evaluating on seven vision-language benchmarks. As shown in Tab. 3, AnLR-LoRA achieves the best average score, matching or surpassing LoRA on most benchmarks and obtaining the largest gain on VizWiz ( +3 .07% 
+
+over LoRA). The improvement remains consistent at a much larger rank ( r = 128 ) and in the multi-modal setting, showing that adaptive LR remains effective beyond standard language tasks. 7Method #Params (%) VQA v2 GQA VizWiz SQA VQA T POPE MMBench Avg.                                     
+
+> FT †100 78.50 61.90 50.00 66.80 58.20 85.90 64.30 66.50 LoRA 4.61 79.02 63.34 47.81 69.06 57.56 86.09 74.96 68.26 LoRA+ 4.61 78.59 62.86 47.18 66.39 56.56 86.88 73.36 67.40 AnLR-LoRA 4.61 79.02 63.07 50.88 69.11 58.21 86.89 74.43 68.80
+
+Table 3: Results on visual instruction tuning with LLaVA-1.5-7B. FT results cited from Liu et al. (2024b). 5e-5 1e-4 2e-4 3e-4 4e-4 5e-4 
+
+> learning rate
+> 55 60 65 70 75 80 85
+> Avg. Accuracy (%)
+> LoRA AnLR-LoRA
+
+Figure 5: Average commonsense reasoning accuracy on LLaMA2-7B across varying LR. AnLR-LoRA exceeds LoRA at every LR, with the gap widening as LR moves away from the optimal range. 
+
+5.2 Ablation Studies and Analyses AnLR-LoRA encourages broader use of rank budget. We analyze how AnLR-LoRA changes the training dynamics of LoRA fine-tuning. Fig. 3a shows that AnLR-LoRA produces per-rank-one multipliers that vary across training steps, rather than assigning a fixed importance ordering. A rank-one component can be boosted or dampened at dif-ferent stages of training, indicating that the method adapts to the current optimization state instead of imposing a static rank prior. This dynamic redistri-bution encourages different rank-one components to participate throughout training, rather than al-lowing a small subset of rank-one components to consistently dominate the update (Fig. 4). This anisotropic LR schedule also changes the structure of the learned update. Compared to LoRA, which concentrates update energy in the leading singular directions, AnLR-LoRA produces a flatter cumulative energy curve (Fig. 3b) and re-distributes spectral energy toward lower singular di-rections (Fig. 3c). This indicates that AnLR-LoRA reduces spectral concentration in the learned up-date and encourages broader use of the available rank capacity. 
+
+Analysis on varying LR. Fig. 5 examines whether the gains of AnLR-LoRA can be explained by sim-ply tuning the global learning rate. We compare LoRA and AnLR-LoRA on LLaMA2-7B across a wide range of learning rates. LoRA is highly sen-sitive to the choice of LR and its average accuracy varies by 16.5 points and peaks at 77.6. Increasing or decreasing the global learning rate can improve some tasks but degrade others, and performance de-teriorates when the learning rate moves away from a narrow favorable range (Tab. 10). This indicates that simply changing the overall learning rate is not sufficient to resolve the uneven rank-one learning dynamics observed in Sec. 3. AnLR-LoRA consistently outperforms LoRA across varying learning rates. The gain over LoRA widens as the learning rate moves away from the optimal range, which shows AnLR-LoRA degrades much more gracefully under poorly tuned LR. The robustness across LR settings highlights the advan-tage of adaptive anisotropic LR as it provides a finer-grained optimization mechanism with gains that no single global LR can achieve. 
+
+Method GSM8K HumanEval 
+
+PiSSA 58.98 24.39 AnLR-PiSSA 59.36 25.00 
+
+MiLoRA 60.12 25.61 AnLR-MiLoRA 61.41 26.22 
+
+LoRA-Dash 60.73 27.44 AnLR-LoRA-Dash 61.11 28.05 
+
+Table 4: Results of applying anisotropic learning rate to LoRA variants. 
+
+LR scaling GSM8K HumanEval 
+
+None (uniform) 59.59 24.39 Velocity-only 61.18 26.22 SNR-only 60.12 25.00 Velocity + SNR (ours) 61.87 28.05 
+
+Table 5: Ablation of AnLR-LoRA’s per-rank-one scal-ing signal. 
+
+Application to other LoRA variants. We extend our evaluation of anisotropic LR to other LoRA variants in Tab. 4. We apply the same schedule to PiSSA (Meng et al., 2024), MiLoRA (Wang et al., 82025a) and LoRA-Dash (Si et al., 2025), covering variants that modify LoRA initialization or update behavior. Anisotropic LR consistently improves all three methods on math reasoning and code genera-tion tasks, suggesting that our approach is largely orthogonal to existing LoRA-based methods and can provide complementary gains. 
+
+Ablation on training-time state signals. Tab. 5 ablates the signals used for adaptive LR scaling. Velocity-only scaling consistently improves over the uniform baseline, confirming that rank-one up-date activity is informative for learning-rate re-distribution. SNR scaling allocates more learn-ing rate to components with reliable update di-rections. Combining the two yields the best re-sults on both GSM8K and HumanEval, suggest-ing that the two signals offer complementary guid-ance. Appendix D.2 further verifies this mecha-nism, showing that the velocity term reduces the within-module velocity imbalance and the SNR term prevents components with noisy update direc-tions from being over-amplified. The full AnLR-LoRA schedule therefore benefits from combin-ing activity-aware redistribution with confidence-aware refinement. 
+
+6 Conclusion 
+
+This paper revisits the uniform-LR convention in LoRA fine-tuning and shows that it overlooks sub-stantial heterogeneity in per-rank-one training dy-namics within a single LoRA adapter. We propose an adaptive anisotropic LR model that assigns each rank-one component its own LR based on training-time signals, and instantiate it as AnLR-LoRA us-ing function-space velocity and Adam SNR to en-courage learning on low-velocity components with reliable update directions. Experiments across lan-guage and multimodal settings demonstrate that AnLR-LoRA improves LoRA adaptation and en-courages broader use of rank capacity, highlighting anisotropic LR redistribution as a simple and effec-tive optimization dimension. 
+
+Limitations 
+
+AnLR-LoRA is one instantiation within a broader adaptive anisotropic LR framework, leaving alter-native signal choices, fusion strategies and more sophisticated uncertainty measures for update di-rection as directions for future work. Our rank-utilization analysis verifies that the full fine-tuning update spreads its energy across the rank budget, and characterizing how broadly this holds across tasks would further delineate when anisotropic LR is most beneficial. The extension to broader scenar-ios, such as multilingual, long-context and larger-scale training, also remains to be explored. 
+
+Acknowledgements 
+
+This work was partially supported by the ARC DECRA Fellowship (DE230101591) and the ARC Discovery Project Grant (DP260103379) awarded to D. Gong, as well as PhD scholarship support from UNSW and CSIRO Data61. 
+
+References         
+
+> Yonatan Bisk, Rowan Zellers, Jianfeng Gao, Yejin Choi, and 1 others. 2020. Piqa: Reasoning about physical commonsense in natural language. In Proceedings of the AAAI conference on artificial intelligence , vol-ume 34, pages 7432–7439. Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Pondé de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, Alex Ray, Raul Puri, Gretchen Krueger, Michael Petrov, Heidy Khlaaf, Girish Sastry, Pamela Mishkin, Brooke Chan, Scott Gray, and 39 others. 2021. Evaluating large language models trained on code. CoRR , abs/2107.03374. Nan Chen, Soledad Villar, and Soufiane Hayou. 2026. Learning rate scaling across lora ranks and transfer to full finetuning. arXiv preprint arXiv:2602.06204 .Shoufa Chen, Chongjian Ge, Zhan Tong, Jiangliu Wang, Yibing Song, Jue Wang, and Ping Luo. 2022. Adapt-former: Adapting vision transformers for scalable visual recognition. Advances in Neural Information Processing Systems , 35:16664–16678. Xi Chen, Kaituo Feng, Changsheng Li, Xunhao Lai, Xi-angyu Yue, Ye Yuan, and Guoren Wang. 2025. Fira: Can we achieve full-rank training of llms under low-rank constraint? In Advances in Neural Information Processing Systems 38: Annual Conference on Neu-ral Information Processing Systems 2025, NeurIPS 2025, San Diego, CA, USA, December 2-7, 2025 / Mexico City, Mexico, November 30 - December 5, 2025 .Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and Kristina Toutanova. 2019. Boolq: Exploring the surprising difficulty of natural yes/no questions. arXiv preprint arXiv:1905.10044 .Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. 2018. Think you have solved question an-swering? try arc, the ai2 reasoning challenge. arXiv preprint arXiv:1803.05457 .
+
+9Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. 2021. Training verifiers to solve math word prob-lems. CoRR , abs/2110.14168. Ning Ding, Xingtai Lv, Qiaosen Wang, Yulin Chen, Bowen Zhou, Zhiyuan Liu, and Maosong Sun. 2023. Sparse low-rank adaptation of pre-trained language models. In Proceedings of the 2023 Conference on Empirical Methods in Natural Language Process-ing, EMNLP 2023, Singapore, December 6-10, 2023 ,pages 4133–4145. Association for Computational Linguistics. John Duchi, Elad Hazan, and Yoram Singer. 2011. Adaptive subgradient methods for online learning and stochastic optimization. Journal of machine learning research , 12(7). Yash Goyal, Tejas Khot, Douglas Summers-Stay, Dhruv Batra, and Devi Parikh. 2017. Making the v in vqa matter: Elevating the role of image under-standing in visual question answering. Preprint ,arXiv:1612.00837. Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schel-ten, Alex Vaughan, Amy Yang, Angela Fan, Anirudh Goyal, Anthony Hartshorn, Aobo Yang, Archi Mi-tra, Archie Sravankumar, Artem Korenev, Arthur Hinsvark, and 542 others. 2024. The llama 3 herd of models. Preprint , arXiv:2407.21783. Danna Gurari, Qing Li, Abigale J. Stangl, Anhong Guo, Chi Lin, Kristen Grauman, Jiebo Luo, and Jeffrey P. Bigham. 2018. Vizwiz grand challenge: Answer-ing visual questions from blind people. Preprint ,arXiv:1802.08218. Soufiane Hayou, Nikhil Ghosh, and Bin Yu. 2024. Lora+: Efficient low rank adaptation of large models. In Forty-first International Conference on Machine Learning, ICML 2024, Vienna, Austria, July 21-27, 2024 . OpenReview.net. Neil Houlsby, Andrei Giurgiu, Stanislaw Jastrzebski, Bruna Morrone, Quentin De Laroussilhe, Andrea Gesmundo, Mona Attariyan, and Sylvain Gelly. 2019. Parameter-efficient transfer learning for nlp. In In-ternational conference on machine learning , pages 2790–2799. PMLR. Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen. 2022. Lora: Low-rank adaptation of large language models. In International Conference on Learning Representations .Zhiqiang Hu, Lei Wang, Yihuai Lan, Wanyu Xu, Ee-Peng Lim, Lidong Bing, Xing Xu, Soujanya Poria, and Roy Lee. 2023. Llm-adapters: An adapter family for parameter-efficient fine-tuning of large language models. In Proceedings of the 2023 conference on empirical methods in natural language processing ,pages 5254–5276. Hai Huang and Randall Balestriero. 2024. Allora: Adap-tive learning rate mitigates lora fatal flaws. arXiv preprint arXiv:2410.09692 .Drew A. Hudson and Christopher D. Manning. 2019. Gqa: A new dataset for real-world visual reason-ing and compositional question answering. Preprint ,arXiv:1902.09506. Menglin Jia, Luming Tang, Bor-Chun Chen, Claire Cardie, Serge Belongie, Bharath Hariharan, and Ser-Nam Lim. 2022. Visual prompt tuning. In Euro-pean conference on computer vision , pages 709–727. Springer. Damjan Kalajdzievski. 2023. A rank stabilization scal-ing factor for fine-tuning with lora. arXiv preprint arXiv:2312.03732 .Diederik P Kingma and Jimmy Ba. 2014. Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980 .Yu-Ang Lee, Ching-Yun Ko, Pin-Yu Chen, and Mi-Yen Yeh. 2026. Learning rate matters: Vanilla lora may suffice for llm fine-tuning. arXiv preprint arXiv:2602.04998 .Xiang Lisa Li and Percy Liang. 2021. Prefix-tuning: Optimizing continuous prompts for generation. arXiv preprint arXiv:2101.00190 .Yifan Li, Yifan Du, Kun Zhou, Jinpeng Wang, Xin Zhao, and Ji-Rong Wen. 2023. Evaluating object hallucination in large vision-language models. In The 2023 Conference on Empirical Methods in Natural Language Processing .Haotian Liu, Chunyuan Li, Yuheng Li, and Yong Jae Lee. 2024a. Improved baselines with visual instruc-tion tuning. Preprint , arXiv:2310.03744. Shih-Yang Liu, Chien-Yi Wang, Hongxu Yin, Pavlo Molchanov, Yu-Chiang Frank Wang, Kwang-Ting Cheng, and Min-Hung Chen. 2024b. Dora: Weight-decomposed low-rank adaptation. In Forty-first In-ternational Conference on Machine Learning .Yuan Liu, Haodong Duan, Yuanhan Zhang, Bo Li, Songyang Zhang, Wangbo Zhao, Yike Yuan, Jiaqi Wang, Conghui He, Ziwei Liu, and 1 others. 2024c. Mmbench: Is your multi-modal model an all-around player? In European conference on computer vision ,pages 216–233. Springer. Haodong Lu, Chongyang Zhao, Jason Xue, Lina Yao, Kristen Moore, and Dong Gong. 2024. Take only what you need: Rank minimization as an implicit forgetting regularizer in continual learning. arXiv preprint arXiv:2412.01004 .
+
+10 Haodong Lu, Chongyang Zhao, Jason Xue, Lina Yao, Kristen Moore, and Dong Gong. 2026. Little by little: Continual learning via incremental mixture of rank-1 associative memory experts. In Forty-third International Conference on Machine Learning .Pan Lu, Swaroop Mishra, Tanglin Xia, Liang Qiu, Kai-Wei Chang, Song-Chun Zhu, Oyvind Tafjord, Peter Clark, and Ashwin Kalyan. 2022. Learn to explain: Multimodal reasoning via thought chains for science question answering. Advances in neural information processing systems , 35:2507–2521. Fanxu Meng, Zhaohui Wang, and Muhan Zhang. 2024. Pissa: Principal singular values and singular vectors adaptation of large language models. Advances in Neural Information Processing Systems , 37:121038– 121072. Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal. 2018. Can a suit of armor conduct elec-tricity? a new dataset for open book question answer-ing. arXiv preprint arXiv:1809.02789 .Qwen, :, An Yang, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chengyuan Li, Dayiheng Liu, Fei Huang, Haoran Wei, Huan Lin, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxi Yang, Jingren Zhou, and 25 oth-ers. 2025. Qwen2.5 technical report. Preprint ,arXiv:2412.15115. Olivier Roy and Martin Vetterli. 2007. The effective rank: A measure of effective dimensionality. In 2007 15th European signal processing conference , pages 606–610. IEEE. Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavat-ula, and Yejin Choi. 2021. Winogrande: An adver-sarial winograd schema challenge at scale. Commu-nications of the ACM , 64(9):99–106. Maarten Sap, Hannah Rashkin, Derek Chen, Ronan LeBras, and Yejin Choi. 2019. Socialiqa: Com-monsense reasoning about social interactions. arXiv preprint arXiv:1904.09728 .Chongjie Si, Zhiyi Shi, Shifan Zhang, Xiaokang Yang, Hanspeter Pfister, and Wei Shen. 2025. Unleashing the power of task-specific directions in parameter efficient fine-tuning. In The Thirteenth International Conference on Learning Representations, ICLR 2025, Singapore, April 24-28, 2025 . OpenReview.net. Amanpreet Singh, Vivek Natarajan, Meet Shah, Yu Jiang, Xinlei Chen, Dhruv Batra, Devi Parikh, and Marcus Rohrbach. 2019. Towards vqa models that can read. In Proceedings of the IEEE/CVF Con-ference on Computer Vision and Pattern Recognition (CVPR) .Hugo Touvron, Louis Martin, Kevin Stone, Peter Al-bert, Amjad Almahairi, Yasmine Babaei, Nikolay Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti Bhosale, and 1 others. 2023. Llama 2: Open foun-dation and fine-tuned chat models. arXiv preprint arXiv:2307.09288 .Mojtaba Valipour, Mehdi Rezagholizadeh, Ivan Kobyzev, and Ali Ghodsi. 2023. Dylora: Parameter-efficient tuning of pre-trained models using dynamic search-free low-rank adaptation. In Proceedings of the 17th Conference of the European Chapter of the Association for Computational Linguistics, EACL 2023, Dubrovnik, Croatia, May 2-6, 2023 , pages 3266–3279. Association for Computational Linguis-tics. Hanqing Wang, Yixia Li, Shuo Wang, Guanhua Chen, and Yun Chen. 2025a. MiLoRA: Harnessing minor singular components for parameter-efficient LLM finetuning. In Proceedings of the 2025 Conference of the Nations of the Americas Chapter of the Asso-ciation for Computational Linguistics: Human Lan-guage Technologies (Volume 1: Long Papers) , pages 4823–4836, Albuquerque, New Mexico. Association for Computational Linguistics. Huiyi Wang, Haodong Lu, Lina Yao, and Dong Gong. 2025b. Self-expansion of pre-trained models with mixture of adapters for continual learning. In 2025 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , pages 10087–10098. IEEE. Shaowen Wang, Linxi Yu, and Jian Li. 2024. Lora-ga: Low-rank adaptation with gradient approximation. 
+
+Advances in Neural Information Processing Systems ,37:54905–54931. Zhengbo Wang, Jian Liang, Ran He, Zilei Wang, and Tieniu Tan. 2025c. Lora-pro: Are low-rank adapters properly optimized? In The Thirteenth International Conference on Learning Representations, ICLR 2025, Singapore, April 24-28, 2025 . OpenReview.net. Can Xu, Qingfeng Sun, Kai Zheng, Xiubo Geng, Pu Zhao, Jiazhan Feng, Chongyang Tao, Qingwei Lin, and Daxin Jiang. 2024. Wizardlm: Empow-ering large pre-trained language models to follow complex instructions. In The Twelfth International Conference on Learning Representations, ICLR 2024, Vienna, Austria, May 7-11, 2024 . OpenReview.net. Yang You, Igor Gitman, and Boris Ginsburg. 2017. Large batch training of convolutional networks. 
+
+Preprint , arXiv:1708.03888. Yang You, Jing Li, Sashank Reddi, Jonathan Hseu, Sanjiv Kumar, Srinadh Bhojanapalli, Xiaodan Song, James Demmel, Kurt Keutzer, and Cho-Jui Hsieh. 2019. Large batch optimization for deep learn-ing: Training bert in 76 minutes. arXiv preprint arXiv:1904.00962 .Longhui Yu, Weisen Jiang, Han Shi, Jincheng Yu, Zhengying Liu, Yu Zhang, James T. Kwok, Zhenguo Li, Adrian Weller, and Weiyang Liu. 2024. Meta-math: Bootstrap your own mathematical questions for large language models. In The Twelfth Inter-national Conference on Learning Representations, ICLR 2024, Vienna, Austria, May 7-11, 2024 . Open-Review.net. 
+
+11 Xin Yu, Yujia Wang, Jinghui Chen, and Lingzhou Xue. 2025. Altlora: Towards better gradient approxima-tion in low-rank adaptation with alternating projec-tions. In Advances in Neural Information Processing Systems 38: Annual Conference on Neural Informa-tion Processing Systems 2025, NeurIPS 2025, San Diego, CA, USA, December 2-7, 2025 / Mexico City, Mexico, November 30 - December 5, 2025 .Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. 2019. Hellaswag: Can a machine really finish your sentence? arXiv preprint arXiv:1905.07830 .Qingru Zhang, Minshuo Chen, Alexander Bukharin, Pengcheng He, Yu Cheng, Weizhu Chen, and Tuo Zhao. 2023. Adaptive budget allocation for parameter-efficient fine-tuning. In The Eleventh In-ternational Conference on Learning Representations .Yilang Zhang, Bingcong Li, and Georgios B. Giannakis. 2025a. Reflora: Refactored low-rank adaptation for efficient fine-tuning of large models. In Advances in Neural Information Processing Systems 38: An-nual Conference on Neural Information Processing Systems 2025, NeurIPS 2025, San Diego, CA, USA, December 2-7, 2025 / Mexico City, Mexico, Novem-ber 30 - December 5, 2025 .Zicheng Zhang, Haoran Li, Yifeng Zhang, Guoqiang Gong, Jiaxing Wang, Junxing Hu, Pengzhang Liu, and Qixia Jiang. 2025b. The primacy of magnitude in low-rank adaptation. In Advances in Neural In-formation Processing Systems 38: Annual Confer-ence on Neural Information Processing Systems 2025, NeurIPS 2025, San Diego, CA, USA, December 2-7, 2025 / Mexico City, Mexico, November 30 - Decem-ber 5, 2025 .Chongyang Zhao, Mingsong Li, Haodong Lu, and Dong Gong. 2026. On token’s dilemma: Dynamic moe with drift-aware token assignment for continual learn-ing of large vision language models. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , pages 3941–3952. Jiawei Zhao, Zhenyu Zhang, Beidi Chen, Zhangyang Wang, Anima Anandkumar, and Yuandong Tian. 2024. Galore: Memory-efficient llm train-ing by gradient low-rank projection. Preprint ,arXiv:2403.03507. Lianmin Zheng, Wei-Lin Chiang, Ying Sheng, Siyuan Zhuang, Zhanghao Wu, Yonghao Zhuang, Zi Lin, Zhuohan Li, Dacheng Li, Eric P. Xing, Hao Zhang, Joseph E. Gonzalez, and Ion Stoica. 2023. Judg-ing llm-as-a-judge with mt-bench and chatbot arena. 
+
+Preprint , arXiv:2306.05685. Tianyu Zheng, Ge Zhang, Tianhao Shen, Xueling Liu, Bill Yuchen Lin, Jie Fu, Wenhu Chen, and Xiang Yue. 2024. Opencodeinterpreter: Integrating code gener-ation with execution and refinement. In Findings of the Association for Computational Linguistics, ACL 2024, Bangkok, Thailand and virtual meeting, August 11-16, 2024 , volume ACL 2024 of Findings of ACL ,pages 12834–12859. Association for Computational Linguistics. 
+
+12 A More Details about AnLR-LoRA 
+
+A.1 Pre- and Post-Step Scaling under AdamW 
+
+This section states and proves Propositions 1 and 2, which together delimit the design space for per-rank-one effective learning rates under AdamW. Proposition 1 shows that pre-step gradient scaling is ineffective for this purpose. Proposition 2 shows that post-step delta scaling is equivalent to direct outer-rate substitution. 
+
+Setup. AdamW’s update direction restricted to the k-th rank-one component is 
+
+u(t) 
+
+> k
+
+= ˆm(t)
+
+> k
+
+q
+
+ˆv(t) 
+
+> k
+
++ ε
+
++ λθ (t) 
+
+> k
+
+, (10) and the post-step delta-scaled update is 
+
+θ(t+1)  
+
+> k
+
+= θ(t) 
+
+> k
+
++ s(t)
+
+> k
+
+ ˆθ(t+1)  
+
+> k
+
+− θ(t)
+
+> k
+
+, (11) with ˆθ(t+1)  
+
+> k
+
+= θ(t) 
+
+> k
+
+− ηtu(t) 
+
+> k
+
+.
+
+Proposition 1 (Pre-step gradient scaling) . Let 
+
+{θ(t)} be the AdamW trajectory under gradient sequence {g(t)} with learning rate ηt, moment de-cays β1, β 2, decoupled weight decay λ and stability constant ε. Replacing the gradient by c · g(t) at ev-ery step, for any fixed c > 0, produces a trajectory equal to the unscaled one when ε = 0 , and differs by an O(ε) perturbation otherwise. Proof. Consider two AdamW trajectories initial-ized identically at θ(0) , with m(0) = v(0) = 0 and shared (ηt, λ, β 1, β 2, ε ):• Run A driven by {g(t)}t≥1.• Run B driven by {c g (t)}t≥1, fixed c > 0.
+
+Step 1: moment scaling. We show by induction that 
+
+m(t) 
+
+> B
+
+= c m (t) 
+
+> A
+
+, v(t) 
+
+> B
+
+= c2v(t) 
+
+> A
+
+. (12) The base case ( t = 0 ) is trivial. For the inductive step, 
+
+m(t) 
+
+> B
+
+= β1m(t−1)  
+
+> B
+
++ (1 − β1)g(t)
+
+> B
+
+= cβ1m(t−1)  
+
+> A
+
++ (1 − β1)g(t)
+
+= c m (t) 
+
+> A
+
+,
+
+and similarly v(t) 
+
+> B
+
+= c2v(t) 
+
+> A
+
+. Bias correction applies symmetrically, so ˆm(t) 
+
+> B
+
+= c ˆm(t) 
+
+> A
+
+and ˆv(t) 
+
+> B
+
+= c2 ˆv(t) 
+
+> A
+
+.
+
+Step 2: update direction. Let σt := 
+
+q
+
+ˆv(t) 
+
+> A
+
+for brevity. The AdamW direction in Run B is 
+
+u(t) 
+
+> B
+
+= ˆm(t)
+
+> B
+
+q
+
+ˆv(t) 
+
+> B
+
++ ε
+
++ λθ (t)
+
+> B
+
+= c ˆm(t)
+
+> A
+
+c σ t + ε + λθ (t)
+
+> B
+
+= ˆm(t)
+
+> A
+
+σt + ε/c + λθ (t) 
+
+> B
+
+.
+
+Case ε = 0 . The factor c cancels, giving u(t) 
+
+> B
+
+=
+
+u(t) 
+
+> A
+
+whenever θ(t) 
+
+> B
+
+= θ(t) 
+
+> A
+
+. The parameter update preserves the equality, so induction yields θ(t) 
+
+> B
+
+=
+
+θ(t) 
+
+> A
+
+for all t ≥ 0.
+
+Case ε > 0. u(t) 
+
+> B
+
+differs from u(t) 
+
+> A
+
+only by the substitution ε 7 → ε/c :
+
+u(t) 
+
+> B
+
+− u(t) 
+
+> A
+
+= ˆm(t) 
+
+> A
+
+ε (1 − 1/c )(σt + ε/c )( σt + ε) ,
+
+which is O(ε) and negligible whenever σt ≫ ε,the operating regime of AdamW. 
+
+Conclusion. Pre-step gradient scaling by c yields a trajectory equal to the unscaled one up to O(ε).A constant factor sk applied to g(t) 
+
+> k
+
+is therefore can-celled by Adam’s preconditioner. A time-varying 
+
+s(t) 
+
+> k
+
+is not exactly cancelled, but it acts by perturb-ing the moment estimates rather than by rescaling the step, so it does not install a per-component effective learning rate either. 
+
+Proposition 2 (Post-step delta scaling) . Let θ(t+1) 
+
+> k
+
+be defined by Eq. 11, where ˆθ(t+1)  
+
+> k
+
+is one AdamW step on θ(t) 
+
+> k
+
+with learning rate ηt and decoupled weight decay λ. The resulting trajectory {θ(t) 
+
+> k
+
+}
+
+is identical to the trajectory obtained by running AdamW on the same gradient sequence with outer learning rate s(t) 
+
+> k
+
+ηt and unchanged decoupled weight decay λ.Proof. Substituting the AdamW step into Eq. 11: 
+
+θ(t+1)  
+
+> k
+
+= θ(t) 
+
+> k
+
++ s(t)
+
+> k
+
+ ˆθ(t+1)  
+
+> k
+
+− θ(t)
+
+> k
+
+
+
+= θ(t) 
+
+> k
+
++ s(t)
+
+> k
+
+ −ηtu(t)
+
+> k
+
+
+
+= θ(t) 
+
+> k
+
+−  s(t) 
+
+> k
+
+ηt
+
+ u(t) 
+
+> k
+
+.
+
+13 This is the AdamW update with outer learning rate 
+
+ηt replaced by s(t) 
+
+> k
+
+ηt, leaving ˆm(t) 
+
+> k
+
+, ˆv(t) 
+
+> k
+
+and λ un-changed. Expanding via Eq. 10: 
+
+θ(t+1)  
+
+> k
+
+= θ(t) 
+
+> k
+
+−  s(t) 
+
+> k
+
+ηt
+
+ ˆm(t)
+
+> k
+
+q
+
+ˆv(t) 
+
+> k
+
++ ε
+
+−  s(t) 
+
+> k
+
+ηtλ θ(t) 
+
+> k
+
+,
+
+which matches a standard AdamW update with outer rate η′ 
+
+> t
+
+= s(t) 
+
+> k
+
+ηt and shrinkage coefficient η′
+
+> t
+
+λ
+
+on θ(t) 
+
+> k
+
+. The moment recurrences for mk and vk
+
+depend only on the gradient sequence and (β1, β 2),not on the outer rate, so they are unchanged by the substitution. Therefore, post-step delta scaling at every step produces the same trajectory as run-ning AdamW on the same gradient sequence with outer learning rate s(t) 
+
+> k
+
+ηt and unchanged decoupled weight decay λ.
+
+Remarks. Together, the two propositions delimit the admissible implementations of per-rank-one ef-fective learning rates under AdamW: pre-step gra-dient scaling is ineffective for this purpose (Propo-sition 1), while post-step delta scaling and direct per-component outer-rate substitution are equiva-lent (Proposition 2). AnLR-LoRA uses the post-step delta form because it is a drop-in modification of the AdamW step output that requires no change to the optimizer’s internal state or update rule. 
+
+A.2 Training Procedure of AnLR-LoRA 
+
+Alg. 1 summarizes the training procedure of AnLR-LoRA. At each step, we compute per-rank-one ve-locity from the loss gradients on A and B and per-rank-one Adam SNR from Adam’s bias-corrected moment estimates. After warmup, the two normal-ized signals are fused into per-rank-one multipliers. A standard AdamW step then produces provisional LoRA parameters, and the multipliers are applied through post-step delta scaling on the resulting up-dates. This implementation leaves the AdamW optimizer state unchanged and introduces no addi-tional forward or backward passes. 
+
+B Experimental Setups 
+
+B.1 Datasets 
+
+We describe the datasets used in our experiments on commonsense reasoning, generative tasks and visual instruction tuning. 
+
+Commonsense Reasoning. 
+
+1. Commonsense170K (Hu et al., 2023) is a large-scale instruction tuning dataset con-taining approximately 170K commonsense reasoning examples collected from multiple benchmarks. 2. BoolQ (Clark et al., 2019) (3.2K test set) is a yes/no question answering benchmark built from naturally occurring Google search queries paired with Wikipedia passages. 3. PIQA (Bisk et al., 2020) (3K test set) evalu-ates physical commonsense reasoning by ask-ing models to select the more plausible solu-tion to an everyday task. 4. SIQA (Sap et al., 2019) (1.95K test set) mea-sures commonsense reasoning about social situations and human interactions. 5. HellaSwag (Zellers et al., 2019) (10K test set) is a commonsense completion benchmark requiring models to select the most plausible continuation from multiple candidates. 6. WinoGrande (Sakaguchi et al., 2021) (1.7K test set) evaluates commonsense reasoning through pronoun resolution problems with am-biguous references. 7. ARC-e (2.3K test set) and ARC-c (1.1K test set) (Clark et al., 2018) are science question answering benchmarks containing elementary-level and challenge-level multiple-choice questions, respectively. 8. OBQA (Mihaylov et al., 2018) (500 test set) is an open-book question answering benchmark requiring external commonsense and science knowledge. 
+
+Natural Language Generation. 
+
+1. MetaMathQA (Yu et al., 2024) is a large-scale mathematical instruction tuning dataset. Following prior work, we use its 100K subset for training in math reasoning experiments. 2. GSM8K (Cobbe et al., 2021) (1.3K test set) is a benchmark of grade-school mathematical reasoning problems. 3. Code-Feedback (Zheng et al., 2024) contains code solutions paired with natural language feedback. We use its 100K subset for code generation training. 14 Algorithm 1 AnLR-LoRA 
+
+Require: LoRA parameters {A, B }, AdamW optimizer, LR schedule ηt, warmup Twarm , EMA coeffi-cient ρ, fusion weights α, β , clamp factor κ 
+
+> 1:
+
+Initialize velocity EMA ¯νk ← 0 for each rank-one component  
+
+> 2:
+
+for each training step t do  
+
+> 3:
+
+Save a snapshot of current LoRA parameters θ(t) = {A(t), B (t)} 
+
+> 4:
+
+Take one standard AdamW step to obtain provisional parameters ˆθ(t+1)  
+
+> 5:
+
+for each LoRA module do  
+
+> 6:
+
+Compute per-rank velocity ν(t) 
+
+> k
+
+using Eq. 5  
+
+> 7:
+
+Update EMA velocity: ¯ν(t) 
+
+> k
+
+← ρ¯ν(t−1)  
+
+> k
+
++ (1 − ρ)ν(t) 
+
+> k
+> 8:
+
+Compute per-rank Adam SNR snr (t) 
+
+> k
+
+using Eq. 6  
+
+> 9:
+
+Normalize ¯ν(t) 
+
+> k
+
+and snr (t) 
+
+> k
+
+within the module  
+
+> 10:
+
+if t > T warm then  
+
+> 11:
+
+Compute log s(t) 
+
+> k
+
+← α log(1 /˜ν(t) 
+
+> k
+
+) + β log fsnr (t) 
+
+> k
+> 12:
+
+Clamp log s(t) 
+
+> k
+
+to [− log κ, log κ] 
+
+> 13:
+
+Set s(t) 
+
+> k
+
+← exp(log s(t) 
+
+> k
+
+) and mean-normalize across ranks  
+
+> 14:
+
+Apply post-step delta scaling: θ(t+1)  
+
+> k
+
+← θ(t) 
+
+> k
+
++ s(t) 
+
+> k
+
+(ˆθ(t+1)  
+
+> k
+
+− θ(t) 
+
+> k
+
+)
+
+4. HumanEval (Chen et al., 2021) (164 test set) evaluates code generation through function synthesis problems with unit-test-based exe-cution evaluation. 5. WizardLM (Xu et al., 2024) is an instruction tuning dataset generated with Evol-Instruct, which progressively rewrites seed instructions into more complex and diverse training exam-ples. 6. MT-Bench (Zheng et al., 2023) (80 test set) is a multi-turn dialogue benchmark evaluated using LLM-based judgment. 
+
+Vision-Language Benchmarks. 
+
+1. LLaVA-1.5 Instruction Tuning Dataset (Liu et al., 2024a) contains approximately 665K multimodal instruction-following examples used for visual instruction tuning. 2. VQA v2 (Goyal et al., 2017) (10.7K test set) is a visual question answering benchmark con-taining open-ended questions about natural images. 3. GQA (Hudson and Manning, 2019) (12.5K test set) evaluates compositional reasoning and relational understanding in visual ques-tion answering. 4. VizWiz (Gurari et al., 2018) (8K test set) is a visual question answering benchmark built from images captured by blind users. 5. SQA (Lu et al., 2022) (4.2K test set) is a science-oriented visual reasoning benchmark based on diagram understanding. 6. VQA T (Singh et al., 2019) (5k test set) evalu-ates visual question answering with text-rich visual inputs. 7. POPE (Li et al., 2023) (9K test set) evalu-ates object hallucination in multimodal large language models. 8. MMBench (Liu et al., 2024c) (8.2K test set) is a comprehensive multimodal benchmark covering perception, reasoning and instruction following. 
+
+B.2 Implementation Details 
+
+All experiments were conducted on NVIDIA H100 and H200 GPUs, with each finetuning run requir-ing at most several GPU-hours. We implement all methods using the PEFT library 1. We report the hyperparameter settings for commonsense rea-soning in Tab. 6, covering finetuning on LLaMA2-7B 2, LLaMA3-8B 3 and Qwen2.5-7B 4. The shared hyperparameter configuration for dialogue, math reasoning and code generation experiments with LLaMA2-7B is reported in Tab. 7. For visual in-struction tuning with LLaVA-1.5-7B, we report 
+
+> 1https://github.com/huggingface/peft
+> 2https://huggingface.co/meta-llama/Llama-2-7b-hf
+> 3https://huggingface.co/meta-llama/Meta-Llama-3-8B
+> 4https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-1M
+
+15 Hyperparameters Value Rank r 32 LoRA Alpha 64 Dropout 0.05 Optimizer AdamW LR 1e-4 LR Scheduler Linear Batch size 16 Epochs 3
+
+Table 6: Hyperparameter configuration on common-sense reasoning.           
+
+> Hyperparameters Value Rank r8LoRA Alpha 16 Dropout 0.05 Optimizer AdamW LR 3e-4 LR Scheduler Linear Batch size 16 Epochs 3
+
+Table 7: Hyperparameter configuration on dialogue, math reasoning and code generation. 
+
+the corresponding hyperparameter configuration in Tab. 8. For all settings, we insert LoRA modules into the query, key and value projections of atten-tion layers and the up- and down-projection layers of FFN modules. The log-additive fusion hyper-parameters α, β and κ are set to 2.0, 1.0 and 3.0,respectively, with robustness analyses provided in the Appendix. We perform multiple runs with in-dependent seeds and report the average results. 
+
+Baseline tuning protocol. All baselines share the training configuration of our method as reported in Tab. 6, Tab. 7 and Tab. 8, with method-specific hy-perparameters set to their officially recommended values. A further learning-rate sweep on LLaMA2-7B commonsense reasoning (Tab. 9) confirms that rsLoRA and LoRA+ attain their best accuracy at the learning rate used in our setup. AnLR-LoRA outperforms all baselines at every learning rate in the sweep, including each baseline’s own best set-ting, and the reported gains therefore do not stem from favorable learning-rate choices. 
+
+C Licenses and Usage 
+
+All datasets and pretrained models used in this work are publicly available and used in accordance with their respective licenses and terms of use, in-cluding LLaMA2, LLaMA3, Qwen2.5 and LLaVA-1.5-7B. Our use of these resources is limited to           
+
+> Hyperparameters LLaVA-1.5-7B Rank r128 LoRA Alpha 256 Dropout 0.05 Optimizer AdamW LR 2e-4 LR Scheduler Linear Batch size 16 Epochs 1
+
+Table 8: Hyperparameter configuration on visual in-struction tuning.                     
+
+> Method 5e-5 1e-4 2e-4 3e-4 LoRA 66.2 77.5 77.6 74.9 rsLoRA 49.2 79.0 61.5 63.4 LoRA+ 66.0 79.4 77.0 74.9 AnLR-LoRA 79.9 81.0 80.9 78.8
+
+Table 9: Average commonsense reasoning accuracy (%) across varying learning rates on LLaMA2-7B. 
+
+academic research and evaluation purposes. 
+
+D More Experiments and Analyses 
+
+D.1 Analysis of Spectral Concentration The full fine-tuning update has a nearly flat spec-trum within the rank budget. We take full fine-tuning of LLaMA2-7B on Commonsense170K as a reference for the update that a rank-32 adapter approximates. We measure the effective rank of an update as the exponential of the Shannon entropy of its singular-energy distribution, which equals k
+
+when the energy is spread uniformly over k direc-tions (Roy and Vetterli, 2007). The best rank-32 
+
+approximation of the full fine-tuning update has an effective rank of 27 .2 out of 32 , whereas uniform-LR LoRA at rank 32 learns an update with effec-tive rank 12 .7. This gap bounds how much of the full fine-tuning update a LoRA update can cap-ture, since by the Eckart–Young theorem an update that spreads its energy over k directions captures at most the energy in the top-k singular values. At the learned effective rank of 12.7, this ceiling is 
+
+59 .4% of what the rank-32 budget could capture, compared with 90 .5% at the effective rank of the full fine-tuning update. Moreover, the trailing sin-gular directions (indices 25–32) carry 28% as much energy of the full fine-tuning update per direction as the leading ones, yet receive only 2% as much energy from LoRA. These directions therefore hold adaptation that uniform-LR training leaves unused. 16 Flattening the spectrum directly improves accu-racy. To isolate the effect of a flatter spectrum on adaptation, we train standard LoRA with an addi-tional loss penalty on the participation ratio of the singular values of BA as a diagnostic intervention. The penalty is minimized when the spectrum is flat and involves no learning-rate intervention. For the LLaMA2-7B experiment on math reasoning, with a penalty coefficient of 10 −3, the performance im-proves from 59.59 to 60.96 and the effective rank of the learned update reaches 7.22 out of 8. Increasing the coefficient to 10 −2 flattens the spectrum further to an effective rank of 7.89 and raises accuracy to 61.11. Broader use of the rank budget is therefore itself beneficial. 
+
+D.2 Mechanism Analysis of the Two Signals 
+
+This section examines the training dynamics under-lying the two signals of AnLR-LoRA, measuring what velocity and Adam SNR capture in LoRA training and how each term of the multiplier shapes the learned update. 
+
+Low-velocity components carry under-exploited learning signal. We analyze whether slow rank-one components carry meaningful learning sig-nal that a larger learning rate could exploit, us-ing a vanilla LoRA run on commonsense reason-ing with LLaMA2-7B. We track the velocity, SNR and update-direction consistency of each rank-one component throughout training. Slow and fast rank-one components show comparable direction con-sistency, with mean cosine similarities of 0.22 and 0.24, indicating that low velocity does not corre-spond to an absence of a stable update direction. The difference in update velocity arises from the multiplicative structure of BA , under which the rate of change of a rank-one contribution scales with the norms of its factors. Within the slow half of the components, higher SNR is associated with higher direction consistency, and the SNR term dis-tinguishes slow components with stable directions from those with unstable ones. The combined ve-locity–SNR score predicts the subsequent growth of each component’s contribution with a Spearman correlation of 0.69. The components that the mul-tiplier boosts are therefore those that continue to develop under uniform LR but at a slower rate, and redistributing learning rate toward them recovers the under-exploited learning signal. 
+
+Effect of each term. For the uniform, velocity-only, SNR-only and velocity+SNR configurations of Tab. 5 on LLaMA2-7B, we log per-rank velocity, per-rank SNR and the applied multipliers across all target modules. The velocity term reduces the within-module velocity imbalance, halving the co-efficient of variation of per-rank velocity from 0.12 under uniform LR to 0.06. Without the velocity term, the imbalance remains at the level of uniform LR. The SNR term concentrates the redistributed learning rate on reliable components, lowering the share of the total boost received by the bottom-SNR quartile from 37.4% under velocity-only scaling to 18.3%, below the proportional share of 25%. The two terms jointly reduce the fraction of spectrally concentrated modules from 28.1% to 16.3%, and neither term alone reaches the accuracy of their combination in Tab. 5. 
+
+D.3 Robustness to LR Choice 
+
+Tab. 10 provides the full per-task results for the varying LR experiment discussed in Sec. 5. We evaluate six learning rates from η = 5 e-5 to 5e-4
+
+on LLaMA-2-7B. LoRA is highly sensitive to the choice of learning rate. Its average accuracy peaks at 77 .6% near η = 2 e-4 and drops substantially when the learning rate is smaller or larger, reaching 
+
+66 .2% at η = 5 e-5 and 61 .1% at η = 5 e-4. Across the evaluated range, LoRA varies by 16 .5% , and no setting of the global learning rate lifts LoRA above the ceiling of 77 .6% . AnLR-LoRA improves over LoRA at every learning rate, with gains ranging from 3.3% at LoRA’s best setting to 13 .7% at the lower end of the sweep. AnLR-LoRA also outper-forms LoRA at LoRA’s optimal learning rate, sug-gesting a genuine performance gain that cannot be explained by LR tuning alone. The total variation of AnLR-LoRA across evaluated LR range is only 
+
+7.7% (73 .3% to 81 .0% ), which is much more ro-bust compared to LoRA. These results demonstrate adaptive anisotropic learning rate at the rank-one level improves both accuracy and robustness across global learning-rate choices. 
+
+D.4 Per-rank-one LR Scaling Signal 
+
+Tab. 12 compares three choices of per-rank-one LR multipliers on commonsense reasoning. Ran-dom multipliers collapse the average accuracy to 54 .7% , 26 .3% below AnLR-LoRA, confirm-ing that the multipliers must derive from a mean-ingful training-time signal rather than from ran-dom perturbation. The parameter-sensitivity signal 
+
+∥∇ W ⊙ W ∥ (Zhang et al., 2023) recovers most of the performance ( 79 .3% ) and outperforms standard 17 LR Method BoolQ PIQA SIQA HellaSwag WinoGrande ARC-e ARC-c OBQA Avg. 
+
+5e-5 LoRA 71.8 82.4 65.7 51.9 82.2 66.9 57.9 50.6 66.2 AnLR-LoRA 70.6 83.3 79.5 89.1 82.0 84.7 69.9 80.4 79.9 
+
+1e-4 LoRA 72.2 84.6 77.4 90.1 82.6 81.2 67.4 64.8 77.5 AnLR-LoRA 72.5 84.1 78.9 91.4 82.8 85.0 71.3 82.4 81.0 
+
+2e-4 LoRA 69.8 79.9 79.5 83.6 82.6 79.8 64.7 81.0 77.6 AnLR-LoRA 72.1 83.4 80.0 91.0 83.7 84.5 70.2 82.2 80.9 
+
+3e-4 LoRA 62.9 79.5 77.9 82.3 79.7 78.8 60.5 77.4 74.9 AnLR-LoRA 71.6 81.8 78.7 86.8 82.1 81.9 66.5 81.2 78.8 
+
+4e-4 LoRA 62.7 71.1 69.3 63.3 70.1 73.5 58.0 66.0 66.7 AnLR-LoRA 69.1 81.6 62.8 82.3 79.1 76.4 62.0 75.8 73.6 
+
+5e-4 LoRA 62.2 74.6 60.9 38.3 68.2 74.0 53.2 57.0 61.1 AnLR-LoRA 66.9 79.5 76.2 78.4 77.2 74.2 59.5 74.8 73.3 
+
+Table 10: Comparison of LoRA and AnLR-LoRA with varying learning rates on LLaMA2-7B. 
+
+Rank Method #Params (%) Acc. 
+
+r = 4 LoRA 0.10 58.30 AnLR-LoRA 0.10 60.96 
+
+r = 8 LoRA 0.21 59.59 AnLR-LoRA 0.21 61.87 
+
+r = 32 LoRA 0.83 58.23 AnLR-LoRA 0.83 61.64 
+
+Table 11: Ablation study on LoRA rank with LLaMA2-7B on math reasoning task. 
+
+LoRA with uniform-LR ( 77 .5% ), indicating that other principled signals can also populate the adap-tive anisotropic LR framework. AnLR-LoRA’s ve-locity and Adam SNR fusion achieves the highest average accuracy ( 81 .0% ), which is 1.7% above the parameter-sensitivity alternative. 
+
+D.5 Robustness to Rank Choice 
+
+Tab. 11 reports the effect of the LoRA rank on math reasoning. AnLR-LoRA improves over LoRA at every rank tested ( r ∈ { 4, 8, 32 }) by 2.3% to 3.4% ,with no additional parameter cost. AnLR-LoRA at 
+
+r = 4 (60 .96% ) already exceeds LoRA at r = 32 
+
+(58 .23% ), consistent with our finding that AnLR-LoRA makes broader use of the nominal rank bud-get. 
+
+D.6 Robustness to Hyperparameter Choice 
+
+Fig. 6 and Fig. 7 report AnLR-LoRA’s sensitiv-ity to the fusion weights α and β on math rea-soning and code generation tasks. Across both tasks, performance is relatively stable across the evaluated range of α ∈ {0.5, 1.0, 1.5, 2.0, 2.5}0.5 1.0 1.5 2.0 2.5     
+
+> 50.0 52.5 55.0 57.5 60.0 62.5 65.0
+> Accuracy (%)
+> GSM8K 0.5 1.0 1.5 2.0 2.5
+> 15 20 25 30
+> Accuracy (%)
+> HumanEval
+
+Figure 6: Accuracy across the velocity weight α on math reasoning and code generation tasks. 0.5 1.0 1.5 2.0    
+
+> 50.0 52.5 55.0 57.5 60.0 62.5 65.0
+> Accuracy (%)
+> GSM8K 0.5 1.0 1.5 2.0
+> 15 20 25 30
+> Accuracy (%)
+> HumanEval
+
+Figure 7: Accuracy across the SNR weight β on math reasoning and code generation tasks. 
+
+and β ∈ { 0.5, 1.0, 1.5, 2.0}. Fig. 8, Fig. 9 and Fig. 10 further sweep the velocity EMA coeffi-cient ρ, the clamp bound κ and the warmup length 
+
+Twarm on commonsense reasoning with LLaMA2-7B and LLaMA3-8B, showing similarly stable re-sults across the evaluated values. AnLR-LoRA is therefore robust to the choice of hyperparame-ters and does not require careful tuning to achieve strong performance. 0.9 0.95 0.99 0.999    
+
+> 77 79 81 83
+> Accuracy (%)
+> LLaMA2-7B 0.9 0.95 0.99 0.999
+> 82 84 86
+> Accuracy (%)
+> LLaMA3-8B
+
+Figure 8: Average commonsense reasoning accuracy across the velocity EMA coefficient ρ.
+
+18 LR Scaling BoolQ PIQA SIQA HellaSwag WinoGrande ARC-e ARC-c OBQA Avg. 
+
+Random 62.1 73.0 39.1 57.9 79.2 45.3 42.3 38.8 54.7 
+
+∥∇ W ⊙ W ∥ 62.2 83.9 79.5 89.5 82.7 84.2 70.9 81.2 79.3 AnLR-LoRA 72.5 84.1 78.9 91.4 82.8 85.0 71.3 82.4 81.0 
+
+Table 12: Ablation on per-rank-one LR scaling strategy. 
+
+Method LLaMA2-7B LLaMA3-8B Qwen2.5-7B 
+
+LoRA 77.5 ± 1.85 80.8 ± 0.43 85.7 ± 0.34 rsLoRA 79.0 ± 1.10 81.9 ± 0.30 85.6 ± 0.11 LoRA+ 79.4 ± 0.38 84.8 ± 0.19 85.7 ± 0.38 AnLR-LoRA 81.0 ± 0.44 85.1 ± 0.14 87.4 ± 0.13 
+
+Table 13: Accuracies with standard deviations on com-monsense reasoning tasks. 2.0 3.0 5.0   
+
+> 77 79 81 83
+> Accuracy (%)
+> LLaMA2-7B 2.0 3.0 5.0
+> 82 84 86
+> Accuracy (%)
+> LLaMA3-8B
+
+Figure 9: Average commonsense reasoning accuracy across the clamp bound κ.500 1000 2000 4000    
+
+> Twarm
+> 77 79 81 83
+> Accuracy (%)
+> LLaMA2-7B 500 1000 2000 4000
+> Twarm
+> 82 84 86
+> Accuracy (%)
+> LLaMA3-8B
+
+Figure 10: Average commonsense reasoning accuracy across the warmup length Twarm .                              
+
+> Method GSM8K HumanEval Visual Instr. Tuning
+> LoRA 59.59 ±0.79 24.39 ±0.93 68.26 ±0.13 LoRA+ 60.27 ±0.62 24.39 ±1.61 67.40 ±0.14 AnLR-LoRA 61.87 ±0.53 28.05 ±0.93 68.80 ±0.10
+
+Table 14: Accuracies with standard deviations on nat-ural language generation and visual instruction tuning tasks. 
+
+D.7 Standard Deviation Across Seeds 
+
+We conduct all main experiments over three in-dependent runs with different random seeds and report the mean and standard deviation in Tabs. 13 and 14. The low variance across seeds indicates that the improvements of AnLR-LoRA over LoRA are robust to the choice of random seed. 
+
+Method #Params (%) GSM8K 
+
+LoRA 0.16 87.49 rsLoRA 0.16 84.00 LoRA+ 0.16 87.00 AnLR-LoRA 0.16 88.32 
+
+Table 15: Evaluation results with Qwen2.5-14B. 
+
+D.8 Experiments on Qwen2.5-14B 
+
+We further extend the math reasoning evaluation to the larger Qwen2.5-14B backbone (Tab. 15). AnLR-LoRA attains the best accuracy, outperform-ing LoRA, LoRA+ and rsLoRA by 0.83, 1.32 and 4.32 points, respectively. The consistent gain shows that adaptive anisotropic LR remains effective at larger model scales.                
+
+> Method LLaMA2-7B LLaMA3-8B Qwen2.5-7B
+> AdaLoRA 70.6 84.6 86.2 DoRA 79.6 85.0 86.8 LoRA-Pro 77.6 84.9 86.2 AnLR-LoRA 81.0 85.1 87.4
+
+Table 16: Comparison with additional LoRA variants on commonsense reasoning tasks with average accuracy reported. 
+
+D.9 Comparison with Additional LoRA Variants 
+
+Tab. 16 extends the commonsense reasoning comparison to more LoRA variants, including AdaLoRA (Zhang et al., 2023), DoRA (Liu et al., 2024b) and LoRA-Pro (Wang et al., 2025c), trained under the protocol of Tab. 1 with their official con-figurations. AdaLoRA adaptively allocates the rank budget across modules by importance-based prun-ing of singular triplets. DoRA decomposes the adapted weight into a learnable magnitude and a LoRA-updated direction. LoRA-Pro adjusts the gradients to better approximate the full fine-tuning update, requiring per-module matrix inversions and the solution of a Sylvester equation at each opti-mization step. AnLR-LoRA achieves the best per-formance on every backbone without introducing additional trainable parameters or expensive matrix 19 operations, relying only on lightweight rescaling of the optimizer updates. 
+
+D.10 Analysis on Memory Overhead of the Parameter Snapshot 
+
+Post-step delta scaling maintains a transient snap-shot of the LoRA factors A and B within each optimizer step. The snapshot introduces no train-able parameters, and its size is determined by the adapter rather than by the base model. On LLaMA2-7B, it occupies 56 MB, corresponding to 0.42% of the base-weight memory. This overhead decreases further for larger backbones, with an es-timated 0.20% at the 70B scale and 0.10% at the 405B scale. The snapshot can also be eliminated entirely by fusing the rescaling into the optimizer step. 
+
+E LLM Usage 
+
+AI assistants were used only for language refine-ment during manuscript preparation. They were not involved in proposing the core method, designing the experiments, or drawing scientific conclusions. Since this work studies parameter-efficient finetun-ing for large language models, pretrained models including LLaMA2-7B, LLaMA3-8B, Qwen2.5-7B, Qwen2.5-14B and LLaVA-1.5-7B were used as part of the experimental setup and evaluation. 20
