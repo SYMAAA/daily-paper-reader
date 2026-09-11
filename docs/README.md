@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-10</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-11</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 11 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 6 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>7</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>3</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>3</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-10 21:42:13 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-11 21:22:13 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读4篇、速读7篇，重点聚焦模型量化与压缩。最值得看的是Qwen3-8B三值化后训练以9.0分领跑，以及量化视觉语言模型在答案翻转前的隐藏分数漂移研究。普通读者可优先了解量化对模型能力保留的实际影响，再按需深入剪枝与LoRA方向。</p>
+<p>2026-09-11日报：共筛出6篇论文，精读3篇、速读3篇，其中两篇9.0分精读聚焦语言模型量化。</p>
+<p>最值得看的是《Structured Transforms for Low-Overhead Quantization of Language Models》和《Why Does Post-Training Quantization Work?》，都指向低开销量化与训练后量化机理。</p>
+<p>普通读者可优先从这两篇精读入手，再按需浏览速读中的个性化、剪枝和长视频理解方向。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">4 篇</strong>
+    <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Scaling Post-Training Ternarisation to Qwen3-8B Capability Retention, Reproduction, Lossless Packing, and Packed Execution">Scaling Post-Training Ternarisation to Qwen3-8B Capability Retention, Reproduction, Lossless Packing, and Packed Execution</span></li><li><span class="dpr-home-dashboard-paper-title" title="BEFORE THE FLIP: Measuring Hidden Score Shifts In Quantized Vision Language Models Before The Answer Changes for Visual Question Answering">BEFORE THE FLIP: Measuring Hidden Score Shifts In Quantized Vision Language Models Before The Answer Changes for Visual Question Answering</span></li><li><span class="dpr-home-dashboard-paper-title" title="Contextual Utility of Quantization Moves in Extreme Low-Bit LLMs">Contextual Utility of Quantization Moves in Extreme Low-Bit LLMs</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Structured Transforms for Low-Overhead Quantization of Language Models">Structured Transforms for Low-Overhead Quantization of Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="Why Does Post-Training Quantization Work?">Why Does Post-Training Quantization Work?</span></li><li><span class="dpr-home-dashboard-paper-title" title="OmniKVQuant: KV Cache Quantization for Omni-LLMs">OmniKVQuant: KV Cache Quantization for Omni-LLMs</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>4</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>3</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">7 篇</strong>
+    <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="A Unified Rate-Distortion Perspective on Vector, Product, and Scalar Quantization">A Unified Rate-Distortion Perspective on Vector, Product, and Scalar Quantization</span></li><li><span class="dpr-home-dashboard-paper-title" title="Debias-SparseGPT: Bias-Aware Pruning for Large Language Models">Debias-SparseGPT: Bias-Aware Pruning for Large Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="One Rate Is Not Enough: Adaptive Anisotropic Learning Rates for LoRA Fine-Tuning">One Rate Is Not Enough: Adaptive Anisotropic Learning Rates for LoRA Fine-Tuning</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="PLUME: Parameter-Efficient Personalization of Large Language Models via Low-Rank User Modulation in Shared Subspaces">PLUME: Parameter-Efficient Personalization of Large Language Models via Low-Rank User Modulation in Shared Subspaces</span></li><li><span class="dpr-home-dashboard-paper-title" title="LILA: Calibration-Free Structured Pruning of Large Language Models via Latent Spectral Geometry">LILA: Calibration-Free Structured Pruning of Large Language Models via Latent Spectral Geometry</span></li><li><span class="dpr-home-dashboard-paper-title" title="Caption-once, Frames-on-Demand: Visual-Need Routing for Budget-Aware Agentic Long Video Understanding">Caption-once, Frames-on-Demand: Visual-Need Routing for Budget-Aware Agentic Long Video Understanding</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>7</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>3</strong></span></div>
 </section>
 </div>
 
