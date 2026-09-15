@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-14</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-15</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 4 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 8 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>0</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>4</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>6</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-14 22:55:08 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-15 22:41:01 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日日报：4篇速读聚焦LLM极端稀疏与结构化剪枝，精读暂缺。</p>
+<p>2026-09-15日报精选8篇（精读2、速读6），焦点锁定多模态大模型视觉token选择/跳过与LLM压缩量化。</p>
+<p>最值得看8.0的《StepPrune》自适应顺序视觉token选择，以及《WaterKron and FlipFlop Hessian》的Kronecker Hessian信息论量化；速读中《Don&#x27;t Send What You Don&#x27;t Need》把问题引导token剪枝用于VLM隐私防御。</p>
+<p>普通读者先读两篇精读建立“效率—隐私”主线，再按需补《Vortex》《AdaVSkip》等7分速</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">0 篇</strong>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p class="dpr-home-dashboard-empty">今日暂无推荐。</p>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="StepPrune: Adaptive Sequential Visual Token Selection across Multimodal Large Language Models">StepPrune: Adaptive Sequential Visual Token Selection across Multimodal Large Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="WaterKron and FlipFlop Hessian: Information-Theoretically Grounded Quantization with Kronecker-factored Hessians">WaterKron and FlipFlop Hessian: Information-Theoretically Grounded Quantization with Kronecker-factored Hessians</span></li></ul>
   </div>
-
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>2</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">4 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Hidden in Plain Sight: The Overlooked Significance of Canonical Elements for Extreme LLM Sparsity">Hidden in Plain Sight: The Overlooked Significance of Canonical Elements for Extreme LLM Sparsity</span></li><li><span class="dpr-home-dashboard-paper-title" title="Train Overcomplete, Deploy Compact: Scaling Recovery Capacity for Structured LLM Pruning">Train Overcomplete, Deploy Compact: Scaling Recovery Capacity for Structured LLM Pruning</span></li><li><span class="dpr-home-dashboard-paper-title" title="LILA: Calibration-Free Structured Pruning of Large Language Models via Latent Spectral Geometry">LILA: Calibration-Free Structured Pruning of Large Language Models via Latent Spectral Geometry</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Vortex: Bridging Extreme Compression and Efficient LLM Inference">Vortex: Bridging Extreme Compression and Efficient LLM Inference</span></li><li><span class="dpr-home-dashboard-paper-title" title="AdaVSkip: Adaptive Visual Token Skipping Across Layers For Efficient MLLMs Inference">AdaVSkip: Adaptive Visual Token Skipping Across Layers For Efficient MLLMs Inference</span></li><li><span class="dpr-home-dashboard-paper-title" title="Don&#x27;t Send What You Don&#x27;t Need: Question-Guided Token Pruning as a Privacy Defense for Vision-Language Models">Don&#x27;t Send What You Don&#x27;t Need: Question-Guided Token Pruning as a Privacy Defense for Vision-Language Models</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>4</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>6</strong></span></div>
 </section>
 </div>
 
