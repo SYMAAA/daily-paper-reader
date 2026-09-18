@@ -1,0 +1,1073 @@
+Title: MiX: Micro-Inverted-Scaling for End-to-End Low-Bit Vision-Language Model Acceleration
+
+URL Source: https://arxiv.org/pdf/2609.19683v1
+
+Published Time: Fri, 18 Sep 2026 00:35:36 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+# MiX: Micro-Inverted-Scaling for End-to-End Low-Bit Vision-Language Model Acceleration 
+
+Yuan Liao 
+
+Cornell Tech, Cornell University 
+
+New York, NY, USA yl3662@cornell.edu 
+
+Jae-sun Seo 
+
+Cornell Tech, Cornell University 
+
+New York, NY, USA js3528@cornell.edu 
+
+Abstract —The deployment of Vision-Language Models (VLMs) on edge devices is severely bottlenecked by memory bandwidth, necessitating aggressive sub-8-bit quantization. Since edge accel-erators are strictly constrained by area and power, they require end-to-end quantized models. However, the extreme dynamic range gap between multi-modal tokens causes standard block formats to suffer “microscaling collapse,” where a single massive outlier hijacks the shared exponent, underflowing surrounding elements and destroying attention maps. To break this bottleneck, we propose Micro-Inverted-Scaling (MiX), a novel format that mathematically inverts the microscaling paradigm: rather than grouping multiple mantissas under one shared exponent, MiX groups private, per-element exponents under a single shared man-tissa. To handle asymmetric VLM outlier topologies, we intro-duce an adaptive dual-format (MiX-MX) inference framework. By algebraically factoring out the shared MiX mantissa, this framework maps to a custom accelerator, replacing multipliers with efficient shifters. Evaluated end-to-end on multiple VLMs, our 4.5-bit MiX formulation exhibits equivalent or superior accuracy on multi-modal benchmarks compared to NVFP4. Simultaneously, the MiX accelerator delivers a 25% improvement in area efficiency over the NVFP4 baseline and a 2.3–4.5× speedup with 1.4–2.9× energy reduction across models compared to the state-of-the-art accelerator Focus , proving the inverted-scaling datapath is physically superior for efficient VLM deployment. 
+
+Index Terms —vision-language models, edge computing, quan-tization, hardware-software co-design 
+
+I. I NTRODUCTION 
+
+Generative AI has shifted from unimodal Large Language Models (LLMs) to multi-modal Vision-Language Models (VLMs) [1], [2], which augment autoregressive text generation with visual comprehension for end-to-end tasks like complex visual reasoning and document parsing [3]. As these models scale, processing dense visual tokens alongside semantic text tokens exacerbates the memory bandwidth and compute bottle-necks already inherent in transformer architectures [4]. During autoregressive decoding, edge memory traffic is dominated by two compounding bottlenecks: continuous fetching of massive model weights, and the explosive growth of the Key-Value (KV) cache [5], [6] driven by tens of thousands of high-resolution visual tokens. This dual-sided memory wall man-dates an end-to-end activation-weight quantization strategy. However, current optimization paradigms exhibit a funda-mental blind spot, addressing one side of the memory bottle-neck while neglecting the other. Recent architectural efforts like Focus [7] and other token-pruning accelerators [8]–[10] exploit token concentration to skip redundant visual activa-tions, yet leave the memory wall of fetching massive, uncom-pressed VLM weights unresolved. Conversely, the industry’s prevailing weight-only quantization (e.g., W4A16) [11], [12] is fundamentally inadequate for VLMs: by leaving the massive visual KV cache [13], [14] and dynamic activation footprints uncompressed, it fails to resolve the primary memory capacity bottleneck during generation. At the microarchitectural level, W4A16 inference further forces Processing Elements (PEs) to either employ costly mixed-precision multipliers [15] or dynamically unscale weights back to FP16, leaving silicon area and dynamic power bound to 16-bit logic and nullifying any theoretical compute efficiency gains. Surviving the extreme power and area constraints of edge devices thus mandates end-to-end, fully quantized datapaths for acceleration of VLM models. Yet, achieving robust sub-8-bit activation quantization in VLMs remains unsolved. Recent literature [16]–[19] confirms that directly porting LLM-centric algorithms, e.g., AWQ [20], SmoothQuant [21], SpinQuant [22], and rotation-based quan-tization [23], induces severe accuracy degradation, stemming from a fundamental multi-modal impedance mismatch [24]. Visual features differ drastically from text tokens in both distribution and sensitivity: empirical profiling [25] shows that visual activations span a significantly broader dynamic range from −20 to 10 , whereas textual tokens remain tightly concentrated near zero. Applying homogeneous quantization scales across both modalities therefore either aggressively clips critical visual outliers or forces fine-grained textual features to mathematically underflow, destroying multi-modal accuracy. Despite the proliferation of LLM accelerators [26], [27] and outlier-aware datapaths [28], [29], supporting VLM-specific activation dynamics under strict edge envelopes is underexplored. Standard microscaling (MX) [30] derivatives, building on block floating-point lineages [31], [32], and recent industry formats like NVFP4 [33] push bit-widths lower by sharing a single exponent across a block, but when exposed to VLM outliers they suffer from “microscaling collapse”: the shared exponent is hijacked by the massive outlier, completely erasing background tokens. NVFP4 further requires complex nested scaling hierarchies, coupling block-level FP8 scales with tensor-level FP32 scales, to reach acceptable accuracy. arXiv:2609.19683v1 [cs.AR] 17 Sep 2026 0 1000 2000 3000     
+
+> Sorted Feature Channels
+> 10 2
+> 10 1
+> 10 0
+> Mean |Activation| (Log Scale)
+> t=0.0091
+> v=0.312
+> (a) Sorted Channel Magnitude
+> Vision Tokens Text Tokens Text Tokens Vision Tokens 02468
+> Activation Magnitude
+> p99=0.061 med=0.0055 p99=2.070 med=0.1956
+> (b) Outlier Distribution
+> Text Vision
+> 0.0 0.1 0.2
+> Zoom (low range)
+
+Fig. 1. The modality gap between vision and text tokens at the input of the LLM backbone. 
+
+Recent proposals like MicroScopiQ [34] mitigate collapse by borrowing bits from unimportant elements, yet harbor fatal microarchitectural costs: irregular dataflows, deep de-quantization trees, and silicon-heavy multipliers retained in-side the PEs, critically diminishing area and power efficiency. The recent outlier-aware FP4 formats MXFP4+ [35] and AMXFP4 [36] likewise improve accuracy, but enlarge the PE through an extended-mantissa block maximum or two asymmetric FP8 scales. To fundamentally resolve the multi-modal dynamic range bottleneck while aggressively optimizing edge Power, Perfor-mance, and Area (PPA), we propose Micro-Inverted-Scaling (MiX ), a novel hardware-algorithm co-design framework. MiX mathematically inverts the standard microscaling paradigm: instead of sharing one exponent across multiple mantissas, it groups private, per-element exponents under a single shared mantissa. MiX therefore absorbs extreme intra-block dynamic ranges without destructive clipping, simultaneously preserving visual outliers and fine-grained textual features. Notably, this algorithmic formulation translates into massive microarchitectural savings. An adaptive dual-format frame-work pairs a MiX-formatted activation tensor with an MX-formatted weight tensor, allowing the shared MiX mantissa to be algebraically factored out of the block dot product. This simplification lets the custom systolic accelerator eradicate complex MACs entirely, replacing them with efficient bit-shifters and integer adder trees. To our best of knowledge, MiX is the first end-to-end low-bit VLM accelerator. Evaluated end-to-end on Qwen2-VL [37], LLaVA-OneVision [38], and MiniCPM-V [39] across diverse visual-language benchmarks, the MiX-MX architecture dominates the PPA-accuracy Pareto frontier. We implement the MiX accelerator and baseline accelerators in TSMC28 CMOS. A 4.5-bit MiX matches the NVFP4 baseline accuracy while the dedicated MiX accelerator improves PE area efficiency by 25% over NVFP4. Against the state-of-the-art accelerator 
+
+Focus [7], MiX delivers an average 2.3×–4.5× speedup and 
+
+1.4×–2.9× energy reduction across six VLM benchmarks on LLaVA-OneVision-7B and MiniCPM-V-2.6, proving that the inverted-scaling, multiplier-less datapath is physically superior for end-to-end VLM deployment. 0200 400 600                   
+
+> Token Sequence
+> Query (Q)
+> Token-wise Quantization (Q, K)
+> Layer 0 Layer 27
+> 0200 400 600
+> Token Sequence
+> Key (K)
+> 020 40 60 80 100 120
+> Feature Channel
+> 0200 400 600
+> Token Sequence
+> Value (V)
+> 020 40 60 80 100 120
+> Feature Channel
+> Channel-wise Quantization (V)
+> 10 4
+> 10 3
+> 10 2
+> 10 1
+> 10 0
+> 10 1
+> 10 2
+> Log |Activation|
+> Vision Tokens Text Tokens
+
+Fig. 2. The heatmap of the Q, K, and V matrices in Qwen2-VL-7B. Q and 
+
+K exhibit severe channel-wise outliers, while V contains early token-wise spikes. 
+
+II. B ACKGROUND AND MOTIVATION 
+
+A. VLM Architecture and Multi-Modal Activation Dynamics 
+
+Modern VLMs process multi-modal inputs through a three-stage pipeline: a Vision Encoder extracts continuous visual patches, a Modality Projector aligns these spatial features into the textual dimension, and an LLM backbone performs the final autoregressive reasoning. Unlike unimodal LLMs, VLMs must dynamically fuse highly diverse modalities, and this fusion begins at the very first layer of the LLM backbone during prefill, where high-density continuous vision tokens are concatenated directly with discrete text embeddings, yielding a highly heterogeneous token sequence. Profiling the hidden states of Qwen2-VL-7B on an OCRBench task (extracting text from a rendered invoice) confirms the hypothesized activation-pattern differences between vision and text tokens. As Figure 1 shows, vision tokens produced by the encoder and projector exhibit a heavily skewed magnitude profile (μv = 0 .312 ), whereas text tokens stay tightly concentrated near zero ( μt = 0 .0091 ), inducing a ∼34 × dynamic range gap across feature channels. Element-wise distributions fur-ther reveal that vision tokens produce 99th-percentile outliers exceeding 2.07, while text tokens rarely surpass 0.061 at the same percentile. This initial modality gap further exacerbates extreme outlier channels within the intermediate attention matrices, far more severely than in unimodal LLMs. Figure 2 visualizes the absolute maximum values of the Query ( Q), Key ( K), and Value ( V ) matrices across tokens and channels for Qwen2-VL-7B, revealing two distinct outlier behaviors that severely disrupt standard block-wise quantization: 1) Channel-wise Outliers in Q and K: both matrices Feature Channel Token Sequence      
+
+> (a) FP16 Original
+> Feature Channel
+> 44.8% dead
+> (b) MXINT4
+> Feature Channel
+> 38.4% dead
+> (c) MXFP4
+> Feature Channel
+> 38.3% dead
+> (d) NVFP4
+> Feature Channel
+> 23.9% dead
+> (e) MiX (Ours)
+> 10 4
+> 10 3
+> 10 2
+> 10 1
+> 10 0
+> 10 1
+> 10 2
+> Log |Activation| Fig. 3. Quantization underflow map of the Layer 27 Key matrix from Qwen2-VL-7B. All formats are in 32 block size.
+
+exhibit massive, persistent vertical spikes concentrated in specific channels but spanning all tokens, growing with layer depth. 2) Early Token-wise Spikes in V : the Value matrix instead shows extreme horizontal spikes heavily concentrated in early tokens (compressed and not depicted in the figure). These intersecting outlier topologies are fatal to standard block-based formats like MX or NVFP4. When a 1D block is mapped along the channel dimension, the massive channel-wise outliers in Q and K force the shared block exponent to scale up dramatically, underflowing the surrounding normal-magnitude background tokens to zero, a phenomenon we term 
+
+microscaling collapse . The result is systematic destruction of attention-map precision and the catastrophic task degradation commonly observed when quantizing VLMs. 
+
+B. Block-Quantized Formats 
+
+Block-based low-bit quantization has emerged as the indus-try standard for alleviating the memory wall in LLM inference. Rather than assigning a unique high-precision scale to every parameter, it groups elements into contiguous chunks (default block size B = 32 ) that share a single scale. Microscaling derivatives such as MXINT4 and MXFP4 share a single exponent across the block while keeping individual low-bit mantissas per element. The de-quantized value of the i-th element in an MX block is: 
+
+xi = 2 Eblock × mi for i ∈ { 1, 2, . . . , B } (1) where Eblock is the shared block exponent derived from the chunk’s maximum absolute value, and mi is the low-bit mantissa in floating-point (MXFP) or integer (MXINT) representation. More recent formats like NVFP4 ( B = 16 ) push this paradigm further, but achieving acceptable accuracy in such aggressive sub-8-bit regimes requires complex nested scaling 
+
+hierarchies. NVFP4, for example, multiplies each element by two FP scales: 
+
+xi = Stensor × Sblock × mi (2) where Stensor is a global FP32 scalar applied across the entire matrix or vector and Sblock is a block-level FP8 scale factor. 
+
+C. The Microscaling Collapse in VLMs 
+
+The microscaling collapse is empirically visualized in Fig-ure 3, which analyzes the Layer 27 Key matrix of Qwen2-VL-7B. Under standard shared-scale formats at B = 32 , outlier-dominated scales eradicate non-maximum information within each block, forcing 44.8% in MXINT4 format and 38.4% in MXFP4 format of the matrix background tokens into fatal underflow, which are rendered mathematically dead and shown as blue pixels. NVFP4 only slightly mitigates this via a tighter 
+
+B = 16 block and a two-level scaling hierarchy. At B = 32 a38.3% underflow rate persists, losing significant multi-modal signal in outlier-contaminated regions. To rescue such lost representational capacity without raising the nominal bit-width, we introduce Micro-Inverted-Scaling (MiX). By assigning per-element relative exponents, MiX grants local dynamic-range flexibility, allowing background to-kens to retain distinct scales even within outlier-heavy blocks. The per-element exponent overhead is amortized by sharing a single block-level mantissa, so MiX preserves a bit budget comparable to conventional MX while redirecting precision toward local range adaptation. At B = 32 , MiX circumvents the structural collapse and reduces total matrix underflow to 23.9%, marking >14% less dead zone improvement. This algorithm is co-designed with the hardware backend. Since every element in a MiX block carries the same mantissa, the mantissa also factors out of each block dot product, replacing costly per-element multiplications with efficient bit-shifts. III. M ICRO -I NVERTED -S CALING (M IX) & D UAL -F ORMAT 
+
+A. The MiX Quantization Algorithm 
+
+Standard microscaling (MX) [30] shares a single exponent across a block to amortize hardware costs, but fundamentally fails when exposed to VLM activation outliers. To break this structural bottleneck, we propose Micro-Inverted-Scaling (MiX) , which mathematically inverts the paradigm: rather than grouping multiple mantissas under a single shared exponent, MiX groups multiple private exponents under one shared mantissa. By allocating the bit-budget primarily to per-element exponent differences, MiX absorbs extreme intra-block dy-namic ranges. To enable rigorous comparisons against state-of-the-art baselines and map a complete Pareto frontier, we formalize MXINT4  MiX-4.25b                    
+
+> 3b m shared 4b E max 8b E shared
+> ...
+> 3b ∆e01b s 0
+> 3b ∆e11b s 1
+> 3b ∆e30 1b s 30
+> 3b ∆e31 1b s 31
+> MXFP4 MiX-4.5b
+> 8b E shared
+> ...
+> 3b ∆e01b s 0
+> 3b ∆e11b s 1
+> 3b ∆e30 1b s 30
+> 3b ∆e31 1b s 31
+> 3b m shared,1
+> 4b E max
+> 3b m shared,0
+> 3b m shared,3
+> 3b m shared,2
+> NVFP4
+> ...
+> 2b e 01b s 0
+> 2b e 15 1b s 15
+> 1b m 0
+> 1b m 15
+> 3b M 4b E 16
+> ...
+> 2b e 01b s 0
+> 2b e 11b s 1
+> 1b m 0
+> 1b m 15
+> 3b M 4b E 3b M 4b E
+> FP32 per-tensor scale: S1E8M23
+> (a)
+> 32
+> 32
+> ...
+> 1b s 0
+> 1b s 1
+> 1b s 30
+> 1b s 31
+> 2b e 01b m 0
+> 2b e 11b m 1
+> 2b e 30 1b m 30
+> 2b e 31 1b m 31
+> ... 1b s 0
+> 1b s 1
+> 1b s 30
+> 1b s 31
+> 2b e 01b m 0
+> 2b e 11b m 1
+> 2b e 30 1b m 30
+> 2b e 31 1b m 31
+> ...
+> 3b m 01b s 0
+> 3b m 11b s 1
+> 3b m 30 1b s 30
+> 3b m 31 1b s 31
+> ... 3b m 01b s 0
+> 3b m 11b s 1
+> 3b m 30 1b s 30
+> 3b m 31 1b s 31
+> (b)
+> (d)
+> (c)
+> (e)
+
+Fig. 4. (a) Two NVFP4 blocks and their shared FP32 per-tensor scale. (b) MXINT4 block. (c) MiX-4.25b (Type 1) block. (d) MXFP4 block. (e) MiX-4.5b (Type 2) block. 
+
+MiX into two format variants, each designed to match the effective bit-widths (EBW) of current industry standards. 
+
+Type 1: Standard MiX (MiX-4.25b). Designed as a bit-for-bit competitor to MXFP4, this baseline operates on a block of size B = 32 , illustrated in Figure 4c. The block is anchored by a single 4-bit maximum base exponent ( Emax ) and a 3-bit shared mantissa ( mshared ) with an implicit leading 1. For each element xi, we extract a 1-bit sign ( si) and a 3-bit relative exponent difference ( ∆ei) that dictates the right-shift required to scale the shared mantissa to the element’s local magnitude, with the exception that a value of seven encodes zero. The de-quantized value is reconstructed as: 
+
+ˆxi = ( −1) si × (1 .m shared )2 × 2Emax −∆ei (3) Requiring 4 + 3 shared bits padded with one spare bit to a regular 8-bit field and 128 element bits, the EBW is exactly 
+
+(8 + 128) /32 = 4 .25 bits per element, exactly matching the EBW of MXFP4. 
+
+Type 2: Sub-Group Mantissas (MiX-4.5b). This variant, illustrated in Figure 4e, directly competes with NVFP4’s effective footprint. The block ( B = 32 ) shares a global 4-bit Emax but is divided into K = 4 sub-blocks of size b = 8 ,each carrying its own 3-bit shared mantissa ( mshared,k ). The reconstruction becomes: 
+
+ˆxi∈sub k = ( −1) si × (1 .m shared,k )2 × 2Emax −∆ei (4) The bit cost is 4 (max exponent) +4 ×3 (sub-group mantissas) 
+
++32 × 4 (elements) = 144 bits, yielding an EBW of 4.5 bits per element, matching NVFP4 while eliminating its reliance on tensor-level scaling. 
+
+Algorithm 1 MiX-4.5b (Type 2) quantization with exponent refinement. 
+
+Require: Input activation tensor X, Block size B = 32 , Sub-block size 
+
+b = 8 .
+
+Ensure: Quantized and de-quantized tensor ˆX.1: for each block Xblock in X do 
+
+2: Emax ← max x∈Xblock ⌊log 2(|x|)⌋ { Extract 4-bit max exponent }
+
+3: for k = 1 to B/b do 
+
+4: Xsub ← Xblock [( k − 1) b : kb ]
+
+5: mshared,k ← QuantizeMantissa (max( |Xsub |), bits = 3) 
+
+6: for each xi ∈ Xsub do 
+
+7: si ← Sign (xi)
+
+8: ∆enaive ← min( Emax − ⌊ log 2(|xi|)⌋, 7) 
+
+9: S ← { max(0 , ∆enaive −1) , ∆enaive , min(7 , ∆enaive +1) }
+
+10: {EXP Refine: Search only the ±1 neighborhood }
+
+11: ∆ei ← arg min δ∈S xi − (−1) si (1 .m shared,k )22Emax −δ
+
+12: ˆxi ← (−1) si × (1 .m shared,k )2 × 2Emax −∆ei
+
+13: end for 
+
+14: end for 
+
+15: end for 
+
+Comparison to MXFP4 and NVFP4. Figure 4 illustrates the differences between the proposed MiX schemes and MXFP4/NVFP4. MiX-4.25b departs from MXFP4 in two respects. In block scale, MXFP4 carries a single 8-bit power-of-two shared exponent, whereas MiX-4.25b splits the block scale into a 4-bit Emax and a 3-bit mshared . In element format, MXFP4 stores each element as E2M1, a per-element exponent and mantissa, whereas MiX encodes E3M0, whose three bits are a per-element exponent difference ∆e under the shared mantissa rather than an exponent. Relative to NVFP4, MiX-4.25b differs along four axes: the element format above, block size ( B=32 versus B=16 ), scale hierarchy (NVFP4 has an extra S1E8M23 FP32 per-tensor scale), and EBW (MiX-4.25b is a 4.25b format, a quarter-bit below NVFP4’s 4.5b). MiX-4.5b reaches NVFP4’s 4.5b footprint, so it matches on EBW but still inherits the first three distinctions, and further differs by partitioning each block into four sub-groups with independent shared mantissas. 
+
+Algorithmic Implementation and Exponent Finetuning. 
+
+The baseline MiX quantization process, detailed in Algo-rithm 1, begins by identifying the maximum absolute value within the block to extract the global Emax and shared mantissa mshared . We set mshared to the mantissa of the block maximum, which outperforms mean-, scale-weighted, and MSE-based alternatives while saving significant hardware complexity. Selecting maximum’s mantissa preserves the im-portant outliers magnitude, maintaining the best accuracy in the experiments of validating all alternatives. However, since the mantissa is globally fixed for the surrounding elements, na¨ ıvely assigning the relative exponent ( ∆ei) from the loga-rithmic difference often introduces more quantization noise. To minimize the local reconstruction error |ˆxi − xi|, local-ized exponent finetuning is performed (Algorithm 1, Lines 9– 11), which computes the exponent difference and searches the 
+
+±1 neighbor for the candidate that minimizes reconstruction error. While trivial in software calibration, this finetuning is also implemented in our hardware accelerator. As detailed in Section IV, an efficient quantizer at the output datap-ath resolves the optimal ∆ei across the 3-candidate search space through bit-wise logic alone, eliminating any software-emulation overhead. 
+
+B. MiX-MX Matrix Multiplication 
+
+To execute VLM inference efficiently, we propose an adap-tive, dual-format matrix multiplication strategy. We formalize the dual-format dot product of MiX-format activation (A-MiX) × MX-format weight (W-MX). Consider a dot product between A-MiX block x (with MiX-4.25b Type 1 scheme) and a W-MX block w, both of size B = 32 (Figure 4b and 4c). Following the definitions from Section III-A, the exact block dot product y = PBi=1 ˆxi ˆwi expands as: 
+
+y =
+
+> B
+
+X
+
+> i=1
+
+ (−1) sx,i (1 .m shared )2 2Emax −∆ex,i 
+
+×  (−1) sw,i mw,i 2Ew  (5) Standard quantization algorithms require an mx,i × mw,i 
+
+multiplication for every element pair. However, because the MiX format groups multiple private exponents under one shared mantissa as shown in Figure 4c, the (1 .m shared )2 term and the global base exponents can be factored out of the summation entirely: 
+
+y = (1 .m shared )2
+
+| {z }
+
+> Scalar Multiply
+
+× 2Emax +Ew
+
+| {z }
+
+> Exponent Addition
+
+×
+
+> B
+
+X
+
+> i=1
+
+(−1) sx,i ⊕sw,i  mw,i × 2−∆ex,i  | {z }
+
+> Shift-and-Add Logic
+
+(6) This factorization reduces the element-wise operations to 
+
+mw,i × 2−∆ex,i , which maps directly to a right-shift of the weight mantissa by the activation’s relative exponent. Conse-quently, the algorithmic steps required to compute the block dot product become massively simplified: 1) Shift: Shift the MX weight mantissas by the per-element MiX relative exponents ( ∆ex,i ). 2) Accumulate: Sum the shifted mantissas to form a single intra-block partial sum. 3) Scale: Apply exactly one multiplication to scale the accumulated sum by the shared (1 .m shared )2 activation mantissa, while adding the globally shared base expo-nents ( Emax + Ew) to the exponent block. By leveraging this dual-format algebra, the MiX-MX co-design eliminates per-element multiplications, paving the way for a multiplier-less accelerator architecture. 
+
+C. Signal-to-Quantization-Noise Analysis 
+
+To quantify the representational fidelity of MiX against baseline formats, we analyze the per-block Signal-to-Quantization-Noise Ratio (SQNR), defined as the ratio of signal power ( P x2) to quantization noise power ( P(x− ˆx)2), on Layer 22 hidden-state activations from Qwen2-VL-7B. In Figure 5, each plotted point corresponds to one 32-element 2.5 5.0 7.5 10.0 12.5 15.0 17.5 20.0  
+
+> Block Dynamic Range Ratio (Max / Mean)
+> 10 15 20 25 30 35
+> SQNR (dB)
+> High-Variance Regime
+> MXINT4 (B=32) MXFP4 (B=32) NVFP4 (B=16) MiX-4.5b (B=32, b=8)
+> Fig. 5. Per-block Signal-to-Quantization-Noise Ratio across varying intra-block dynamic ranges for Qwen2-VL-7B hidden-state activations.
+
+block, the horizontal axis measures the intra-block dynamic-range (DR) ratio (block maximum divided by block mean absolute value), and the vertical axis reports the SQNR after a full quantize–dequantize cycle. In the low-variance regime (DR ratio below the dashed boundary at 4.5), all evaluated formats start from a comparable baseline fidelity between 16 and 21 decibels, since a single shared scale adequately represents every element in the block. Past that boundary, however, the shared-scale formats suffer a pronounced collapse, MXINT4 bottoming out near 12 dB and MXFP4 near 14.5 dB: their shared exponent is pinned to the block maximum, forcing smaller elements into coarser quantization levels or outright underflow. NVFP4 mitigates this with a smaller block size of 16 but plateaus near 21 dB as its block scale hits its precision limit. The non-monotonic recovery of MXINT4 and MXFP4 beyond a ratio of roughly 13 is an artifact of the power-weighted noise metric rather than a true precision recovery: once an outlier becomes extreme, the underflowed elements are numerically negligible relative to the total signal power, masking the underlying dead-zone failure. In contrast, the proposed MiX format exhibits a steadily rising fidelity curve, surpassing all baselines beyond DR ratio of 8 and reaching approximately 28 dB at DR ratio of 18. Its per-element exponents independently track each element’s magnitude while the shared mantissa within each 8-element sub-group preserves relative precision. This resilience to high intra-block DR makes MiX particularly well-suited for VLM activations, where the 34 × vision–text magnitude gap from Figure 1 precisely produces such extreme intra-block variance. IV. A RCHITECTURE : M ULTIPLIER -L ESS SYSTOLIC ARRAY 
+
+To physically instantiate the algorithmic factorization and adaptive dual-format mapping established in Section III, we design a specialized, multiplier-less spatial accelerator. The proposed architecture executes MiX-MX matrix multiplica-tions while minimizing data movement. MX     
+
+> MEM
+> MiX MEM
+> PE PE
+> 1 block 32 elements
+> MiX/MX Quantizer
+> ACCUMULATOR MEM
+> 1 block 32 elements
+> PE
+> PE PE PE
+> PE PE PE
+> 1 block 1 block
+> 1 block
+> SFU
+> Off-Chip DRAM
+
+Fig. 6. Top-level architecture of the accelerator. 
+
+A. Overall Architecture and Dataflow 
+
+Figure 6 shows the top-level architecture of the proposed accelerator. To support A-MiX/W-MX matrix multiplications, weight and activation buffers are designated as MX Memory 
+
+and MiX Memory , respectively, feeding the horizontal and vertical inputs of the systolic array. The computational core is a 2D Systolic Array executing an Output-Stationary (OS) dataflow. Unlike standard systolic arrays that process individual elements per cycle, the MiX-MX factorization in Equation (6) lets each PE ingest an entire quantization block in a single cycle. Upon completing a matrix tile, the stationary high-precision results are shifted downward along the vertical accumulation chain into the Accumulator Memory and then routed through a specialized MiX/MX Quantizer or Special Function Unit (SFU) at the output datapath. The quantizer is the hardware realization of Algorithm 1’s exponent refinement , dynamically re-compressing the activations into the required MiX or MX format for the subsequent layer. The result of the quantizer or SFU is saved to Off-Chip DRAM. 
+
+B. PE Microarchitecture 
+
+At the core of the spatial accelerator is the multiplier-less PE, which executes the algebraic factorization of Equation (6), ingesting 32 parallel MiX elements and 32 parallel MX ele-ments per cycle. As Figure 7 illustrates, the microarchitecture adapts to the format variant. For clarity, we first describe the baseline MiX-4.25b datapath before detailing the structural adaptations for the sub-group variants. 
+
+The Shift-and-Add Datapath. The intra-PE computation operates entirely in the integer domain prior to final accu-mulation, proceeding through the following stages: 
+
+Sign Processing: The MXINT integer is conditionally in-verted using the sign bit of the corresponding MiX element, realizing the (−1) sx,i ⊕sw,i term. (b) MiX-4.5b @ MXINT PE   
+
+> 19b man sign 8b exp
+> FP Accumulator Reg
+> 32 {s MiX ,∆e}
+> +
+> +
+> >>
+
+~ 
+
+> sMX0
+> m0
+> SMiX0 ∆e0
+> >>
+
+~
+
+> +
+> >>
+
+~
+
+> >>
+
+~  
+
+> SMiX31 ∆e31
+
++ 
+
+> 32 {s MX , m}
+
+~
+
+> 32 {s MX , m} Eshared
+> sMX31
+> m31
+
+×
+
+×  
+
+> 1.m shared,k
+> (a) MiX-4.25b @ MXINT PE
+> 1.m shared
+> 19b man sign 8b exp
+> Eshared
+> FP Accumulator Reg
+> …
+> 32 {s MiX ,∆e}
+
+×
+
+> +
+> +
+> >>
+
+~ 
+
+> sMX0
+> m0
+> SMiX0 ∆e0
+> >>
+
+~
+
+> +
+> >>
+
+~
+
+> >>
+
+~  
+
+> SMiX31 ∆e31
+
++ 
+
+> 32 {s MX , m}
+
+~  
+
+> 32 {s MiX ,∆e} Emax , m shared
+> 32 {s MX , m}
+> Eshared
+> sMX31
+> m31
+> (c) MiX-4.5b @ MXFP PE
+> 32 {s MiX ,δe}
+> +
+> >>
+
+~ 
+
+> sMX0
+> m0
+> SMiX0 δe0+E fp0
+> >>
+
+~
+
+> +
+> >>
+
+~
+
+> >>
+
+~
+
+> SMiX31
+> 32 {s MX , m}
+> sMX31
+> m31
+
++
+
+> Efp0
+> δe31 +E fp0
+
++  
+
+> Eshared 32 {s MiX ,∆e} Emax , m shared
+
++ 
+
+> Eshared
+> …
+> 19b man sign 8b exp
+> FP Accumulator Reg +
+
++
+
+~
+
+> 32 {s MX , m, E fp }Eshared
+
+×
+
+× 
+
+> 1.m shared,k
+> 32 {s MiX ,δe}Emax , m shared
+
++
+
+> …… ……
+
+Fig. 7. The PE microarchitecture and intra-PE shift-and-add logic for the different MiX format variants. 
+
+Shifting: The signed MXINT integer enters a barrel shifter whose shift amount is the MiX element’s 3-bit relative ex-ponent ( ∆ei), executing a logical right-shift that aligns the integer with the MiX element’s magnitude. 
+
+Integer Adder Tree: The 32 shifted integers feed a parallel integer adder tree that produces a single unscaled partial sum for the block. 
+
+Scalar Multiplication and FP Accumulation. To complete the factorization, the unscaled partial sum is multiplied by the 4-bit shared MiX mantissa, where the explicit 3 bits are concatenated with the implicit leading 1. The hardware then transitions from the integer to the FP domain. The scalar product becomes the mantissa and sign of a temporary FP variable. The internal 19-bit mantissa datapath is wide enough to hold every precision bit produced by the adder tree and multiplier without immediate truncation. The exponent is constructed by adding the MiX block’s maximum base exponent ( Emax ) to the MX block’s shared exponent (Eshared ). This constructed FP number is fed into a standard FP32 adder that updates the PE’s local accumulation register. Simultaneously, the input MiX and MX blocks are captured in pipeline flip-flops and forwarded to adjacent PEs to sustain MX Path   
+
+> Asymmetric Quant EXP Refine ment 32x Rounder Comparator Tree
+
+>
+
+>
+
+> > + -
+
+- >
+
++
+
+> ~>>
+
+>
+
+> MX MiX
+
+>
+
+>    
+
+> MAX ’
+> MAN MAX ’, MSB4
+> EXP MAX
+> MAN MAX
+> EXPx iMANx iSx i
+> ∆ei
+> x̂ i
+> ±0.5
+> 01
+> … 76
+> {Sx i,∆ei}
+> 4'b1000
+> x1
+> x2
+> x3
+> x5Fig. 8. Microarchitecture of the fused MiX/MX output quantizer. Purple for shared path, blue for MiX only path and green for MX only path.
+
+the spatial wavefront. 
+
+Microarchitectural Adaptations for Sub-Group Variants. 
+
+The PE datapath is modular, adapting to the finer MiX-4.5b format and the MiX-MXFP dual-format without fundamen-tally altering the pipeline, shown in bottom two PEs depicted in Figure 7. 
+
+MiX-4.5b @ MXINT: To support the four sub-groups of size b = 8, the 32-wide integer adder tree is partitioned into four independent 8-wide sub-trees. Each sub-tree feeds its own scalar multiplier that multiplies the sub-sum by the corresponding sub-group mantissa ( mshared,k ), and the four products are merged by a secondary adder stage before final FP conversion. 
+
+MiX-4.5b @ MXFP: The MXFP variant builds directly upon the MiX-4.5b @ MXINT datapath, adding one low-cost pre-processing step. Before the barrel shifters, a narrow 3-bit adder sums the FP4 exponent with the element’s local difference (δe i) to produce the total shift amount, which then drives the existing shift-and-add logic. 
+
+C. Dual-Format Quantizer 
+
+The systolic array emits FP32 accumulations. To sustain the adaptive dual-format inference strategy across sequential layers, these temporary FP values must be re-compressed before being written back to global SRAM. We design a fused, single-cycle MiX/MX hardware quantizer at the output datapath, as shown in Figure 8. The quantizer maximizes area efficiency by sharing acommon feature-extraction frontend (purple components in Figure 8). The 32 uncompressed FP values enter a parallel comparator tree that isolates the maximum absolute value of the block. The hardware then extracts its sign, exponent, and 4 Most Significant Bits (MSBs) of mantissa, establishing the baseline metadata shared by both formats. The datapath then diverges based on the target format. 
+
+The MiX Datapath. When targeting the MiX format, the logic extracts the shared mantissa and computes the optimized relative exponents ∆ei across three specialized sub-modules. 
+
+Carry-Propagated Rounding: To compute the 3-bit shared mantissa mshared , the extracted 4-bit mantissa undergoes round-to-nearest logic by adding its 4th bit to the upper 3 MSBs. The hardware implicitly handles carry propagation: if rounding overflows the mantissa (e.g., 111 2 + 1 2 = 1000 2), the overflow bit routes directly into the exponent adder, incrementing EXP max and leaving 000 2 as the normalized mantissa. 
+
+Hardware Exponent Refinement: This module is the physical realization of the error-minimization search in Algorithm 1. Instead of an iterative floating-point search, the logic leverages a single 4-bit mantissa subtraction. Because adjusting a base-2 exponent by 1 scales the reconstructed value by a factor of 2,the decision boundary that minimizes absolute error between two adjacent quantization bins lies exactly at the 0.5 midpoint in the linear mantissa space. The hardware computes the residual between the local element’s de-normalized mantissa and the rounded M AN max . A simple comparator evaluates this residual against the 0.5 threshold, and the EXP Refine block deterministically emits an adjustment of +1 , −1, or 
+
+0. This adjustment is applied to the naive relative shift, reducing the algorithmic finetuning to a single-cycle, low-latency thresholding operation. 
+
+Asymmetric Zero-Encoding: To maximize representational density, the quantizer adopts an asymmetric state encoding. Standard sign-magnitude formats waste a state on −0 along-side +0 . We reclaim the redundant negative zero to encode an extra dynamic-range level for positive numbers. Positive numbers therefore evaluate ∆ei against a maximum threshold of 7 while negative numbers use 6, and values exceeding these bounds are multiplexed to zero. 
+
+The MX Datapath. When the block targets a standard MX format (purple and green path in Figure 8), the comparator tree and the rounder is shared. The shared block exponent is fixed to EXP max . The hardware computes each element’s shift amount via a parallel subtraction ( EXP max − EXP xi ), and the FP mantissa is shifted and then conditionally inverted into a signed integer representation. A final multiplexer selects between the MiX and MX vectors, allowing the accelerator to alternate data formats on the fly. V. E VALUATION METHODOLOGY 
+
+To comprehensively evaluate the MiX co-design framework, we establish an end-to-end pipeline spanning multi-modal task accuracy, RTL-level microarchitectural efficiency, and system-level performance. 
+
+A. Models and Workloads 
+
+We target the edge deployment of state-of-the-art VLMs with 7B–8B parameters, which represent the critical edge-deployment threshold: footprints are large enough to make memory bandwidth a severe bottleneck, yet representational capacity remains strong enough for complex real-world ap-plications. Our evaluation suite covers Qwen2-VL-7B [37] and LLaVA-OneVision-7B [38] for direct comparison with state-of-the-art VLM quantization work, plus the 8B model MiniCPM-V-2.6 [39] as an additional target. This 7B to 8B range is the practical sweet spot for edge deployment, efficient TABLE I QUANTIZATION COVERAGE ACROSS VLM COMPONENTS . A TTENTION                                  
+
+> BMM S INCLUDE KV CACHE QUANTIZATION .
+> Method Vision Encoder Projector LLM Backbone Linear Attention BMMs Linear Attention BMMs
+> TLQ [18] W/A ✗✗W/A ✗
+> MBQ [16] W/A ✗✗W/A ✗
+> Q-VLM [17] W/A ✗✗W/A ✗
+> VEQ [19] ✗✗✗W only ✗
+> MiX-MX (Ours) W/A W/A W/A W/A W/A
+
+to serve yet strong on real tasks. To probe scale and modality, we further evaluate Qwen2.5-VL from 3B to 72B and text-only LLMs. End-to-end task accuracy is assessed across six multi-modal benchmarks chosen to stress different activation topolo-gies: logical reasoning (MMMU [3]); text-rich visual com-prehension (OCRBench [40], TextVQA [41], ChartQA [42]); and general perception (VizWiz [43], SEED-Bench-2+ [44]). In Table II, OCR denotes OCRBench, VW VizWiz, TQA TextVQA, CQA ChartQA, and SEED2 SEED-Bench-2+. 
+
+B. Algorithm and Hardware Baselines 
+
+Algorithm Baselines and End-to-End Coverage. We bench-mark MiX-MX against state-of-the-art VLM Post-Training Quantization (PTQ) algorithms, MBQ [16] and TLQ [18]. As summarized in Table I, existing PTQ methods restrict quantization to the linear layers, leaving the Modality Projector and the Attention BMMs in both the Vision Encoder and the LLM Backbone in FP16. In contrast, MiX is applied strictly end-to-end, ensuring that the entire execution pipeline can be offloaded to a sub-8-bit edge accelerator. 
+
+Hardware Format Baselines. We evaluate MiX against sub-8-bit industry standards: the OCP-standard MXFP4 [30], its derivative MXINT4, and Nvidia’s NVFP4. Because NVFP4 uses a block size of 16 and an EBW of 4.5b, we additionally extend the two MX formats to MXFP4 g16 and MXINT4 g16 .The corresponding MiX variants are paired with each MX format for direct comparison: MiX-INT4 pairs MiX-4.25b with MXINT4; MiX-FP4 pairs MiX-4.25b with MXFP4, re-spectively, while MiX-INT4 g16 and MiX-FP4 g16 pair MiX-4.5b with MXINT4 g16 and MXFP4 g16 . We group all for-mats into two tiers by EBW: 4.25b and 4.5b. We further compare against two recent outlier-aware 4.5b FP4 baselines: MXFP4+ [35], which repurposes the block-maximum expo-nent field as extended mantissa, and AMXFP4 [36], which applies two asymmetric FP8 block scales. 
+
+Accelerator Baseline. The recently proposed VLM accelera-tor Focus [7] executes on a 32 × 32 FP16 systolic array and achieves its speedup through visual-token sparsity exploitation. We invoke the Focus simulator [7] to obtain its speedup gains across the six benchmarks and overlay these results onto our implemented FP16 systolic baseline, enabling a fair comparison between MiX, vanilla FP16 execution, and the algorithmically optimized Focus accelerator. 
+
+C. Accelerator Specifications 
+
+To ensure fair PPA comparisons, we evaluate every data format on an iso-throughput PE and systolic-array design. All formats are instanced identically as a 4 × 4 array of 32-wide-ingestion PEs delivering 512 MACs per cycle, so every design sustains the same throughput and differs only in its per-format PE datapath. Accelerators for tier 4.5b format takes in 2 blocks per PE to maintain the same 32 MACs per cycle per PE specification as tier 4.25b. The sole exception is the FP16 baseline, which retains a conventional 32 × 32 
+
+multiply-accumulate array normalized to the same 512-MAC throughput. 
+
+D. Hardware Implementation 
+
+All proposed and baseline accelerators are implemented at the Register Transfer Level (RTL) in SystemVerilog and synthesized with Synopsys Design Compiler, targeting the TSMC28HPC technology node at a 500 MHz clock frequency. Power is reported by SAIF annotated simulation with same stimulus to all accelerators. For end-to-end system evaluation, we deploy a custom cycle-level simulator whose latency and active-energy pa-rameters are derived from the RTL synthesis reports. The memory hierarchy reflects a constrained edge environment: each accelerator is equipped with 288 KB of activation SRAM, 288 KB of weight SRAM, and 128 KB of accumulator mem-ory, with area and read/write energy taken from instance-specific manuals generated by the ARM memory compiler. Off-chip memory is modeled with LPDDR5X specification in Ramulator [45]. VI. E VALUATION 
+
+A. End-to-End Multi-Modal Task Accuracy 
+
+To validate the algorithmic fidelity of the proposed co-design, we evaluate six multi-modal benchmarks across three VLMs. Comprehensive results are reported in Table II. 
+
+The Attention Collapse and K-Smoothing Recovery. During initial profiling of Qwen2-VL-7B, we observed catastrophic quantization collapse across all sub-8-bit formats: NVFP4 degraded to an unusable 29.28% on ChartQA, and MXFP4 g16 
+
+collapsed entirely to 0.0%. The same collapse on MiniCPM-V-2.6 and LLaVA-OneVision is observed. Deep profiling traced the failure to the Key matrices in the attention mechanism, whose massive channel-wise bias triggers catastrophic mi-croscaling collapse after quantization and destroys the atten-tion map. To resolve this, we adopt the training-free K-smoothing technique from SageAttention [46]. Because the K outliers manifest as large shared biases across tokens, the matrix can be smoothed by subtracting its token-averaged mean: 
+
+γ(K) = K − mean (K). Since softmax is invariant to constant shifts, σ(qK ⊤ − q · mean (K)) = σ(qK ⊤), leaving the final probability distribution intact. This single transformation fully recovers three models’ accuracy and can be fused into the TABLE II END -TO -END VLM TASK ACCURACY . * DENOTES THE RESULTS ADOPTED FROM PRIOR WORKS .
+
+Method MMMU OCR VW TQA CQA SEED2 Avg. LLaVA-OneVision-7B 
+
+FP16 49.6 62.6 59.8 77.2 80.2 65.0 65.7 
+
+W4A6 / Sparsity-aware / 4.88b 
+
+MBQ* 40.6 48.1 56.3 65.4 71.5 60.0 57.0 TLQ* 41.4 49.8 56.3 65.9 73.0 60.7 57.9 Focus 48.2 34.1 59.8 67.5 59.0 61.2 55.0 
+
+MiX-INT5 44.4 57.5 58.0 74.5 78.1 62.2 62.4 
+
+4.50b 
+
+MXFP4 g16 40.0 48.6 61.3 65.3 71.3 56.4 57.1 
+
+MiX-FP4 g16 42.8 53.4 61.4 68.4 73.8 59.4 59.9 MXINT4 g16 43.8 54.3 58.2 68.8 74.6 60.3 60.0 
+
+MiX-INT4 g16 47.2 56.1 58.3 70.2 76.8 61.2 61.6 NVFP4 45.9 55.3 55.8 71.1 75.6 62.3 61.0 MXFP4+ 46.1 57.6 58.2 71.9 76.5 62.8 62.2 AMXFP4 46.3 59.9 60.1 72.4 77.1 62.0 63.0 
+
+4.25b 
+
+MXFP4 40.2 45.8 61.0 63.4 70.5 56.1 56.2 
+
+MiX-FP4 42.1 48.5 61.3 64.6 72.0 58.8 57.9 MXINT4 38.8 43.9 58.1 61.6 70.3 55.3 54.7 
+
+MiX-INT4 42.6 50.8 57.5 65.9 72.9 60.5 58.4 
+
+Qwen2-VL-7B 
+
+FP16 50.4 83.9 66.2 84.8 83.2 69.3 73.0 
+
+W4A6 / 4.88b 
+
+MBQ* 41.1 65.8 49.8 70.0 70.8 62.3 60.0 TLQ* 41.9 68.4 52.9 69.4 72.2 64.3 61.5 
+
+MiX-INT5 47.6 81.5 65.3 83.2 80.8 66.1 70.8 
+
+4.50b 
+
+MXFP4 g16 44.7 74.5 63.3 79.1 76.5 62.5 66.8 
+
+MiX-FP4 g16 44.7 76.6 65.4 80.5 78.9 64.6 68.4 MXINT4 g16 43.0 74.9 63.9 79.9 78.4 63.2 67.2 
+
+MiX-INT4 g16 46.3 78.1 64.8 81.0 80.5 65.1 69.3 NVFP4 45.0 78.9 68.1 81.6 79.2 65.2 69.7 MXFP4+ 45.1 78.3 66.4 82.3 80.5 66.1 69.8 AMXFP4 46.8 80.0 65.4 82.8 81.6 66.4 70.5 
+
+4.25b 
+
+MXFP4 43.8 72.1 62.3 78.1 76.2 61.1 65.6 
+
+MiX-FP4 44.0 73.6 65.6 78.9 76.9 63.4 67.1 MXINT4 42.3 68.5 62.6 76.5 74.7 58.6 63.9 
+
+MiX-INT4 46.2 73.6 64.8 79.0 77.8 64.3 67.6 
+
+MiniCPM-V-2.6 
+
+FP16 45.7 80.3 72.3 78.5 78.2 61.5 69.4 
+
+Sparsity-aware / 4.88b 
+
+Focus 44.0 40.0 68.7 67.0 38.1 61.2 53.2 
+
+MiX-INT5 43.0 78.0 72.6 77.6 76.0 60.4 67.9 
+
+4.50b 
+
+MXFP4 g16 38.3 72.2 68.3 73.8 73.2 55.6 63.6 
+
+MiX-FP4 g16 40.0 75.9 70.5 75.2 74.7 57.1 65.6 MXINT4 g16 40.2 73.9 71.5 75.2 72.5 60.3 65.6 
+
+MiX-INT4 g16 41.8 74.4 72.7 76.3 73.8 61.9 66.8 NVFP4 38.7 73.0 70.6 76.9 73.4 56.9 64.9 MXFP4+ 42.4 77.7 69.9 76.5 77.1 60.4 67.3 AMXFP4 39.2 77.9 70.2 76.7 75.6 61.0 66.8 
+
+4.25b 
+
+MXFP4 39.0 71.5 68.4 73.3 72.3 56.3 63.5 
+
+MiX-FP4 40.2 73.6 71.3 73.6 74.9 54.9 64.7 MXINT4 37.9 68.2 69.4 72.0 70.1 55.0 62.1 
+
+MiX-INT4 40.3 75.0 71.7 74.5 73.9 59.8 65.9 TABLE III STATIC PREFILL -FROZEN K-MEAN (S TAT ) VS . DYNAMIC FULL -SEQUENCE 
+
+K-MEAN (D YN , THE SCHEME USED IN TABLE II). 
+
+MMMU OCRBench SEED2+ Format Dyn Stat Dyn Stat Dyn Stat 
+
+Qwen2-VL-7B 
+
+MXINT4 g16 43.0 42.8 74.9 74.9 63.2 63.1 
+
+MiX-INT4 g16 46.3 44.6 78.1 76.5 65.1 66.0 MXFP4 g16 44.7 44.8 74.5 73.9 62.5 62.4 NVFP4 45.0 45.7 78.9 76.6 65.2 66.2 
+
+MiniCPM-V-2.6 
+
+MXINT4 g16 40.2 40.2 73.9 73.0 60.3 60.1 
+
+MiX-INT4 g16 41.8 41.3 74.4 74.5 61.9 61.5 MXFP4 g16 38.3 39.7 72.2 73.0 55.6 56.5 NVFP4 38.7 38.0 73.0 73.5 56.9 57.0 
+
+output-channel quantizer with negligible area and latency overhead. Recomputing the running mean over the full sequence at every decode step would force the accelerator to re-read and re-quantize the entire Key cache as the mean drifts. We propose static K-mean: compute the per-channel mean once at prefill, averaging each Key channel over its N prefill tokens, and freeze it in decoding. The flow therefore reduces to an FP32 accumulator that sums each channel, a multiplier by 
+
+1/N , and a single per-channel subtractor that centers each key against the frozen mean. As reported in Table III, this static scheme matches the dynamic full-sequence mean used in Table II across both models and all four formats (mean change below 1 pt, no collapse), and its area and power cost is included in Table V. 
+
+End-to-End Quantization vs. Prior Art. Recent PTQ meth-ods such as MBQ [16] and TLQ [18] quantize only the LLM backbone, leaving the vision encoder and projector in FP16, and reach roughly 60 –61 .5% average accuracy on Qwen2-VL. MiX-INT5 quantizes the entire model end-to-end, achieving 
+
+70 .8% on Qwen2-VL, 67 .9% on MiniCPM-V, and 62 .4% on LLaVA-OneVision, demonstrating that MiX generalizes across distinct VLM architectures. 
+
+The Sub-8-bit Arena. Across both Tier 4.5b and Tier 4.25b, every MiX variant improves over its corresponding MX base-line regardless of model or EBW. MiX-INT4 g16 surpasses MXINT4 g16 by 2.1% on Qwen2-VL, 1.2% on MiniCPM-V, and 1.6% on LLaVA-OneVision. The same pattern holds for MiX-FP4 over MXFP4 across all tiers. This uniform gain con-firms that replacing the shared exponent with per-element ex-ponents universally improves representational fidelity. Against the more expensive NVFP4, MiX-INT4 g16 matches accuracy on Qwen2-VL ( 69 .3% vs. 69 .7% ) and surpasses it by 1.9% on MiniCPM-V and 0.6% on LLaVA-OneVision, while running on a far simpler shifter-based PE datapath. MiX-INT4 g16 
+
+reaches accuracy comparable to the recent outlier-aware FP4 baselines MXFP4+ [35] and AMXFP4 [36] (with ∼ 1 pt on the 4.5b tier), but at markedly less hardware cost: AMXFP4’s two asymmetric FP8 scales make its PE ∼ 2× larger, and TABLE IV FLOOR -VS -CEIL SHARED -EXPONENT FIX FOR MXFP4. M IX-FP4 IS IN SHADED BACKGROUND .                                                    
+
+> Tier 4.25b ( B=32 )Tier 4.5b ( B=16 )
+> Qwen2-VL LLaVA-OV Qwen2-VL LLaVA-OV
+> Format CQA VW CQA VW CQA VW CQA VW MXINT4 74.7 62.6 70.3 58.1 78.4 63.9 74.6 58.2 MXFP4-floor 74.2 61.5 63.8 59.5 72.9 62.1 60.4 59.2 MiX-FP4-floor 76.3 64.4 69.0 56.6 78.6 64.8 70.3 58.7 MXFP4-ceil 76.2 62.3 70.5 61.0 76.5 63.3 71.3 61.3 MiX-FP4-ceil 76.9 65.6 72.0 61.3 78.9 65.4 73.8 61.4
+
+TABLE V AREA AND POWER BREAKDOWN OF THE PROPOSED MIX-INT4 g16 28 NM ACCELERATOR OPERATING AT 500 MH Z. A DESIGN THAT THE PE WITH NATURAL BLOCK SIZE 16 (16 MAC S/PE/ CYCLE ) IS REPORTED IN THIS TABLE . A REA AND POWER ARE SYNTHESIS RESULTS .
+
+Component Area ( μm 2) Power (mW) 
+
+1024-MAC Systolic Array 130118 40.4 Quantizer 2540 0.795 K-Smoother 6258 1.8 SRAM (704KB) 1715664 56.8 
+
+Total 1854580 99.795 
+
+MXFP4+ is likewise less PE-efficient than MiX, so MiX delivers the similar accuracy at higher hardware efficiency. 
+
+Focus vs. MiX: Sparsity Breaks on Text-Rich VLM Work-loads. We additionally evaluate Focus [7] on the same six benchmarks under its authors’ default sparsity-pruning con-figuration. On benchmarks dominated by spatial redundancy (SEED-Bench-2+, VizWiz, MMMU 1), Focus loses at most 
+
+3.8 pts. However, on text-rich workloads where every glyph patch is semantically unique, the same configuration deletes 
+
+∼ 96% of the visual signal, collapsing ChartQA by 21 –40 pts and OCRBench by 28 –40 pts across LLaVA-OneVision-7B and MiniCPM-V-2.6, dragging MiniCPM-V’s six-task average down to 53 .2% (−16 .2 pts vs. FP16). MiX, by contrast, dominates Focus on document and chart benchmarks while preserving comparable accuracy on spatial-redundancy work-loads. 
+
+The MXFP4 Anomaly. Vanilla MXFP4 unexpectedly under-performs MXINT4 across both tiers. We trace this to the OCP spec’s floor -based shared exponent: with E2M1 elements (max 
+
+= 6 .0) and an E8M0 power-of-two scale, ⌊log 2(max |x|)⌋
+
+leaves the post-shared-exp block max in [4 , 8) , but [6 , 8) is un-representable, silently clipping the largest element in roughly 
+
+40% of blocks. Table IV reports three findings after replacing 
+
+⌊·⌋ with ⌈·⌉ . (i) The fix is large : MXFP4 ChartQA accuracy jumps by up to +10 .9 pts (LLaVA-OneVision MXFP4 g16 ). (ii) Block size selects INT vs. FP-ceil : at 4.25b ( B=32 ), MXFP4-ceil’s wider per-element range generally beats MXINT4 (e.g., 
+
++2 .9 pts on LLaVA VizWiz); at 4.5b ( B=16 ), the smaller block already constrains the intra-block range and uniform-grid MXINT4 g16 wins instead (e.g., +3 .3 pts on LLaVA 
+
+> 1
+
+Focus supports only the single-image subset of MMMU. The accuracy is normalized by the subset size. TABLE VI RTL SYNTHESIS RESULTS (28 NM , 500MH Z) OF THE ISO -THROUGHPUT 
+
+512-MAC SYSTOLIC ARRAYS . P OWER IS SAIF-ANNOTATED .                                                           
+
+> Architecture Area Power Area Eff. Power Eff.
+> (μm 2)(mW) (TOPS/mm 2)(TOPS/W) FP16 Baseline 734236 275.8 0.7 1.9 INT8 Baseline 95843 61.4 5.3 8.3
+> Tier 4.5b
+> MXINT4 g16 56668 34.2 9.0 15.0 MXFP4 g16 57422 33.9 8.9 15.1 MXFP4+ 58394 32.5 8.8 15.8 AMXFP4 115380 47.7 4.4 10.7 NVFP4 70391 36.5 7.3 14.0
+> MiX-INT4 g16 56125 31.8 9.1 16.1 MiX-FP4 g16 65458 37.1 7.8 13.8 Tier 4.25b
+> MXINT4 47336 28.4 10.8 18.0 MXFP4 50416 29.5 10.2 17.4
+> MiX-INT4 46407 26.8 11.0 19.1 MiX-FP4 51998 28.5 9.8 18.0
+
+ChartQA). (iii) MiX is additive on top of the fix : MiX-FP4-ceil still beats MXFP4-ceil at every operating point by up to 3.3 pts, confirming that MiX’s per-element exponents capture a representational gain independent of, and additive with, the OCP spec correction. We consistently report MXFP4-ceil results for MXFP4 format in all tables. 
+
+B. Hardware Efficiency 
+
+Table V presents the area and power breakdown of the proposed MiX-INT4 g16 accelerator. The 1024-MAC systolic array dominates compute at 130118 μm 2 and 40 .4 mW, while the dual-format quantizer adds only 2540 μm 2 (1.9% of the array area) and 0.795 mW. The K-Smoother is universal to all format and costs 6258 μm 2 and 1.8 mW. The 704 KB SRAM accounts for the majority of total system area and 56 .9% of total system power, consistent with memory-dominated edge accelerator designs. The complete microarchitectural comparison against base-line formats appears in Table VI. The table includes only the compute units, omitting peripheral components such as memory and quantizer, since the compute units dominate area and power while the memory hierarchy is held constant across all configurations. 
+
+Tier 4.5b. At iso-throughput, MiX-INT4 g16 matches the footprint of MXINT4 g16 (56125 vs. 56668 μm 2), with near-identical area efficiency ( 9.1 vs. 9.0 TOPS/mm 2) and higher power efficiency ( 16 .1 vs. 15 .0 TOPS/W). Against NVFP4, MiX-INT4 g16 is 25% more area-efficient and 15% more power-efficient ( 9.1 vs. 7.3 and 16 .1 vs. 14 .0, respectively) at equal or better task accuracy. The per-element exponent logic therefore adds negligible hardware cost over standard microscaling while substantially closing the accuracy gap to NVFP4’s far more expensive two-level scaling architecture. The two outlier aware FP4 baselines are costlier in silicon: AMXFP4 carries two FP8 block scales that roughly double its PE area, dropping it to 4.4 TOPS/mm 2 and 10 .7 TOPS/W, while MXFP4+ adds block maximum extra metadata at 8.80510 15  
+
+> Speedup
+> 1.00 × 5.68 ×
+> 4.32 ×
+> 8.40 ×
+> 9.51 ×
+> 5.85 ×
+> 9.77 ×
+> 11.29 ×
+> 1.00 × 4.79 ×
+> 1.94 × 7.55 ×
+> 8.04 ×
+> 5.43 ×
+> 8.09 ×
+> 8.72 ×
+> 0.0 0.1 0.2 0.3 0.4
+> Norm. Energy
+> 0.271 ×
+> 0.232 ×
+> 0.162 ×
+> 0.161 ×
+> 0.165 ×
+> 0.160 ×
+> 0.152 ×
+> FP16 INT8 Focus NVFP4 MXFP4+ AMXFP4 MiX-INT4 g16
+> MiX-INT4
+> ChartQA
+> FP16 INT8 Focus NVFP4 MXFP4+ AMXFP4 MiX-INT4 g16
+> MiX-INT4
+> TextVQA
+> FP16 INT8 Focus NVFP4 MXFP4+ AMXFP4 MiX-INT4 g16
+> MiX-INT4
+> VizWiz
+> FP16 INT8 Focus NVFP4 MXFP4+ AMXFP4 MiX-INT4 g16
+> MiX-INT4
+> OCRBench FP16 INT8 Focus NVFP4 MXFP4+ AMXFP4 MiX-INT4 g16
+> MiX-INT4
+> MMMU
+> FP16 INT8 Focus NVFP4 MXFP4+ AMXFP4 MiX-INT4 g16
+> MiX-INT4
+> SEED2+
+> FP16 INT8 Focus NVFP4 MXFP4+ AMXFP4 MiX-INT4 g16
+> MiX-INT4
+> Mean
+
+(a) LLaVA-OneVision  
+
+> 1.000 ×
+> 1.000 ×
+> 1.000 ×
+> 1.000 ×
+> 1.000 ×
+> 1.000 ×
+> 1.000 ×
+> 0.324 ×
+> 0.189 ×
+> 0.189 ×
+> 0.192 ×
+> 0.188 ×
+> 0.178 ×
+> FP16 INT8 Focus NVFP4 MXFP4+ AMXFP4 MiX-INT4 g16
+> MiX-INT4
+> ChartQA
+> FP16 INT8 Focus NVFP4 MXFP4+ AMXFP4 MiX-INT4 g16
+> MiX-INT4
+> TextVQA
+> FP16 INT8 Focus NVFP4 MXFP4+ AMXFP4 MiX-INT4 g16
+> MiX-INT4
+> VizWiz
+> FP16 INT8 Focus NVFP4 MXFP4+ AMXFP4 MiX-INT4 g16
+> MiX-INT4
+> OCRBench FP16 INT8 Focus NVFP4 MXFP4+ AMXFP4 MiX-INT4 g16
+> MiX-INT4
+> MMMU
+> FP16 INT8 Focus NVFP4 MXFP4+ AMXFP4 MiX-INT4 g16
+> MiX-INT4
+> SEED2+
+> FP16 INT8 Focus NVFP4 MXFP4+ AMXFP4 MiX-INT4 g16
+> MiX-INT4
+> Mean
+
+(b) MiniCPM-V-2.6                  
+
+> 1.000 ×
+> 1.000 ×
+> 1.000 ×
+> 1.000 ×
+> 1.000 ×
+> 1.000 ×
+> 0.687 ×
+> 0.685 ×
+> 0.685 ×
+> 1.000 ×
+> 0.515 ×
+> FP16 INT8 Focus NVFP4 MXFP4+ AMXFP4 MiX-INT4 g16 MiX-INT4 FP16 INT8 Focus NVFP4 MXFP4+ AMXFP4 MiX-INT4 g16 MiX-INT4 Core SRAM DRAM
+
+Fig. 9. Iso-area speedup and normalized energy breakdown. MMMU is run to its 128-token generation cap (chain-of-thought, memory-bound). The other benchmarks use their typical short generation (1–2 tokens, compute-bound). Mean is the geomean over all six benchmarks. 
+
+TOPS/mm 2 and 15 .8 TOPS/W. MiX-INT4 g16 stays more efficient than both on area and power, reaching comparable accuracy at lower hardware cost. 
+
+Tier 4.25b. At Tier 4.25b, MiX-INT4 achieves the best area efficiency ( 11 .0 TOPS/mm 2) and the best power efficiency (19 .1 TOPS/W), simultaneously improving both metrics over the standard MXINT4 baseline while boosting average task accuracy by 3.7 pts on Qwen2-VL. For the MiX-FP4 config-uration, a marginal 3.9% decrease in area efficiency yields a 1.5 pt accuracy gain over MXFP4. Across Tier 4.25b, the MiX overhead is consistently bounded: the per-element exponent shifters add at most 4% area-efficiency cost relative to the MX baselines, making MiX a drop-in upgrade with substantial accuracy returns. 
+
+C. Speedup and Energy 
+
+Figure 9 reports iso-area speedup and normalized energy on LLaVA-OneVision-7B and MiniCPM-V-2.6 across six bench-marks, with MMMU evaluated at its 128-token generation cap to represent long-form chain-of-thought inference. We compare MiX against FP16, INT8, NVFP4, the FP4 outlier-aware baselines MXFP4+ and AMXFP4, and the recent VLM accelerator Focus .
+
+The Iso-Area Evaluation Framework. A naive cycle-count comparison at identical raw throughput misrepresents architec-tural efficiency, since Tier 4.5b PEs are 6–13 × smaller than FP16 (Section VI-B). We therefore evaluate latency under an 
+
+iso-area constraint : each format is allocated PEs in proportion to its area savings, scaling compute cycles per layer down accordingly, while DRAM cycles remain bounded by the system memory bandwidth. Per-layer latency is the maximum of the scaled compute and DRAM cycles. 
+
+End-to-End Speedup: Compute- vs. Memory-Bound. 
+
+Short-answer benchmarks generate only 1–2 tokens, so in-ference is dominated by the vision encoder and prefill and is compute-bound. There, MiX’s denser shifter-based PEs convert directly into iso-area throughput, reaching up to 13 .1×
+
+(MiX-INT4 g16 ) and 15 .8× (MiX-INT4) over FP16 on LLaVA-OneVision. When MMMU is run to its 128-token cap (chain-of-thought), the decode phase re-reads all weights every step and the workload turns DRAM-bandwidth-bound, so every 4-bit format converges to the data-movement limit ( ∼ 3.8×)regardless of PE size. Averaged across the six benchmarks, MiX-INT4 g16 reaches 9.77 × on LLaVA-OneVision and 8.09 ×
+
+on MiniCPM-V, ahead of NVFP4 ( 8.40 ×, 7.55 ×), MXFP4+ (9.51 ×, 8.04 ×), and AMXFP4 ( 5.85 ×, 5.43 ×), whose 2×
+
+larger dual-scale PE makes it the slowest 4-bit format. On the compute-bound short-generation benchmarks its throughput (6.36 ×) falls below even INT8 ( 7.66 ×). The Tier 4.25b MiX-INT4, with the smallest PE, is highest at 11 .29 × and 8.72 ×.
+
+Comparison with Focus. Focus achieves speedup by pruning visual tokens before they reach the LLM, but its gains are bounded by how many vision tokens the model produces in the first place. On LLaVA-OneVision (729 vision tokens per image), Focus reaches an average 4.32 × speedup at 
+
+0.232 × normalized energy. On MiniCPM-V-2.6, whose Q-former resampler already compresses each image slice to only 64 tokens, Focus has far less redundancy to exploit and collapses to a 1.94 × average speedup at 0.515 × normalized energy, worse than even the INT8 baseline. By contrast, MiX is a hardware/format attack orthogonal to token count, and its 
+
+8–11 × speedup is consistent across both architectures, making MiX a strict win on compact-token VLMs where algorithm-50 75 100 125 150 175 200 225    
+
+> Better
+> Composite PE Efficiency (TOPs/mm 2×TOPs/W)
+> 58 60 62 64 66 68 70
+> Avg. Accuracy (%) Better
+> PE-Efficiency Pareto Frontier
+> INT8 AMXFP4 NVFP4 MXFP4+ MXFP4 g16
+> MiX-FP4 g16
+> MXINT4 g16
+> MiX-INT4 g16
+> MiX-INT5 MXFP4 MiX-FP4 MXINT4 MiX-INT4
+> MiX (Ours) Baseline Pareto frontier Fig. 10. PE-efficiency Pareto frontier across thirteen formats. The dashed line marks the Pareto frontier.
+
+level token pruning is structurally limited. 
+
+End-to-End Energy. DRAM traffic dominates total energy. By compressing 16-bit operands to ∼4 bits, every 4-bit for-mat cuts memory energy by 5.3×–6.3×. MiX additionally reduces core energy by replacing FP multipliers with shifters. The combined effect places MiX-INT4 g16 at ∼ 0.160 × FP16 energy on LLaVA-OneVision and ∼ 0.188 × on MiniCPM-V, and MiX-INT4 at ∼ 0.152 × and ∼ 0.178 ×, the lowest of any format in either panel, a 5.6–6.6× end-to-end energy reduction over FP16 and the best energy and area balance in the sub-8-bit arena. 
+
+D. The PPA-Accuracy Pareto Frontier 
+
+Figure 10 presents a PE-level Pareto frontier that decouples the format contribution from the memory hierarchy. The x-axis is a single composite metric, TOPS/mm 2 × TOPS/W, used for two reasons. First, it rewards a format only when it is both area efficient and power efficient. Second, every format here is either 4.5b or 4.25b, so all share a similar EBW and hence a similar memory footprint and DRAM traffic. Because DRAM access dominates and hides the PE efficiency differences in the energy panel of Figure 9, this composite metric exposes the intrinsic PE area and power advantage that the bandwidth-bound energy numbers mask. The y-axis is the average accuracy across six VLM benchmarks (ChartQA, TextVQA, VizWiz, OCRBench, MMMU, SEED-Bench-2+) and two models (Qwen2-VL-7B and LLaVA-OneVision-7B). We additionally plot INT8 (assumed lossless). Focus is not included because of its severe accuracy drop, limited energy reduction, and model-architecture-dependent speedup gain. 
+
+MiX defines the efficient frontier. The two most accu-rate formats, INT8 ( 69 .3% ) and AMXFP4 ( 66 .8% ), sit at a composite efficiency below 50 , since INT8 uses 8 bits and AMXFP4’s two FP8 scales make its PE 2× larger, so neither suits efficient sub-8b deployment. In the high-efficiency region (composite above 100 ), MiX dominates: MiX-INT4 g16 reaches                                                                         
+
+> TABLE VII MODEL -SIZE SCALING ON THE QWEN 2.5-VL FAMILY (3B–72B).
+> Model Method MMMU OCR SEED2 Avg.
+> Qwen2.5-VL-3B FP16 46.4 80.3 67.0 64.6 MXFP4 39.4 68.8 57.9 55.4 NVFP4 41.2 70.3 59.4 57.0
+> MiX-INT4 g16 38.7 69.7 61.5 56.6 Qwen2.5-VL-7B FP16 42.4 87.0 71.3 66.9 MXFP4 37.1 79.0 63.5 59.9 NVFP4 38.3 81.5 68.0 62.6
+> MiX-INT4 g16 38.6 80.8 69.1 62.8 Qwen2.5-VL-32B FP16 43.3 81.1 71.9 65.4 MXFP4 40.9 71.8 67.7 60.1 NVFP4 39.2 76.7 70.2 62.0
+> MiX-INT4 g16 41.9 76.3 70.8 63.0 Qwen2.5-VL-72B FP16 61.9 86.6 73.0 73.8 MXFP4 58.3 81.7 70.5 70.2 NVFP4 53.7 81.9 71.6 69.1
+> MiX-INT4 g16 58.8 83.8 71.9 71.5
+
+147 at 65 .5% , dominating NVFP4 ( 102 , 65 .3% ) on both axes (a 44% efficiency gain at higher accuracy), and MiX-INT5 lifts accuracy to 66 .6% . The Tier 4.25b MiX-INT4 extends the frontier rightward to 211 (2.1× NVFP4), the most area and power efficient point in the comparison. The only baseline reaching the frontier alongside MiX is MXFP4+ ( 138 , 66 .0% ), which MiX-INT4 g16 trades for higher efficiency at comparable accuracy. Every other format, including NVFP4 and the MX baselines, sits inside it, confirming that per-element exponents improve accuracy and PE efficiency together. 
+
+E. Scaling and Generalization 
+
+Scaling across model size. Table VII sweeps Qwen2.5-VL from 3B to 72B on MMMU, OCRBench, and SEED-Bench-2+, one benchmark per category (reasoning, text-rich, percep-tion). The MiX-INT4 g16 gap to FP16 shrinks monotonically with scale ( 8.0, 4.1, 2.4, 2.3 points at 3B, 7B, 32B, 72B), and MiX-INT4 g16 overtakes NVFP4 beyond 3B, leading by 
+
+0.2, 1.0, and 2.4 points at 7B, 32B, and 72B while beating MXFP4 at every size. MiX thus scales favorably, matching or surpassing NVFP4 at the larger, deployment-relevant sizes on a far cheaper shifter-based PE. 
+
+Generalizing across modality. Table VIII applies the same recipe to four text-only LLMs (Llama-3.1-8B, Mistral-7B-v0.3, Qwen2.5-7B/14B) on three reasoning tasks (ARC-Challenge, HellaSwag, WinoGrande) and two perplex-ity corpora (WikiText, C4), comparing the matched 4.5b MiX-INT4 g16 and NVFP4. MiX is weaker here than on VLMs yet remains close: across the reasoning tasks it trails NVFP4 by 1.3–1.7 points on Mistral and Qwen2.5 and is marginally ahead on Llama-3.1-8B. The gap is task dependent, largest on ARC-Challenge ( 3–4 points) while WinoGrande favors MiX-INT4 g16 (up to 3.8 points on Llama-3.1-8B). This follows from MiX’s design: per-element exponents absorb outliers at a small precision cost, aiding range-heavy tasks and penalizing precision-heavy ones. With its efficiency and TABLE VIII TEXT -ONLY LLM GENERALIZATION ACROSS FOUR MODELS : REASONING ACCURACY (%) AND PERPLEXITY (↓, LOWER IS BETTER ).                                                                   
+
+> Model Method ARC-c HellaS. WinoG. Wiki ↓C4 ↓
+> Llama-3.1-8B FP16 53.5 79.1 73.6 6.14 8.95 NVFP4 45.6 74.5 62.7 7.94 11.63
+> MiX-INT4 g16 46.0 71.3 66.5 8.93 12.85 Mistral-7B-v0.3 FP16 52.4 80.5 73.8 5.24 7.84 NVFP4 50.5 78.9 68.7 5.75 8.47
+> MiX-INT4 g16 47.4 78.2 68.3 5.96 8.72 Qwen2.5-7B FP16 51.5 78.9 72.9 6.72 10.44 NVFP4 51.3 76.9 66.0 7.67 11.51
+> MiX-INT4 g16 47.2 75.7 67.3 7.90 11.77 Qwen2.5-14B FP16 59.0 83.1 75.2 5.18 9.15 NVFP4 54.9 80.3 70.6 6.25 10.05
+> MiX-INT4 g16 51.6 78.6 70.4 6.62 10.31
+
+strong VLM accuracy, MiX remains a sound choice for edge VLM acceleration. VII. R ELATED WORK 
+
+Quantization for LLMs and VLMs. LLM post-training quantization targets unimodal models: weight-only schemes (GPTQ [11], AWQ [20], OmniQuant [12], QuaRot [23], Spin-Quant [22]) push weights below 4 bits, SmoothQuant [21] and its successors [15], [47] migrate activation outliers for W8A8, and QAT methods [48], [49] recover accuracy at calibration cost. VLM-specific work then tackles the cross-modal range gap, where vision tokens, language tokens, and projector acti-vations occupy markedly different dynamic ranges and a single calibration set is rarely sufficient: MBQ [16] balances the vision and text calibration objectives, Q-VLM [17] searches cross-layer mixed precision, MQuant [25] adds token-aware scales for the unbalanced visual stream, and TLQ [18], P4Q [24], and VEQ [19] target the projector or the vision encoder in isolation. All of these restrict quantization to the linear layers and tune only the most sensitive components, leaving the projector and the attention BMMs in FP16. 
+
+Custom-Datatype and Bit-serial Accelerators. Several ac-celerators specialize their PEs for non-uniform data types. ANT [29] adapts the per-group integer or floating-point rep-resentation to the value distribution, OliVe [28] pairs each outlier with a victim element, M-ANT [27] extends ANT to mixed-precision attention, and BitMoD [26] mixes per-group FP4/FP3 types under a unified bit-serial PE. Bit-serial designs (Stripes [50], Bit-Pragmatic [51], FPRaker [52], BitWave [53]) trade latency for bit-level sparsity but still pay the area cost of variable-precision multipliers or wide accumulators, and outlier-aware accelerators such as OLAccel [54] and Adap-tivFloat [55] likewise retain a multiplier-centric datapath. 
+
+Sparsity and Token-Reduction Accelerators. A complemen-tary line attacks the activation memory wall through sparsity. SpAtten [8] cascades token and head pruning, while LAD [56], DOTA [57], A 3 [58], and Sanger [59] exploit dynamic attention or KV-cache sparsity. On the vision side, HeatViT [9] and AdapTiV [10] prune or merge visual tokens via attention scores or sign-bit similarity. The work targeting the same VLMs is Focus [7], which builds a streaming multilevel con-centration unit on an FP16 systolic array to remove redundant vision tokens and therefore reduce computation loads. This leaves per-element compute and the FP16 weight footprint un-changed, so their gains collapse on compact-token models such as MiniCPM-V’s 64-token resampler. MiX instead attacks the bit-width and the multiplier directly, delivering uniform gains regardless of token count and dominating Focus on throughput and energy (Section VI-C). 
+
+Microscaling Formats and Outlier Handling. The OCP microscaling standard [30] and NVFP4 [33] share a single exponent per block, which collapses under VLM outliers. Sev-eral recent formats extend MX to tolerate outliers. MXFP4+ [35] repurposes the block-maximum exponent field as an extended mantissa, and AMXFP4 [36] adds two asymmetric FP8 block scales for sign-skewed activations. Both lift ac-curacy at roughly 4.5b but enlarge the per-element datapath. MicroScopiQ [34] keeps outliers at higher precision and prunes the least-important weights to reclaim the extra bits, but relies on multi-precision integer PEs and a dedicated network-on-chip to gather the redistributed outliers. MicroMix [60] mixes MXFP4, MXFP6, and MXFP8 channels under per-element error thresholds, reaching near-FP16 quality at about 5 effective bits, yet targets the Blackwell FP4 Tensor Cores rather than an edge accelerator and pays a higher average bit-width. MiX takes the orthogonal route: it inverts the format so that per-element exponents absorb outliers while the shared mantissa factors into a multiplier-free shifter PE, reaching comparable accuracy at strictly higher PE efficiency without mixed precision, pruning, or nested scales. VIII. C ONCLUSION 
+
+We presented MiX , an micro-inverted-scaling format that closes the multi-modal dynamic-range gap in Vision-Language Models by assigning each element its own exponent while sharing the mantissa across a small sub-group. Paired with MX weights in a dual-format multiplier-less systolic-array PE, MiX matches or surpasses NVFP4 accuracy on three 7B–8B VLMs while improving PE area efficiency by 25% 
+
+and power efficiency by 15% at the same 4.5b effective bit-width. Comparing to the state-of-the-art accelerator Focus ,MiX delivers up to 4.5× speedup and 2.9× energy savings in multi-benchmark multi-model evaluation. MiX therefore dominates microscaling baselines, state-of-the-art accelerators, and algorithm-level quantization approaches on the joint PPA– accuracy frontier, establishing MiX as a hardware-friendly path to end-to-end sub-8-bit VLM deployment. ACKNOWLEDGMENT 
+
+This work was supported in part by NSF grant 2403723, and Center for the Co-Design of Cognitive Systems (CoCoSys) and ACE Center for Evolvable Computing under JUMP 2.0, an SRC program sponsored by DARPA.. ARTIFACT APPENDIX 
+
+A. Abstract 
+
+This artifact reproduces every software and hardware result of MiX. It is a single repository with three self-contained parts: (i) accuracy : the MiX / MX / NVFP4 quantization code, per-benchmark YAML configs, and evaluation scripts that reproduce the VLM and LLM accuracy Tables II, III, IV, VII and VIII; (ii) hardware_rtl : SystemVerilog RTL, self-checking testbenches, and Synopsys Design Compiler and SAIF-power scripts for 15 systolic-array datapaths to-gether with the MiX/MX quantizer and the K-smoother, reproducing the area and power in Tables V and VI; and (iii) hardware_model : a standalone analytical energy/area simulator that reproduces Figures 9 and 10. Accuracy results are not provided, and the hardware result is summarized in a reference CSV. Part 1 needs one CUDA GPU sized to the model (a 48 GB RTX A6000 up to 14B, and a 180 GB B200 at 32B and 72B), Part 2 an x86-64 Linux host, and Part 3 a CPU. Parts 1 and 3 use open-source Python (PyTorch for Part 1; NumPy and Matplotlib for Part 3), while Part 2 requires the proprietary Synopsys Design Compiler and VCS with a TSMC 28 nm standard-cell library. 
+
+B. Artifact check-list (meta-information)                                                   
+
+> •Algorithm: post-training quantization (PTQ) of VLMs and LLMs with the schemes in src/quantization (MiX, MX-INT4, MXFP4, NVFP4, AMXFP4, MX+).
+> •Program: PyTorch (PTQ and evaluation); SystemVerilog RTL; a Python analytical hardware model.
+> •Model (HuggingFace): VLMs LLaVA-OneVision-7B, Qwen2-VL-7B, MiniCPM-V-2.6, Qwen2.5-VL 3B/7B/32B/72B; LLMs Llama-3.1-8B, Mistral-7B-v0.3, Qwen2.5-7B, Qwen2.5-14B.
+> •Data set: VLM benchmarks (ChartQA, MMMU, OCRBench, SEED-Bench-2+, TextVQA, VizWiz) and LLM tasks (ARC-Challenge, HellaSwag, WinoGrande, WikiText, C4), down-loaded automatically from HuggingFace.
+> •Run-time environment: Linux with CUDA 12.x (Part 1); Synopsys EDA (Part 2); any Python 3 (Part 3).
+> •Hardware: one GPU sized to the model —a48 GB RTX A6000 up to 14 B, a 180 GB B200 at 32 B and 72 B (an 80 GB A100 is not sufficient at 32 B); a commercial-EDA host; a CPU.
+> •Metrics: task accuracy and perplexity; cell area ( μm2), SAIF power (mW), and efficiency (FLOPs/mm 2, FLOPs/mW); iso-area speedup and energy.
+> •Output: (Part 1) model accuracy for every quantization scheme; (Part 2) area and power of each systolic-array datapath; (Part 3) analytical energy and speedup per format, derived from the Part 2 power numbers.
+> •Experiments: YAML-driven accuracy runs; per-design synthe-sis and SAIF power; analytical simulator scripts.
+> •Disk space (approx.): about 50 GB per 7 to 8 B model with its datasets; up to about 1 TB for the full 3B to 72B sweep.
+> •Workflow preparation time (approx.): about 1 hour (environ-ment plus first model and dataset download).
+> •Experiment completion time (approx.): about one week on 8×A6000 for the main sweep, plus about two days on a B200 for the 32B and 72B models.
+> •Publicly available?: Yes.
+> •Archived (DOI): https://doi.org/10.5281/zenodo.21530344
+> •Code licenses: MIT (software and RTL).
+> •Workflow automation framework used?: GNU Make (syn-thesis); shell and YAML (evaluation).
+
+C. Description 1) How to access: The artifact is archived on Zenodo at https://doi.org/10.5281/zenodo.21530344: three top-level di-rectories (one per part), a top-level README.md , and a
+
+dependency.md that lists all hardware, software, model, and data requirements. 
+
+2) Hardware dependencies: Part 1 needs one CUDA GPU. VRAM scales with model size because PTQ inflates each layer to FP32 before re-casting to FP16. An RTX A6000 (48 GB) covers every model up to 14 B (measured peak ≈33.5 GB for Qwen2.5-14B); a B200 (180 GB) is needed at 32 B and 72 B. At 72 B the FP32 conversion also needs up to ∼500 GB system RAM. Part 2 needs an x86-64 host running the Synopsys tools (no GPU/FPGA). Part 3 is CPU-only. 
+
+3) Software dependencies: Part 1 uses conda with Python 3.10 and pip install -r requirements.txt (torch 2.3.0 for CUDA 12.1, 
+
+transformers 4.57.6, timm , and datasets ), all open-source. Part 2 requires the proprietary Synopsys Design Compiler and VCS, plus a 28 nm standard-cell .db /.v library (the paper used TSMC tcbn28hpcplusbwp30p140 ). Part 3 uses Python with only NumPy and Matplotlib. 
+
+4) Data sets: The VLM benchmarks, the LLM tasks, and the calibration data ( lmms-lab/POPE , which embeds COCO images, for the VLMs, and Pile for the LLMs) are downloaded automatically from HuggingFace on the first run. Part 2 ships its own testbenches, which generate their stimulus internally, so it needs no external data. Part 3 consumes the data generated by Parts 1 and 2, namely the accuracy 
+
+table2.json and the area and power CSV. 
+
+5) Models: All models are pulled from HuggingFace (exact IDs in dependency.md ). meta-llama/Llama-3.1-8B 
+
+is gated and MiniCPM-V-2.6 needs remote-code trust. 
+
+D. Installation 
+
+A single environment serves the accuracy pipeline (Part 1) and the analytical model (Part 3), and neither requires a build step: 
+
+conda create -n mix python=3.10 -y conda activate mix pip install -r requirements.txt 
+
+Model weights and datasets are not installed by hand. They are fetched from HuggingFace on first use, so set an HF_TOKEN 
+
+and accept the Llama license beforehand. Part 2 needs no installation beyond a licensed Synopsys toolchain: edit the single SITE CONFIGURATION block at the top of each syn/<Design>/syn.tcl and of the power_saif/ 
+
+scripts to point at your 28 nm timing library and its Verilog simulation model. E. Experiment workflow 1) Part 1 (accuracy).: Every entry in Tables II to VIII cor-responds to one YAML file under config/ , whose directory name selects the model and the quantization scheme. A run loads the model, applies PTQ with that scheme, calibrates on a small activation set, and evaluates one benchmark: 
+
+python vlm/qwen2vl.py \--config_dir <vlm_config>.yaml python llm/multiple_choice.py \--config_dir <llm_config>.yaml 
+
+Each run writes a JSON result under accuracy_result/ ,and generate_table2_json.py aggregates these into Table II. The VLM sweep spans six benchmarks (MMMU, OCRBench, VizWiz, TextVQA, ChartQA, SEED-Bench-2+) and the LLM sweep five tasks. Calibration draws 128 COCO images for the VLMs and 2,048 Pile segments for the LLMs, and a shell loop over config/ reproduces an entire table. 
+
+2) Part 2 (RTL).: For each of the 15 systolic-array datap-aths, make syn runs Design Compiler for area and timing, and power_saif/run_all.sh obtains SAIF-annotated power from a gate-level simulation with random stimulus; 
+
+update_csv.py collects these into the iso-512 per-format table (Table VI). The accelerator breakdown in Table Vadditionally synthesizes the quantizer and the K-smoother (syn/quantizer , syn/k_smoother ) beside the systolic array. 
+
+3) Part 3 (model).: mix_simulator.main evaluates each workload using the Part 2 area and power numbers; 
+
+plot_fig9 produces Figure 9 and pareto.gen_fig10 
+
+produces Figure 10. 
+
+F. Evaluation and expected results 
+
+Part 1 reproduces the reported task accuracy. Representative points are Qwen2-VL-7B on ChartQA (NVFP4 = 79 .2,MiX-4.5b = 80 .5) and Qwen2.5-7B under MiX-4.5b (ARC-Challenge acc norm = 47 .2, WikiText perplexity = 7 .90 ). Decoding is greedy, so results are deterministic within a fixed software environment. At most a 0.1-point difference may appear across library versions on borderline samples. Fur-ther ChartQA reference points are LLaVA-OneVision-7B and MiniCPM-V-2.6 under NVFP4 (75.6 and 73.4) and Qwen2-VL-7B under AMXFP4 and MiX-4.25b (81.6 and 77.8). Part 2 reproduces the area and power in Tables V and VI. The absolute numbers track the standard-cell library, but the ordering across formats, which is the claim of the paper, is preserved. Every testbench also prints PASS to confirm that the datapath computes the correct block dot product. Part 3 regenerates Figures 9 and 10. Because it derives speedup and energy from the Part 2 power and the Part 1 accuracy, it closes the loop without a GPU. 
+
+G. Experiment customization 
+
+Every accuracy run is driven by its YAML file: the wqtype 
+
+and xqtype fields choose the weight and activation schemes, while the block size, mantissa group, and calibration budget are set beside them, so a new operating point needs no code change. A genuinely new format is added by implementing a quantizer in src/quantization and registering it. New models are registered in src/models/auto_map.py . On the hardware side each format is a self-contained directory under src/systolic_arrays with a matching syn and 
+
+power_saif pair, so an additional datapath is dropped in and picked up by the same Make flow. 
+
+H. Notes 
+
+The three parts are coupled only through generated data: Figure 10 reads the Part 1 accuracy, so build table2.json 
+
+first and copy it under hardware_model/ before running Part 3. 
+
+I. Methodology 
+
+Submission, reviewing and badging methodology:  
+
+> •
+
+https://www.acm.org/publications/policies/ artifact-review-and-badging-current  
+
+> •
+
+https://cTuning.org/ae REFERENCES [1] H. Liu, C. Li, Q. Wu, and Y. J. Lee, “Visual instruction tuning,” in Annual Conference on Neural Information Processing Systems (NeurIPS) , 2023, pp. 34 892–34 916. [On-line]. Available: https://proceedings.neurips.cc/paper files/paper/2023/ file/6dcf277ea32ce3288914faf369fe6de0-Paper-Conference.pdf [2] Z. Chen, J. Wu, W. Wang, W. Su, G. Chen, S. Xing, M. Zhong, Q. Zhang, X. Zhu, L. Lu, B. Li, P. Luo, T. Lu, Y. Qiao, and J. Dai, “Internvl: Scaling up vision foundation models and aligning for generic visual-linguistic tasks,” in IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , June 2024, pp. 24 185–24 198. [3] X. Yue, Y. Ni, K. Zhang, T. Zheng, R. Liu, G. Zhang, S. Stevens, D. Jiang, W. Ren, Y. Sun, C. Wei, B. Yu, R. Yuan, R. Sun, M. Yin, B. Zheng, Z. Yang, Y. Liu, W. Huang, H. Sun, Y. Su, and W. Chen, “Mmmu: A massive multi-discipline multimodal understanding and reasoning benchmark for expert agi,” in IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , 2024. [4] A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N. Gomez, L. Kaiser, and I. Polosukhin, “Attention is all you need,” in Annual Conference on Neural Information Processing Systems (NeurIPS) , 2017, p. 6000–6010. [5] W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. Gonzalez, H. Zhang, and I. Stoica, “Efficient memory management for large language model serving with pagedattention,” in ACM Symposium on Operating Systems Principles , 2023, p. 611–626. [Online]. Available: https://doi.org/10.1145/3600006.3613165 [6] Z. Zhang, Y. Sheng, T. Zhou, T. Chen, L. Zheng, R. Cai, Z. Song, Y. Tian, C. R´ e, C. Barrett, Z. A. Wang, and B. Chen, “H2o: Heavy-hitter oracle for efficient generative inference of large language models,” in Annual Conference on Neural Information Processing Systems (NeurIPS) , 2023, pp. 34 661–34 710. [Online]. Available: https://proceedings.neurips.cc/paper files/paper/ 2023/file/6ceefa7b15572587b78ecfcebb2827f8-Paper-Conference.pdf [7] C. Wei, C. Guo, J. Zhang, H. Shan, Y. Xu, Z. Zhang, Y. Liu, Q. Wang, C. Zhou, H. H. Li, and Y. Chen, “Focus: A streaming concentration architecture for efficient vision-language models,” in IEEE International Symposium on High Performance Computer Architecture (HPCA) , 2026, pp. 1–18. [8] H. Wang, Z. Zhang, and S. Han, “ SpAtten: Efficient Sparse Attention Architecture with Cascade Token and Head Pruning,” in IEEE Interna-tional Symposium on High-Performance Computer Architecture (HPCA) ,Mar. 2021, pp. 97–110. [9] P. Dong, M. Sun, A. Lu, Y. Xie, K. Liu, Z. Kong, X. Meng, Z. Li, X. Lin, Z. Fang, and Y. Wang, “Heatvit: Hardware-efficient adaptive token pruning for vision transformers,” in IEEE International Symposium on High-Performance Computer Architecture (HPCA) , 2023, pp. 442–455. [10] S. Yoo, H. Kim, and J.-Y. Kim, “Adaptiv: Sign-similarity based image-adaptive token merging for vision transformer acceleration,” in 
+
+IEEE/ACM International Symposium on Microarchitecture (MICRO) ,2024, pp. 64–77. [11] E. Frantar, S. Ashkboos, T. Hoefler, and D. Alistarh, “Gptq: Accurate post-training quantization for generative pre-trained transformers,” 2023. [Online]. Available: https://arxiv.org/abs/2210.17323 [12] W. Shao, M. Chen, Z. Zhang, P. Xu, L. Zhao, Z. Li, K. Zhang, P. Gao, Y. Qiao, and P. Luo, “Omniquant: Omnidirectionally calibrated quantization for large language models,” in International Conference on Learning Representations (ICLR) , 2024. [13] Z. Liu, J. Yuan, H. Jin, S. H. Zhong, Z. Xu, V. Braverman, B. Chen, and X. Hu, “Kivi: a tuning-free asymmetric 2bit quantization for kv cache,” in International Conference on Machine Learning (ICML) , 2024. [14] C. Hooper, S. Kim, H. Mohammadzadeh, M. W. Mahoney, Y. S. Shao, K. Keutzer, and A. Gholami, “Kvquant: Towards 10 million context length llm inference with kv cache quantization,” in Annual Conference on Neural Information Processing Systems (NeurIPS) , 2024, pp. 1270–1303. [Online]. Available: https://proceedings.neurips.cc/paper files/paper/ 2024/file/028fcbcf85435d39a40c4d61b42c99a4-Paper-Conference.pdf [15] T. Dettmers, M. Lewis, Y. Belkada, and L. Zettlemoyer, “Llm.int8(): 8-bit matrix multiplication for transformers at scale,” in Annual Conference on Neural Information Processing Systems (NeurIPS) , 2022. [16] S. Li, Y. Hu, X. Ning, X. Liu, K. Hong, X. Jia, X. Li, Y. Yan, P. Ran, G. Dai, S. Yan, H. Yang, and Y. Wang, “Mbq: Modality-balanced quantization for large vision-language models,” in IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , 2025, pp. 4167–4177. [17] C. Wang, Z. Wang, X. Xu, Y. Tang, J. Zhou, and J. Lu, “Q-vlm: post-training quantization for large vision-language models,” in Annual Conference on Neural Information Processing Systems (NeurIPS) , 2024. [18] Z. Shang, H. Jing, G. Wei, H. Zhang, R. Xiao, J. Gao, and P. Wang, “Rethinking practical and efficient quantization calibration for vision-language models,” 2026. [Online]. Available: https://arxiv.org/abs/2602.07899 [19] G. Qin, Z. Li, Z. Chen, W. Zhang, L. Kong, and Y. Zhang, “Veq: Modality-adaptive quantization for moe vision-language models,” 2026. [Online]. Available: https://arxiv.org/abs/2602.01037 [20] J. Lin, J. Tang, H. Tang, S. Yang, W.-M. Chen, W.-C. Wang, G. Xiao, X. Dang, C. Gan, and S. Han, “Awq: Activation-aware weight quantization for on-device llm compression and acceleration,” in Annual Conference on Machine Learning and Systems (MLSys) , 2024, pp. 87–100. [Online]. Available: https://proceedings.mlsys.org/paper files/paper/ 2024/file/42a452cbafa9dd64e9ba4aa95cc1ef21-Paper-Conference.pdf [21] G. Xiao, J. Lin, M. Seznec, H. Wu, J. Demouth, and S. Han, “Smoothquant: Accurate and efficient post-training quantization for large language models,” in International Conference on Machine Learning (ICML) , 2023. [22] Z. Liu, C. Zhao, I. Fedorov, B. Soran, D. Choudhary, R. Krishnamoorthi, V. Chandra, Y. Tian, and T. Blankevoort, “Spinquant: Llm quantization with learned rotations,” in International Conference on Learning Rep-resentations (ICLR) , 2025. [23] S. Ashkboos, A. Mohtashami, M. L. Croci, B. Li, P. Cameron, M. Jaggi, D. Alistarh, T. Hoefler, and J. Hensman, “Quarot: Outlier-free 4-bit inference in rotated llms,” in Annual Conference on Neural Information Processing Systems (NeurIPS) , vol. 37, 2024, pp. 100 213–100 240. [Online]. Available: https://proceedings.neurips.cc/paper files/paper/ 2024/file/b5b939436789f76f08b9d0da5e81af7c-Paper-Conference.pdf [24] H. Sun, R. Wang, Y. Li, X. Cao, X. Jiang, Y. Hu, and B. Zhang, “P4q: Learning to prompt for quantization in visual-language models,” 2024. [Online]. Available: https://arxiv.org/abs/2409.17634 [25] J. Yu, S. Zhou, D. Yang, S. Li, S. Wang, X. Hu, C. Xu, Z. Xu, C. Shu, and Z. Yuan, “Mquant: Unleashing the inference potential of multimodal large language models via static quantization,” in ACM International Conference on Multimedia , 2025, p. 1783–1792. [Online]. Available: https://doi.org/10.1145/3746027.3755433 [26] Y. Chen, A. F. AbouElhamayed, X. Dai, Y. Wang, M. Andronic, G. A. Constantinides, and M. S. Abdelfattah, “Bitmod: Bit-serial mixture-of-datatype llm acceleration,” in IEEE International Symposium on High Performance Computer Architecture (HPCA) , 2025, pp. 1082–1097. [27] W. Hu, H. Zhang, C. Guo, Y. Feng, R. Guan, Z. Hua, Z. Liu, Y. Guan, M. Guo, and J. Leng, “M-ant: Efficient low-bit group quantization for llms via mathematically adaptive numerical type,” in 2025 IEEE International Symposium on High Performance Computer Architecture (HPCA) , 2025, pp. 1112–1126. [28] C. Guo, J. Tang, W. Hu, J. Leng, C. Zhang, F. Yang, Y. Liu, M. Guo, and Y. Zhu, “Olive: Accelerating large language models via hardware-friendly outlier-victim pair quantization,” in IEEE/ACM International Symposium on Computer Architecture (ISCA) , 2023. [Online]. Available: https://doi.org/10.1145/3579371.3589038 [29] C. Guo, C. Zhang, J. Leng, Z. Liu, F. Yang, Y. Liu, M. Guo, and Y. Zhu, “Ant: Exploiting adaptive numerical data type for low-bit deep neural network quantization,” in IEEE/ACM International Symposium on Microarchitecture (MICRO) , 2022, pp. 1414–1433. [30] Open Compute Project, OCP Microscaling Formats (MX) Specification ,version 1.0 ed., Open Compute Project, sep 2023, accessed: 2026-04-05. [Online]. Available: https://www.opencompute.org/documents/ ocp-microscaling-formats-mx-v1-0-spec-final-pdf [31] U. K¨ oster, T. Webb, X. Wang, M. Nassar, A. K. Bansal, W. Constable, O. Elibol, S. Gray, S. Hall, L. Hornof, A. Khosrowshahi, C. Kloss, R. J. Pai, and N. Rao, “Flexpoint: An adaptive numerical format for efficient training of deep neural networks,” in Annual Conference on Neural Information Processing Systems (NeurIPS) ,2017. [Online]. Available: https://proceedings.neurips.cc/paper files/ paper/2017/file/a0160709701140704575d499c997b6ca-Paper.pdf [32] M. Drumond, T. LIN, M. Jaggi, and B. Falsafi, “Training dnns with hybrid block floating point,” in Annual Conference on Neural Information Processing Systems (NeurIPS) , S. Bengio, H. Wallach, H. Larochelle, K. Grauman, N. Cesa-Bianchi, and R. Garnett, Eds., 2018. [Online]. Available: https://proceedings.neurips.cc/paper files/ paper/2018/file/6a9aeddfc689c1d0e3b9ccc3ab651bc5-Paper.pdf [33] NVIDIA, “Introducing NVFP4 for Efficient and Accurate Low-Precision Inference.” [Online]. Available: https://developer.nvidia.com/blog/ introducing-nvfp4-for-efficient-and-accurate-low-precision-inference/ [34] A. Ramachandran, S. Kundu, and T. Krishna, “MicroScopiQ: Acceler-ating Foundational Models through Outlier-Aware Microscaling Quanti-zation,” IEEE/ACM International Symposium on Computer Architecture (ISCA) , 2025. [35] J. Lee, J. Park, S. Cha, J. Cho, and J. Sim, “Mx+: Pushing the limits of microscaling formats for efficient large language model serving,” in Proceedings of the 58th IEEE/ACM International Symposium on Microarchitecture , ser. MICRO ’25. New York, NY, USA: Association for Computing Machinery, 2025, pp. 869–883. [Online]. Available: https://doi.org/10.1145/3725843.3756118 [36] J. Lee, J. Park, J. Kim, Y. Kim, J. Oh, J. Oh, and J. Choi, “AMXFP4: Taming activation outliers with asymmetric microscaling floating-point for 4-bit LLM inference,” in Findings of the Association for Computational Linguistics: ACL 2025 , W. Che, J. Nabende, E. Shutova, and M. T. Pilehvar, Eds. Vienna, Austria: Association for Computational Linguistics, Jul. 2025, pp. 14 993–15 013. [Online]. Available: https://aclanthology.org/2025.findings-acl.776/ [37] P. Wang, S. Bai, S. Tan, S. Wang, Z. Fan, J. Bai, K. Chen, X. Liu, J. Wang, W. Ge, Y. Fan, K. Dang, M. Du, X. Ren, R. Men, D. Liu, C. Zhou, J. Zhou, and J. Lin, “Qwen2-vl: Enhancing vision-language model’s perception of the world at any resolution,” 2024. [Online]. Available: https://arxiv.org/abs/2409.12191 [38] B. Li, Y. Zhang, D. Guo, R. Zhang, F. Li, H. Zhang, K. Zhang, P. Zhang, Y. Li, Z. Liu, and C. Li, “Llava-onevision: Easy visual task transfer,” 2024. [Online]. Available: https://arxiv.org/abs/2408.03326 [39] Y. Yao, T. Yu, A. Zhang, C. Wang, J. Cui, H. Zhu, T. Cai, H. Li, W. Zhao, Z. He, Q. Chen, H. Zhou, Z. Zou, H. Zhang, S. Hu, Z. Zheng, J. Zhou, J. Cai, X. Han, G. Zeng, D. Li, Z. Liu, and M. Sun, “Minicpm-v: A gpt-4v level mllm on your phone,” 2024. [Online]. Available: https://arxiv.org/abs/2408.01800 [40] Y. Liu, Z. Li, M. Huang, B. Yang, W. Yu, C. Li, X.-C. Yin, C.-L. Liu, L. Jin, and X. Bai, “Ocrbench: on the hidden mystery of ocr in large multimodal models,” Science China Information Sciences , vol. 67, no. 12, Dec. 2024. [Online]. Available: http://dx.doi.org/10.1007/s11432-024-4235-6 [41] A. Singh, V. Natarajan, M. Shah, Y. Jiang, X. Chen, D. Batra, D. Parikh, and M. Rohrbach, “Towards vqa models that can read,” 2019. [Online]. Available: https://arxiv.org/abs/1904.08920 [42] A. Masry, D. X. Long, J. Q. Tan, S. Joty, and E. Hoque, “Chartqa: A benchmark for question answering about charts with visual and logical reasoning,” 2022. [Online]. Available: https://arxiv.org/abs/2203.10244 [43] D. Gurari, Q. Li, A. J. Stangl, A. Guo, C. Lin, K. Grauman, J. Luo, and J. P. Bigham, “Vizwiz grand challenge: Answering visual questions from blind people,” 2018. [Online]. Available: https://arxiv.org/abs/1802.08218 [44] B. Li, Y. Ge, Y. Chen, Y. Ge, R. Zhang, and Y. Shan, “Seed-bench-2-plus: Benchmarking multimodal large language models with text-rich visual comprehension,” 2024. [Online]. Available: https://arxiv.org/abs/2404.16790 [45] H. Luo, Y. C. Tu˘ grul, F. N. Bostancı, A. Olgun, A. G. Ya˘ glıkc ¸ı, and O. Mutlu, “Ramulator 2.0: A modern, modular, and extensible dram simulator,” IEEE Computer Architecture Letters , vol. 23, no. 1, pp. 112– 116, 2024. [46] J. Zhang, J. Wei, P. Zhang, J. Zhu, and J. Chen, “Sageattention: Accurate 8-bit attention for plug-and-play inference acceleration,” in International Conference on Learning Representations (ICLR) , 2025. [47] Z. Yao, R. Yazdani Aminabadi, M. Zhang, X. Wu, C. Li, and Y. He, “Zeroquant: Efficient and affordable post-training quantization for large-scale transformers,” in Annual Conference on Neural Information Processing Systems (NeurIPS) , 2022, pp. 27 168–27 183. [Online]. Available: https://proceedings.neurips.cc/paper files/paper/ 2022/file/adf7fa39d65e2983d724ff7da57f00ac-Paper-Conference.pdf [48] Z. Liu, B. Oguz, C. Zhao, E. Chang, P. Stock, Y. Mehdad, Y. Shi, R. Krishnamoorthi, and V. Chandra, “Llm-qat: Data-free quantization aware training for large language models,” 2023. [Online]. Available: https://arxiv.org/abs/2305.17888 [49] M. Chen, W. Shao, P. Xu, J. Wang, P. Gao, K. Zhang, and P. Luo, “Efficientqat: Efficient quantization-aware training for large language models,” 2025. [Online]. Available: https://arxiv.org/abs/2407.11062 [50] P. Judd, J. Albericio, T. Hetherington, T. M. Aamodt, and A. Moshovos, “Stripes: Bit-serial deep neural network computing,” in 2016 49th Annual IEEE/ACM International Symposium on Microarchitecture (MI-CRO) , 2016, pp. 1–12. [51] J. Albericio, A. Delm´ as, P. Judd, S. Sharify, G. O’Leary, R. Genov, and A. Moshovos, “Bit-pragmatic deep neural network computing,” in 
+
+Proceedings of the 50th Annual IEEE/ACM International Symposium on Microarchitecture , ser. MICRO-50 ’17. New York, NY, USA: Association for Computing Machinery, 2017, p. 382–394. [Online]. Available: https://doi.org/10.1145/3123939.3123982 [52] O. M. Awad, M. Mahmoud, I. Edo, A. H. Zadeh, C. Bannon, A. Jayarajan, G. Pekhimenko, and A. Moshovos, “Fpraker: Aprocessing element for accelerating neural network training,” in 
+
+MICRO-54: 54th Annual IEEE/ACM International Symposium on Microarchitecture , ser. MICRO ’21. New York, NY, USA: Association for Computing Machinery, 2021, p. 857–869. [Online]. Available: https://doi.org/10.1145/3466752.3480106 [53] M. Shi, V. Jain, A. Joseph, M. Meijer, and M. Verhelst, “Bitwave: Exploiting column-based bit-level sparsity for deep learning acceleration,” in IEEE International Symposium on High-Performance Computer Architecture (HPCA) , Mar. 2024, p. 732–746. [Online]. Available: http://dx.doi.org/10.1109/HPCA57654.2024.00062 [54] E. Park, D. Kim, and S. Yoo, “Energy-efficient neural network accelerator based on outlier-aware low-precision computation,” in 
+
+IEEE/ACM International Symposium on Computer Architecture (ISCA) ,2018, p. 688–698. [Online]. Available: https://doi.org/10.1109/ISCA. 2018.00063 [55] T. Tambe, E.-Y. Yang, Z. Wan, Y. Deng, V. Janapa Reddi, A. Rush, D. Brooks, and G.-Y. Wei, “Algorithm-hardware co-design of adap-tive floating-point encodings for resilient deep learning inference,” in 
+
+ACM/IEEE Design Automation Conference (DAC) , 2020, pp. 1–6. [56] H. Wang, Y. Li, H. Xu, Y. Wang, L. Liu, J. Yang, and Y. Han, “Lad: Efficient accelerator for generative inference of llm with locality aware decoding,” in IEEE International Symposium on High Performance Computer Architecture (HPCA) , 2025, pp. 1482–1495. [57] Z. Qu, L. Liu, F. Tu, Z. Chen, Y. Ding, and Y. Xie, “Dota: detect and omit weak attentions for scalable transformer acceleration,” in ACM International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS) , 2022, p. 14–26. [Online]. Available: https://doi.org/10.1145/3503222.3507738 [58] T. J. Ham, S. J. Jung, S. Kim, Y. H. Oh, Y. Park, Y. Song, J.-H. Park, S. Lee, K. Park, J. W. Lee, and D.-K. Jeong, “A3: Accelerating attention mechanisms in neural networks with approximation,” in 2020 IEEE International Symposium on High Performance Computer Architecture (HPCA) , 2020, pp. 328–341. [59] L. Lu, Y. Jin, H. Bi, Z. Luo, P. Li, T. Wang, and Y. Liang, “Sanger: A co-design framework for enabling sparse attention using reconfigurable architecture,” in IEEE/ACM International Symposium on Microarchitecture (MICRO) , 2021, pp. 977–991. [Online]. Available: https://doi.org/10.1145/3466752.3480125 [60] W. Liu, H. Meng, Y. Luo, Y. Zhao, P. Zhang, and X. Ma, “Micromix: Efficient mixed-precision quantization with microscaling formats for large language models,” 2026. [Online]. Available: https://arxiv.org/abs/2508.02343

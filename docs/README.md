@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-17</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-18</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 11 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 3 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>9</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>1</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-17 22:13:04 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-18 21:49:45 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,10 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日共生成 11 篇推荐（精读 2 篇，速读 9 篇）</p>
-<p>精读：《Where Post-Training Quantization Breaks Text Embedders: A Measured Map Across Four Embedder Families》（8.0/10）, 《StackTok: Accelerating VLMs Inference with Budget-Adaptive Visual Token Selection》（8.0/10）</p>
-<p>速读：《LOCUS: Task-Aware Low-Rank Post-Training for Token-Efficient Language Generation》（7.0/10）, 《VideoMM: Adaptive Macro-Micro Inference for Efficient Video MLLMs》（7.0/10）, 《Decoder-Agnostic Token Merging for Vision Transformers: A Systematic Study of G2TM》（7.0/10）</p>
-<p>这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。</p>
+<p>今日精读两篇 8.0 分论文：MiX 用微型反转缩放加速端到端低比特视觉语言模型，QCPruner 以查询条件化群体覆盖做视觉 token 剪枝。</p>
+<p>最值得关注低比特视觉语言模型加速与视觉 token 剪枝这两个方向，前者直击端到端效率，后者从查询视角优化剪枝覆盖。</p>
+<p>普通读者可先看这两篇精读把握主流思路，再用 7.0 分的 D-Quant（KV 缓存量化漂移熵编码）补充推理侧优化视角。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -77,7 +76,7 @@
     <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Where Post-Training Quantization Breaks Text Embedders: A Measured Map Across Four Embedder Families">Where Post-Training Quantization Breaks Text Embedders: A Measured Map Across Four Embedder Families</span></li><li><span class="dpr-home-dashboard-paper-title" title="StackTok: Accelerating VLMs Inference with Budget-Adaptive Visual Token Selection">StackTok: Accelerating VLMs Inference with Budget-Adaptive Visual Token Selection</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="MiX: Micro-Inverted-Scaling for End-to-End Low-Bit Vision-Language Model Acceleration">MiX: Micro-Inverted-Scaling for End-to-End Low-Bit Vision-Language Model Acceleration</span></li><li><span class="dpr-home-dashboard-paper-title" title="QCPruner: Query-Conditioned Population Coverage for Visual Token Pruning">QCPruner: Query-Conditioned Population Coverage for Visual Token Pruning</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>2</strong></span></div>
 </section>
@@ -87,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">9 篇</strong>
+    <strong class="dpr-home-dashboard-count">1 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="LOCUS: Task-Aware Low-Rank Post-Training for Token-Efficient Language Generation">LOCUS: Task-Aware Low-Rank Post-Training for Token-Efficient Language Generation</span></li><li><span class="dpr-home-dashboard-paper-title" title="VideoMM: Adaptive Macro-Micro Inference for Efficient Video MLLMs">VideoMM: Adaptive Macro-Micro Inference for Efficient Video MLLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="Decoder-Agnostic Token Merging for Vision Transformers: A Systematic Study of G2TM">Decoder-Agnostic Token Merging for Vision Transformers: A Systematic Study of G2TM</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="D-Quant: Driftable Entropy Coding for KV Cache Quantization">D-Quant: Driftable Entropy Coding for KV Cache Quantization</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>9</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>1</strong></span></div>
 </section>
 </div>
 
