@@ -1,0 +1,2909 @@
+Title: Beyond Scalar Sensitivity: Activation-Aware Mixed-Precision LLM Quantization with Cross-Layer Refinement
+
+URL Source: https://arxiv.org/pdf/2609.25916v1
+
+Published Time: Wed, 23 Sep 2026 01:16:57 GMT
+
+Number of Pages: 33
+
+Markdown Content:
+# Beyond Scalar Sensitivity: Activation-Aware Mixed-Precision LLM Quantization with Cross-Layer Refinement 
+
+Akihiro Yoshida 
+
+Fujitsu Limited, Institute of Science Tokyo 
+
+Yuma Ichikawa 
+
+Fujitsu Limited, RIKEN Center for AIP 
+
+## Abstract 
+
+Mixed-precision weight quantization is commonly formulated as a Multiple-Choice Knapsack Problem (MCKP), yet existing solvers rely on scalar sensitivity prox-ies that collapse each weight matrix’s Hessian into a single number and treat every module independently. We prove that even the optimal scalar proxy incurs multiplicative distortion up to pκ(A)κ(B) relative to the full activation-aware quadratic, where κ(A) and κ(B) denote the condition numbers of the input- and output-side Hessian factors. This bound varies from 10 1 to 10 13 for typical LLM modules, making inter-module sensitivity ranking unreliable. To address these lim-itations, we propose Cross-layer Activation-aware Sensitivity Allocation (CASA), a two-phase method. In Stage 1, the scalar proxy is replaced by an activation-aware metric derived from the Kronecker-factored Hessian, reducing the MCKP to a form whose continuous relaxation admits a closed-form solution. In Stage 2, a cross-layer-aware local search evaluates bit-width updates using the end-to-end model loss. Experiments on multiple LLMs across different bit budgets show that CASA achieves lower perplexity than the latest scalar-proxy baselines, especially at ultra-low bit-widths ( < 3 bits per weight). Moreover, the performance gain in zero-shot accuracy tracks the per-model average condition-number over modules, confirming the distortion bound as a practical indicator of scalar-proxy failure. 
+
+## 1 Introduction 
+
+Weight-only post-training quantization (PTQ) [Lin et al., 2024, Frantar et al., 2022] has become the standard technique for deploying large language models under memory constraints. Among the various PTQ strategies, mixed-precision quantization—where different weight matrices are quantized to different bit widths—offers a flexible trade-off between model size and accuracy [Guo et al., 2025, Dong et al., 2019, 2020]. The bit allocation problem is naturally formulated as a Multiple-Choice Knapsack Problem (MCKP) Lee and Song [2025], Chen et al. [2021]: given a total bit budget, assign a bit width to each weight matrix so as to minimize the total quantization-induced loss. The quality of any MCKP solution depends critically on the proxy that estimates per-module quan-tization error. Recent mixed-precision allocators, including HIGGS Malinovskii et al. [2025] and Q-Palette Lee and Song [2025], acknowledge the role of activations but ultimately reduce this matrix-form proxy to a single scalar coefficient αl, yielding αl(∥∆W (l)∥2
+
+/∥W (l)∥2). This scalar reduction discards the directional information carried by the Hessian: the anisotropy of the activation covariance, the heterogeneous output-side sensitivities, and the channel-level structure of ∆W (l) produced by the underlying quantizer. The damage is not merely a loss of precision; when the MCKP solver relies on a proxy that is systematically misaligned with the true error, it allocates fewer bits to the modules that matter most. 
+
+> Preprint. arXiv:2609.25916v1 [cs.LG] 22 Sep 2026
+
+A second, less-discussed limitation is the layer-wise independence assumption that underpins every MCKP-style allocator. Standard formulations sum per-module errors as if the modules were statis-tically independent—exactly the additive structure that the knapsack objective requires. The deep residual architecture of modern LLMs violates this assumption: quantization error injected at layer l
+
+propagates through the residual stream and interacts with the error at layer l+1 , producing cross-layer terms—the off-diagonal blocks of the full network Hessian—that the additive proxy cannot represent. A natural first attempt is to fold these cross-layer terms into the MCKP objective itself, but our experiments show that this approach does not yield meaningful improvement over the self-only baseline. These results indicate that cross-layer awareness is genuinely necessary, yet capturing it inside a single MCKP formulation is empirically difficult; it must be addressed by a mechanism outside the MCKP. Guided by this separation of concerns, we propose Cross-layer Activation-aware Sensitivity Allo-cation (CASA) (see Figure 1), a two-stage allocator in which Stage 1 handles the former problem inside the MCKP, and Stage 2 handles the latter problem outside it. Stage 1: Activation-aware MCKP. For each module and candidate bit-width, we evaluate the per-module loss with the full Kronecker-factored Hessian. Unlike scalar proxies, this cost faithfully captures activation outliers. This advantage is not merely empirical: any scalar surrogate suffers a worst-case multiplicative distortion relative to the true quadratic (Theorem 3.1), which can flip the sensitivity ranking of two modules and thereby induce unbounded MCKP regret (Proposition 3.2); in the high-rate limit our proxy further yields a water-filling allocation that no scalar surrogate can recover (Theorem 4.1). 
+
+Stage 2: Cross-layer local search. Treating the Stage-1 assignment as initialization, we perform a greedy bit-swap search whose acceptance criterion is the calibration cross-entropy loss measured after re-quantization, so that the non-additive cross-layer interactions are evaluated end-to-end rather than through any quadratic surrogate. This stage is precisely the mechanism that operates outside the MCKP framework and recovers the cross-layer signal that no single-stage formulation captured. The cross-aware optimum is never worse than the self-only optimum and is strictly better whenever the latter is suboptimal (Proposition 4.2). Numerical experiments on multiple models (e.g., the Llama and Qwen series) across different bit budgets show that the activation-aware error proxy enhances existing scalar-based weighting methods. The cross-layer-aware local search yields further improvement, especially at ultra-low bit-widths. CASA successfully identifies modules with activation outliers and assigns them higher precision. Moreover, the distortion bound pκ(A)κ(B) established in Theorem 3.1 correlates with the empirical gain of CASA, validating the connection between our theory and experiments. 
+
+Figure 1: Overview of Cross-layer Activation-aware Sensitivity Allocation (CASA), which determines the bit allocation by accounting for activation-aware loss and cross-layer interactions. CASA efficiently detects outlier modules and assigns them higher precision. 2Our contributions are summarized as follows: 1. We derive an activation-aware quantization-error proxy that retains the full Kronecker-factored Hessian from the second-order Taylor expansion of the task loss, and prove a worst-case distortion bound for any scalar proxy (Section 3). 2. Building on this proxy, we propose CASA, a two-stage allocator that solves an activation-aware MCKP for self-term costs (Stage 1) and then performs a cross-entropy-driven cross-layer local search (Stage 2) that provably never worsens the Stage-1 solution (Section 4). 3. We demonstrate that CASA achieves better performance than the latest scalar-based proxy across multiple models and quantization settings. We further observe that CASA’s improve-ment grows with the distortion bound, consistent with Theorem 3.1 (Section 5). 
+
+## 2 Preliminaries 
+
+2.1 Bit-allocation as constrained optimization problem 
+
+The mixed-precision quantization problem reduces to choosing a quantizer for each layer so as to minimize the total weighted error subject to a resource constraint [Chen et al., 2021]. This problem can be formulated as a multiple-choice knapsack problem (MCKP) subject to resource constraints (model size [Uhlich et al., 2019], computational complexity [Yang and Jin, 2021], etc.). It can be solved by a genetic algorithm [Li et al., 2021] or by mathematical optimization solvers [Hubara et al., 2021]. In addition to the MCKP formulation, bit-allocation has been addressed via reinforcement learning [Wang et al., 2019] or differentiable search [Yang and Jin, 2021]. 
+
+2.2 Sensitivity Measurement 
+
+Many methods construct a surrogate objective to determine the bit allocation. The HAWQ se-ries [Dong et al., 2019, 2020, Yao et al., 2021] uses spectral information of the Hessian as a sensitivity metric. OMPQ [Ma et al., 2023] prioritizes the bit allocation so that layer outputs tend to be mu-tually orthogonal. Q-Palette [Lee and Song, 2025] measures module importance using the HIGGS metric [Malinovskii et al., 2025]. These approaches fail to account for activation outliers, which are explicitly handled by recent quantization methods [Lin et al., 2024, Xiao et al., 2023]. More fundamentally, all of these methods reduce sensitivity to a single scalar and therefore cannot reflect activation distributions that depend on the calibration data. 
+
+2.3 Cross-layer Awareness for Quantization 
+
+Cross-layer awareness has been exploited for quantization itself, but rarely for bit allocation. BRECQ [Li et al., 2021] iteratively refines the bit allocation by monitoring the validation loss. QEP [Arai and Ichikawa, 2025] propagates the previous layer’s quantization loss to the next layer, thereby suppressing error accumulation. However, cross-layer awareness for bit allocation in LLMs remains unexplored. For vision encoders, CLADO [Deng et al., 2023] jointly considers both the self-term and cross-term. InfoQ [Akbulut et al., 2026] studies how quantization perturbations propa-gate to affect the output information. For KV-cache quantization, KVTuner [Li et al., 2025] solves a multi-objective optimization problem informed by inter-layer correlations. Whether cross-layer interactions can actually reorder the allocation produced by a sensitivity-only integer programming formulation remains an open question. 
+
+## 3 Activation-Aware Quantization Error Proxy 
+
+3.1 Derivation 
+
+Consider a pre-trained model with L layers. Let W (l) ∈ Rdout ×din denote the weight matrix of layer l,and let ∆W (l) := ˆW (l) − W (l) be the quantization perturbation. We approximate the change in task loss ∆L through the following chain of standard assumptions: (i) Second-order Taylor expansion. ∆L ≈ 12 ∆θ⊤H(θ) ∆ θ, where H is the Hessian of the loss with respect to all parameters θ.3(ii) Local optimality. At the pre-trained weights, the gradient is approximately zero, so the first-order term in the Taylor expansion is negligible. (iii) Layer-wise block-diagonal Hessian. Off-diagonal blocks of H between different layers are negligible, so ∆L ≈ P 
+
+> l
+
+∆L(l).(iv) Empirical Fisher. Given calibration samples {x(n)}Nn=1 , the Hessian is estimated via the empirical Fisher: x(n)(x(n))⊤ for the input side and H(n) 
+
+> y
+
+for the output side. Combining (i)–(iv), the per-layer loss is given by ∆L(l) ≈ 12 tr( B(l) ∆W (l) A(l) (∆ W (l))⊤),
+
+where A(l) = 1 
+
+> N
+
+XX ⊤ ∈ Rdin ×din , B(l) = 1
+
+> N
+
+PNn=1 H(n) 
+
+> y
+
+∈ Rdout ×dout . Here A(l) is the input activation Gram matrix, encoding channel-wise correlations and magnitudes, and B(l) is the output-side Hessian, capturing the downstream sensitivity to perturbations in each output channel. 
+
+3.2 Existing Proxies as Degenerate Cases 
+
+Section 3.1 provides a unified view of existing quantization error proxies as successively coarser approximations (see Table 1). The scalar proxy αl∥∆W ∥2/∥W ∥2 treats all input channels and all output channels as equally important. In practice, Transformer activations exhibit strong anisotropy: a small number of channels carry disproportionately large magnitudes (“activation outliers”). These outlier channels make certain columns of ∆W far more costly than others, and analogous heterogene-ity arises on the output side via B. By collapsing A and B to scaled identities ( A → αlI, B → I), scalar proxies assign equal weight to every entry of ∆W (l), fundamentally misranking modules by their quantization sensitivity. Table 1: Hierarchy of quantization error proxies. All are special cases of tr( B ∆W A ∆W ⊤) with different levels of approximation for A and B.Proxy Approximation Formula Methods Full A(l), B(l) tr( B ∆W A ∆W ⊤) CASA( ours )Input-only B → I 1 
+
+> N
+
+∥∆W X ∥2
+
+> F
+
+GPTQ [Frantar et al., 2022] OBQ [Frantar and Alistarh, 2022] Scalar A → αlI, B → I αl∥∆W ∥2/∥W ∥2 HIGGS [Malinovskii et al., 2025] Q-Palette [Lee and Song, 2025] 
+
+3.3 Theoretical Discussion 
+
+The worst-case multiplicative distortion of any scalar proxy against the activation-aware quadratic, and the MCKP regret induced by sensitivity misranking, are stated formally in Theorem 3.1 and Propo-sition 3.2, respectively. 
+
+Theorem 3.1 (Sharp multiplicative distortion of scalar proxies) . Assume A ≻ 0 and B ≻ 0. Let 
+
+κ(A) := λmax (A)/λmin (A) and κ(B) := λmax (B)/λmin (B). Then 
+
+inf  
+
+> α> 0
+
+sup  
+
+> E̸=0
+
+max 
+
+ Q(E)
+
+Qα(E) , Qα(E)
+
+Q(E)
+
+
+
+= pκ(A)κ(B) =: D. (1) 
+
+Consequently, whenever either the input-side factor A or the output-side factor B is anisotropic, no scalar proxy can uniformly approximate the activation-aware quadratic proxy without incurring this worst-case multiplicative distortion. 
+
+We empirically confirms that the bound D massively varies depending on the module. (See Ap-pendix B) 
+
+Proposition 3.2 (Proxy misranking can create arbitrarily large MCKP regret) . Consider two modules indexed by i ∈ { 1, 2} and two bit-width choices, L and H, where L is of lower precision and H
+
+is of higher precision. Suppose the bit budget allows exactly one module to use H. Let the true second-order cost be 
+
+Ci(b) = γidb, b ∈ { L, H }, (2) 4where dL > d H > 0 and γi > 0. Let a proxy MCKP use the proxy cost, bCi(b) = bγidb, where bγi > 0.Suppose that the true sensitivities and proxy sensitivities have opposite rankings: γ1 > γ 2, bγ2 > bγ1.Then the true optimal allocation assigns H to module 1, whereas the proxy-optimal allocation assigns 
+
+H to module 2. The true regret of the proxy-optimal allocation is 
+
+Regret = ( γ1 − γ2)( dL − dH ). (3) 
+
+In particular, taking γ1 = R and γ2 = 1 makes the regret equal to (R − 1)( dL − dH ), which diverges as R → ∞ .
+
+## 4 Cross-layer Activation-aware Sensitivity Allocation (CASA) 
+
+To address the issues derived from scalar-based sensitivity and layer-wise independent treatment, we propose Cross-layer Activation-aware Sensitivity Allocation (CASA) . A natural attempt is to fold both the self-term and the cross-term into a single MCKP and solve it jointly, but this approach empirically performs worse (see Appendix C). Therefore, capturing both components in a single formulation is empirically difficult, and we adopt a two-stage approach instead. Stage 1 solves an MCKP using the activation-aware proxy of Section 3.1 on the self-term alone (Section 4.1); Stage 2 then refines this allocation via a cross-layer local search that evaluates bit-swaps using the end-to-end loss (Section 4.2); this refinement is guaranteed to produce a solution no worse than the Stage-1 one. The overall algorithm of CASA is shown in Algorithm 1. 
+
+4.1 Stage 1: MCKP Formulation 
+
+Following Section 3, we formulate the bit allocation as an MCKP over all weight matrices in the model. Let (l, m ) index a specific module (e.g., m ∈ { Q, K, V, O, Gate , Up , Down }) in layer l. Each module can be quantized at one of the candidates in Q = {q1, . . . , q |Q| } (e.g., {2.0, 3.0, . . . , 6.0}). We use q ∈ Q in two roles: as a generic candidate when defining per-module costs, and as the assigned bit-width ql,m ∈ Q for module (l, m ). The full allocation is denoted by q = ( ql,m )(l,m ).For each candidate (l, m, q ), we pre-compute the quantized weight ˆW (l,m,q ) and the perturbation 
+
+∆W (l,m,q ) = ˆW (l,m,q ) − W (l,m ). The activation-aware proxy cost ℓl,m,q is: 
+
+ℓl,m,q := tr 
+
+
+
+B(l,m ) ∆W (l,m,q ) A(l,m )  ∆W (l,m,q )⊤
+
+. (4) Expanding in element-wise form: ℓl,m,q = P 
+
+> i,j
+
+b(l,m ) 
+
+> i
+
+· a(l,m ) 
+
+> j
+
+· (∆ w(l,m,q ) 
+
+> ij
+
+)2, where a(l,m ) 
+
+> j
+
+and 
+
+b(l,m ) 
+
+> i
+
+are the diagonal entries of A(l,m ) and B(l,m ), respectively, under the diagonal approximation of A and B. The MCKP is: 
+
+min  
+
+> P∈{ 0,1}
+
+X
+
+> l,m,q
+
+Pl,m,q ℓl,m,q (5) subject to X
+
+> q
+
+Pl,m,q = 1 ( ∀ l, m ), X
+
+> l,m,q
+
+Pl,m,q · bits q · size l,m ≤ Bavg · X
+
+> l,m
+
+size l,m (6) where Pl,m,q = 1 indicates that module (l, m ) is quantized at bit width q, bits q includes the overhead from zero points and scales, and Bavg is the target average bits per weight (BPW). This is an integer linear program and can be solved efficiently by existing mathematical optimization solvers. The binary variables Pl,m,q induce an assignment vector q = ( ql,m ) via ql,m = q ⇐⇒ Pl,m,q = 1 .Stage 2 below refines this q.In the continuous relaxation of this MCKP, where bit-widths are allowed to take real values and per-module errors follow the high-rate distortion law Γi2−2βi with Γi proportional to ℓl,m,q at high q
+
+and ni = size l,m , the optimal allocation admits a closed-form solution: 
+
+Theorem 4.1 (Optimal continuous bit allocation under high-rate distortion) . Let I be a finite nonempty index set. Assume that Γi > 0 and ni > 0 for every i ∈ I . Consider the continuous relaxation 
+
+min 
+
+> {βi}i∈I
+
+F (β) := X
+
+> i∈I
+
+Γi2−2βi subject to X
+
+> i∈I
+
+niβi ≤ Btotal . (7) 5Then the problem has a unique global minimizer. Moreover, the unique minimizer satisfies P 
+
+> i∈I
+
+niβ′ 
+
+> i
+
+= Btotal and is given by 
+
+β′ 
+
+> i
+
+= 12 log 2 (Γi/ni) + c, c = Btotal − 12
+
+P 
+
+> j∈I
+
+nj log 2 (Γj/nj )
+
+P 
+
+> j∈I
+
+nj
+
+. (8) 
+
+Consequently, for any two modules i, j ∈ I ,
+
+β′ 
+
+> i
+
+− β′ 
+
+> j
+
+= 12 log 2
+
+ Γi/ni
+
+> Γj
+
+/nj
+
+
+
+. (9) 
+
+Thus the optimal continuous bit width is larger for modules with larger activation-aware sensitivity per parameter, Γi/n i.
+
+4.2 Stage 2: Local Search for considering Cross-Layer Interactions 
+
+This section presents a local search that refines the Stage-1 allocation by explicitly accounting for cross-layer interactions. We relax Assumption (iii) in Section 3.1 (layer-wise block-diagonal Hessian) to a block-tridiagonal approximation. Specifically, we retain off-diagonal Fisher blocks only between adjacent layers 
+
+(l, l +1) and, within each such block, only the same-module-type entries (l, m )–(l+1 , m ).
+
+∆L ≈ X
+
+> l,m
+
+err self (l, m ) + 2 
+
+> L−1
+
+X
+
+> l=1
+
+X
+
+> m
+
+err cross (l, l +1 , m ). (10) Consideration of the cross-layer interactions is not harmful for obtaining better assignment, which is ensured by following proposition. 
+
+Proposition 4.2 (Exact cross-aware optimization is never worse for the quadratic surrogate) . Let F
+
+be the feasible set defined by the MCKP assignment and budget constraints. Let 
+
+Pself ∈ arg min  
+
+> P∈F
+
+S(P ), Pcross ∈ arg min  
+
+> P∈F
+
+Cquad (P ). (11) 
+
+Then 
+
+Cquad (Pcross ) ≤ Cquad (Pself ). (12) 
+
+If Pself is not a minimizer of Cquad over F, then the inequality is strict. 
+
+The self-terms are given by Section 3.1. For the cross-terms, we apply a Kronecker factorization to the off-diagonal Fisher block: F (l,m ),(l+1 ,m ) ≈ En[x(l,m ) 
+
+> n
+
+(x(l+1 ,m ) 
+
+> n
+
+)⊤] ⊗ En[g(l,m ) 
+
+> n
+
+(g(l+1 ,m ) 
+
+> n
+
+)⊤],
+
+For computational tractability, we approximate the Kronecker factors of Section 4.2 by their diagonals (consistent with the diagonal approximation already used for the self-term). The cross-term then reduces to elementwise form: 
+
+err cross (l, l +1 , m ; q, q ′) ≈ X
+
+> i,j
+
+bcross  
+
+> i
+
+· across  
+
+> j
+
+· ∆w(l,m,q ) 
+
+> ij
+
+· ∆w(l+1 ,m,q ′) 
+
+> ij
+
+(13) where across ,(l,l +1 ,m ) 
+
+> j
+
+:= En[x(l,m ) 
+
+> n,j
+
+x(l+1 ,m ) 
+
+> n,j
+
+], and bcross ,(l,l +1 ,m ) 
+
+> i
+
+:= En[g(l,m ) 
+
+> n,i
+
+g(l+1 ,m ) 
+
+> n,i
+
+].The cross-layer coefficients bcross  
+
+> i
+
+and across  
+
+> j
+
+are signed, unlike their self-term counterparts, and the signs of ∆w(l,m,q ) 
+
+> ij
+
+are unavailable at the planning stage since they depend on the candidate q.Applying the triangle inequality and then the Cauchy–Schwarz bound to Equation (13) yields the Cauchy–Schwarz cross proxy: 
+
+err cross (l, l + 1 , m ; q, q ′) ≤ (14) 
+
+X
+
+> i,j
+
+q
+
+b(l,m ) 
+
+> i
+
+b(l+1 ,m )
+
+> i
+
+q
+
+a(l,m ) 
+
+> j
+
+a(l+1 ,m ) 
+
+> j
+
+∆w(l,m,q ) 
+
+> ij
+
+∆w(l+1 ,m,q ′) 
+
+> ij
+
+=: ¯C(l,m ) 
+
+> q,q ′
+
+. (15) Since this upper bound depends only on the self-term diagonals a(l,m ), b (l,m ) already used in Section 3.1, the table  ¯C(l,m )  
+
+> q,q ′(q,q ′)∈Q 2
+
+can be precomputed without an extra calibration pass. The total proxy objective minimized by the local search (Algorithm 1, Stage 2) is: J(q) =2 PL−1
+
+> l=1
+
+P 
+
+> m
+
+¯C(l,m ) 
+
+> ql,m , q l+1 ,m
+
+.6Local search procedure. Based on the cross-term surrogate, we perform a local search to refine the MCKP solution obtained from Stage 1. The MCKP has already minimized the self-term proxy; the local search further reduces the total objective (4.2) by exploiting cross-layer interactions while maintaining the budget constraint. Each round consists of three phases: (1) candidate generation, (2) evaluation, and (3) acceptance. In Phase 1 (candidate generation), we construct feasible swap candidates. Each candidate consists of k upgrades (modules whose bit-width index is increased by one) and k downgrades (modules whose bit-width index is decreased by one), chosen so that the total effective bit budget does not exceed the target. We write q ⊕ s for the resulting allocation, in which unaffected modules retain their original bit-widths and every module satisfies (q ⊕ s)l,m ∈{1, . . . , |Q|} . We then rank candidates by their estimated cross-term proxy improvement. For a swap s, let qnew  
+
+> l,m
+
+:= ( q ⊕ s)l,m denote the bit-width assigned to module (l, m ) after applying s. The cross-term delta is then: 
+
+∆cross (s) = 2 X
+
+> l,m
+
+ ¯C(l,m )
+
+> qnew
+> l,m , q new
+> l+1 ,m
+
+− ¯C(l,m )
+
+> ql,m , q l+1 ,m
+
+
+
+. (16) In Phase 2 (evaluation), we form S as the top-K swaps with the smallest (most negative) ∆cross (s),restricted to ∆cross (s) < 0. For each s ∈ S , we apply the candidate allocation q ⊕ s to the model and measure the next-token prediction loss on calibration data. In Phase 3 (acceptance), we accept the candidate with the largest loss reduction: 
+
+q(r+1) = q(r) ⊕ argmin 
+
+> s∈S
+
+Lcal (q(r) ⊕ s) (17) where Lcal is the calibration loss. If no candidate improves upon the incumbent, the search terminates. 
+
+## 5 Experiments 
+
+Setup. We evaluate CASA on five models: Llama-2-7B, Llama-3-8B, Llama-3.1-8B, Qwen3-8B, and Qwen3-14B. We compare four methods: • Uniform : all modules are assigned the same bit-width. • Q-Palette [Lee and Song, 2025]: one of the latest mixed-precision methods, in which a scalar sensitivity parameter is computed via the HIGGS metric. While the original Q-Palette uses condensed quantizers, we replace them with widely-used GPTQ [Frantar et al., 2022]. • CASA self : an ablation that solves only the activation-aware MCKP (Stage 1 of Algorithm 1), without the cross-term local search. • CASA (ours): the full proposed method (Algorithm 1). All methods use RTN (Round-to-Nearest) as the proxy quantizer. We use GPTQ [Frantar et al., 2022] as the main quantizer with a group size of 128 and C4 as calibration data. The candidate bit-widths 
+
+Q are integers from 2 to 8. We use SCIP [Bolusani et al., 2024] to solve the MCKP. For the local search (Stage 2), we use K = 100 candidate evaluations per round with a maximum of 20 rounds. Each swap consists of one upgrade paired with one downgrade ( k = 1 ). Experiments were conducted on one NVIDIA B200 GPU. We report perplexity on WikiText-2 and average accuracy on a suite of common-sense reasoning benchmarks. 
+
+Results and Discussion. Table 2 presents the main results. Figure 2 visualizes the bit allocations produced by the baselines and our proposed CASA. More results are shown in Table 6. The key findings are: • Better results than the scalar-proxy method. CASA and its ablation CASA self consistently achieve better performance than the latest scalar-based proxy, Q-Palette. • Massive activation channels in early-layer V projections. On Llama-3-8B at 2.5 BPW, V-projection input Gram matrices A in layers 0–4 have κ(A) ∈ [2 .4×10 11 , 1.5×10 15 ].CASA flags these as critical, allocating 5–8 bits (peak 8 on layer 2). Q-Palette also rates V-projection important on average but caps at 7 bits and drops to 5 bits on layers 2–4 (vs. CASA’s 8/7/6). 7Table 2: WikiText-2 perplexity ( ↓) and 6-task average accuracy ( ↑, %) for various mixed-precision quantization methods and different bit budgets. Each cell: PPL / ACC. Bold PPL : lowest per row; 
+
+bold ACC : highest per row. †Uniform at 2-bit, shown for reference only. Model BPW Uniform Q-Palette CASA self CASA Llama-2-7B (FP16: 4.86 / 58.6) 2.25 24 .20 † / 36.8 11.59 / 42.4 11.01 / 42.1 11.19 / 42.7 
+
+2.50 – 8.31 / 46.9 7.51 / 47.9 7.48 / 48.3 
+
+2.75 – 6.93 / 51.2 6.22 / 52.8 6.18 / 52.5 3.00 5.48 / 55.6 5.86 / 55.0 5.16 / 56.1 5.48 / 56.5 
+
+3.50 – 5.24 / 57.3 5.16 / 56.1 5.16 / 56.1 4.00 4.97 / 57.5 5.03 / 57.8 4.98 / 57.7 4.98 / 57.9 
+
+Llama-3-8B (FP16: 5.49 / 65.0) 2.25 256 .28 † / 29.8 47.20 / 34.0 35.75 / 35.6 22.41 / 39.2 
+
+2.50 – 21.43 / 39.2 13.21 / 45.3 11.86 / 47.0 
+
+2.75 – 11.95 / 49.8 9.69 / 52.2 8.83 / 53.3 
+
+3.00 12.52 / 57.7 9.16 / 55.8 7.54 / 58.5 7.15 / 58.6 
+
+3.50 – 7.03 / 61.8 6.30 / 62.3 6.30 / 62.4 
+
+4.00 11.52 / 59.0 6.06 / 64.0 5.86 / 64.0 5.85 / 64.1 
+
+Llama-3.1-8B (FP16: 5.57 / 65.8) 2.25 103 .52 † / 30.5 40.67 / 34.3 25.65 / 37.6 20.56 / 39.6 
+
+2.50 – 19.38 / 38.9 13.01 / 45.4 11.93 / 48.1 
+
+2.75 – 11.82 / 50.4 9.56 / 53.2 8.78 / 54.1 
+
+3.00 19.99 / 53.9 9.34 / 56.5 7.31 / 59.0 7.09 / 60.4 
+
+3.50 – 6.84 / 62.3 6.31 / 63.2 6.30 / 63.1 4.00 9.27 / 62.2 6.12 / 63.9 5.89 / 64.6 5.89 / 64.6 
+
+Qwen3-8B (FP16: 8.58 / 65.8) 2.25 24 .32 † / 33.9 20.19 / 34.3 14.63 / 39.7 13.63 / 40.8 
+
+2.50 – 16.62 / 36.5 11.87 / 46.7 11.60 / 47.5 
+
+2.75 – 13.89 / 38.5 10.60 / 51.7 10.29 / 54.5 
+
+3.00 9.64 / 61.1 12.28 / 41.7 9.41 / 60.2 9.46 / 61.5 
+
+3.50 – 9.40 / 59.5 9.20 / 64.1 9.19 / 64.2 
+
+4.00 8.83 / 64.7 9.05 / 62.8 8.82 / 65.1 8.82 / 64.7 Qwen3-14B (FP16: 7.58 / 69.7) 2.25 11 .68 † / 42.4 10.79 / 44.5 10.11 / 46.2 9.75 / 51.7 
+
+2.50 – 10.25 / 46.0 9.40 / 52.0 9.06 / 52.6 
+
+2.75 – 9.83 / 48.9 8.51 / 60.2 8.51 / 62.0 
+
+3.00 8.29 / 66.2 9.52 / 50.4 8.24 / 65.6 8.14 / 66.2 
+
+3.50 – 8.35 / 64.6 8.02 / 67.7 7.95 / 67.0 4.00 7.84 / 68.8 8.05 / 67.1 7.82 / 68.5 7.78 / 68.5 
+
+• Heterogeneous output sensitivity. The output-side Hessian B varies substantially across output channels: in V-projection modules in particular, a subset of output dimensions carries disproportionate influence on the attention computation. CASA exploits this heterogeneity by allocating more bits to such output-sensitive modules (see Figure 2). • Cross-term aware local search improves quantized model performance. In the second stage of CASA, we perform a local search that exploits the cross-term, which consistently achieves better results than CASA self . The improvements are largest at 2.25 –2.75 BPW. Replacing the cross-term ranking with a self-term ranking improves over CASA self but still falls short of full CASA (see Appendix D), showing that the cross-layer coupling itself is the source of the additional gain. • Distortion bound predicts the zero-shot accuracy improvement. Theorem 3.1 bounds the worst-case multiplicative distortion of any scalar proxy. Table 3 shows the relationship between this distortion and the zero-shot accuracy improvement at 3.0 BPW: CASA’s gain over Q-Palette grows substantially for models with higher distortion. 8Figure 2: Bit allocation for Llama-3-8B at 2.5 BPW (blue: lower precision; white: higher precision). Table 3: Mean distortion bound ( D) and accuracy gain of CASA self over Q-Palette at 3.0 BPW (see Theorem 3.1). Dmed and ¯D are the median and arithmetic mean over all modules and layers. Model log 10 Dmed log 10 ¯D ACC (%) ∆ACC Q-Palette CASA self (%)Llama-2-7B 2.81 7.73 55.0 56.1 +1.1 
+
+Llama-3-8B 2.62 8.30 55.8 58.5 +2.7 
+
+Llama-3.1-8B 2.63 7.96 56.5 59.0 +2.5 
+
+Qwen3-8B 4.21 10.86 41.7 60.2 +18.5 
+
+Qwen3-14B 4.06 9.48 50.4 65.6 +15.2 
+
+## 6 Conclusion 
+
+We proposed Cross-layer Activation-aware Sensitivity Allocation (CASA), which replaces scalar sensitivity proxies with an activation-aware quadratic derived from the Kronecker-factored Hessian and refines the allocation via cross-layer local search. We also provided theoretical results bounding the worst-case distortion of scalar-based proxies relative to the full activation-aware quadratic. Experiments on 7B–14B LLMs show that the activation-aware proxy consistently outperforms scalar-based proxies, with the cross-layer refinement providing further gains particularly in the ultra-low-bit regime. The empirical improvement correlates with the per-model distortion bound ¯D (Table 3), consistent with the prediction of Theorem 3.1. 
+
+Limitation. Our cross-term approximation only models adjacent layer pairs (l, l +1) and does not capture longer-range or higher-order interactions, as faithfully incorporating them would make calibration and optimization combinatorially intractable. Moreover, our objective is an activation-aware quadratic proxy rather than the true downstream loss, so the proxy ranking may diverge from the true perplexity ranking in extreme regimes. 
+
+Broader Impacts. On the positive side, better bit allocation enables higher-quality LLM inference on the same hardware budget, supporting on-device and edge deployment in resource-constrained settings. On the negative side, lowering the cost of deploying capable LLMs simultaneously lowers the barrier to misuse such as disinformation generation; this concern is common to LLM efficiency research broadly and is not amplified by our specific contribution. 9References 
+
+Mehmet Emre Akbulut, Hazem Hesham Yousef Shalby, Fabrizio Pittorino, and Manuel Roveri. Infoq: Mixed-precision quantization via global information flow. In Proceedings of the AAAI Conference on Artificial Intelligence , volume 40, pages 19598–19606, 2026. Yamato Arai and Yuma Ichikawa. Quantization error propagation: Revisiting layer-wise post-training quantization. In The Thirty-ninth Annual Conference on Neural Information Processing Systems ,2025. URL https://openreview.net/forum?id=a3l3K9khbL .Suresh Bolusani, Mathieu Besançon, Ksenia Bestuzheva, Antonia Chmiela, João Dionísio, Tim Donkiewicz, Jasper van Doornmalen, Leon Eifler, Mohammed Ghannam, Ambros Gleixner, et al. The scip optimization suite 9.0. arXiv preprint arXiv:2402.17702 , 2024. Weihan Chen, Peisong Wang, and Jian Cheng. Towards mixed-precision quantization of neural networks via constrained optimization. In Proceedings of the IEEE/CVF International Conference on Computer Vision , pages 5350–5359, 2021. Zihao Deng, Xin Wang, Sayeh Sharify, and Michael Orshansky. Mixed-precision quantization with cross-layer dependencies. arXiv preprint arXiv:2307.05657 , 2023. Zhen Dong, Zhewei Yao, Amir Gholami, Michael W Mahoney, and Kurt Keutzer. Hawq: Hessian aware quantization of neural networks with mixed-precision. In Proceedings of the IEEE/CVF international conference on computer vision , pages 293–302, 2019. Zhen Dong, Zhewei Yao, Daiyaan Arfeen, Amir Gholami, Michael W Mahoney, and Kurt Keutzer. Hawq-v2: Hessian aware trace-weighted quantization of neural networks. Advances in neural information processing systems , 33:18518–18529, 2020. Elias Frantar and Dan Alistarh. Optimal brain compression: A framework for accurate post-training quantization and pruning. In S. Koyejo, S. Mohamed, A. Agarwal, D. Belgrave, K. Cho, and A. Oh, editors, Advances in Neural Information Processing Systems , volume 35, pages 4475–4488. Cur-ran Associates, Inc., 2022. URL https://proceedings.neurips.cc/paper_files/paper/ 2022/file/1caf09c9f4e6b0150b06a07e77f2710c-Paper-Conference.pdf .Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. Gptq: Accurate post-training quantization for generative pre-trained transformers. arXiv preprint arXiv:2210.17323 , 2022. Jialong Guo, Xinghao Chen, Yehui Tang, and Yunhe Wang. SlimLLM: Accurate structured pruning for large language models. In Forty-second International Conference on Machine Learning , 2025. URL https://openreview.net/forum?id=2xjUkU7FDb .Itay Hubara, Yury Nahshan, Yair Hanani, Ron Banner, and Daniel Soudry. Accurate post training quantization with small calibration sets. In International conference on machine learning , pages 4466–4475. PMLR, 2021. Deokjae Lee and Hyun Oh Song. Q-palette: Fractional-bit quantizers toward optimal bit allocation for efficient LLM deployment. In The Thirty-ninth Annual Conference on Neural Information Processing Systems , 2025. URL https://openreview.net/forum?id=l4F50jpiVH .Xing Li, Zeyu Xing, Yiming Li, Linping Qu, Hui-Ling Zhen, Wulong Liu, Yiwu Yao, Sinno Jialin Pan, and Mingxuan Yuan. Kvtuner: Sensitivity-aware layer-wise mixed-precision kv cache quantization for efficient and nearly lossless llm inference. arXiv preprint arXiv:2502.04420 , 2025. Yuhang Li, Ruihao Gong, Xu Tan, Yang Yang, Peng Hu, Qi Zhang, Fengwei Yu, Wei Wang, and Shi Gu. {BRECQ}: Pushing the limit of post-training quantization by block reconstruction. In 
+
+International Conference on Learning Representations , 2021. URL https://openreview.net/ forum?id=POWv6hDd9XH .Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. Awq: Activation-aware weight quantization for on-device llm compression and acceleration. Proceedings of machine learning and systems , 6: 87–100, 2024. 10 Yuexiao Ma, Taisong Jin, Xiawu Zheng, Yan Wang, Huixia Li, Yongjian Wu, Guannan Jiang, Wei Zhang, and Rongrong Ji. Ompq: Orthogonal mixed precision quantization. In Proceedings of the AAAI conference on artificial intelligence , volume 37, pages 9029–9037, 2023. Vladimir Malinovskii, Andrei Panferov, Ivan Ilin, Han Guo, Peter Richtárik, and Dan Alistarh. Higgs: Pushing the limits of large language model quantization via the linearity theorem. In Proceedings of the 2025 Conference of the Nations of the Americas Chapter of the Association for Computational Linguistics: Human Language Technologies (Volume 1: Long Papers) , pages 10857–10886, 2025. Stefan Uhlich, Lukas Mauch, Fabien Cardinaux, Kazuki Yoshiyama, Javier Alonso Garcia, Stephen Tiedemann, Thomas Kemp, and Akira Nakamura. Mixed precision dnns: All you need is a good parametrization. arXiv preprint arXiv:1905.11452 , 2019. Kuan Wang, Zhijian Liu, Yujun Lin, Ji Lin, and Song Han. Haq: Hardware-aware automated quantization with mixed precision. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition , pages 8612–8620, 2019. Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. Smoothquant: Accurate and efficient post-training quantization for large language models. In International conference on machine learning , pages 38087–38099. PMLR, 2023. Linjie Yang and Qing Jin. Fracbits: Mixed precision quantization via fractional bit-widths. In 
+
+Proceedings of the AAAI Conference on Artificial Intelligence , volume 35, pages 10612–10620, 2021. Zhewei Yao, Zhen Dong, Zhangcheng Zheng, Amir Gholami, Jiali Yu, Eric Tan, Leyuan Wang, Qijing Huang, Yida Wang, Michael Mahoney, et al. Hawq-v3: Dyadic neural network quantization. In International Conference on Machine Learning , pages 11875–11886. PMLR, 2021. 11 A Overall Algorithm 
+
+We summarize the proposed CASA algorithm in Algorithm 1. 
+
+Algorithm 1 CASA: Cross-layer Activation-aware Sensitivity Allocation 
+
+Require: Pretrained model with L layers and module set M per layer; calibration set D; bit-width candidate set Q; target BPW Bavg ; local-search rounds R; top-K swap budget per round. 
+
+Ensure: Per-module allocation q⋆ = ( q⋆l,m ) with q⋆l,m ∈ Q .
+
+// Stage 0: shared statistics  
+
+> 1:
+
+Run one forward–backward pass on D to collect, for every (l, m ), the diagonals a(l,m ) =diag E[xx ⊤] and b(l,m ) = diag E[gg ⊤]. 
+
+> 2:
+
+For each (l, m, q ) ∈ [L]×M×Q , materialize the perturbation ∆W (l,m,q ).
+
+// Stage 1: self-term MCKP (Section 4.1)  
+
+> 3:
+
+ℓl,m,q ← P 
+
+> i,j
+
+b(l,m ) 
+
+> i
+
+a(l,m )
+
+> j
+
+ ∆w(l,m,q )
+
+> ij
+
+2 
+
+> 4:
+
+q(0) ← arg min q
+
+P 
+
+> l,m
+
+ℓl,m,q l,m s.t. BPW( q) ≤ Bavg 
+
+// Stage 2: cross-term local search (Section 4.2)  
+
+> 5:
+
+Precompute ¯C(l,m ) 
+
+> q,q ′
+
+for all q, q ′ ∈ Q , l ∈ [L−1] , m ∈ M  
+
+> 6:
+
+q⋆ ← q(0) ; L⋆ ← L cal (q⋆) ▷ record calibration loss  
+
+> 7:
+
+for r = 1 , . . . , R do  
+
+> 8:
+
+for each feasible swap s do ▷ proxy screening  
+
+> 9:
+
+qnew  
+
+> l,m
+
+← (q⋆ ⊕ s)l,m for all (l, m ) 
+
+> 10:
+
+∆cross (s) ← 2 P
+
+> l,m
+
+ ¯C(l,m ) 
+
+> qnew
+> l,m , q new
+> l+1 ,m
+
+− ¯C(l,m )
+
+> q⋆l,m , q ⋆l+1 ,m
+
+ 
+
+> 11:
+
+end for  
+
+> 12:
+
+S ← top-K swaps with ∆cross (s) < 0 
+
+> 13:
+
+if S = ∅ then break  
+
+> 14:
+
+end if  
+
+> 15:
+
+s⋆ ← arg min s∈S Lcal (q⋆ ⊕ s) ▷ evaluate calibration loss  
+
+> 16:
+
+if Lcal (q⋆ ⊕ s⋆) ≥ L ⋆ then break  
+
+> 17:
+
+end if  
+
+> 18:
+
+q⋆ ← q⋆ ⊕ s⋆; L⋆ ← L cal (q⋆) 
+
+> 19:
+
+end for  
+
+> 20:
+
+return q⋆
+
+## B Per-Module Distortion Bound 
+
+Theorem 3.1 shows that any scalar proxy incurs a worst-case multiplicative distortion of D := pκ(A)κ(B) relative to the activation-aware quadratic proxy, where κ(A) = λmax (A)/λ min (A)
+
+and κ(B) = λmax (B)/λ min (B) are the condition numbers of the input-side Gram matrix and the output-side curvature matrix, respectively. When this distortion differs across modules, the scalar proxy misranks their relative sensitivities, producing suboptimal bit allocations. To visualize the severity of this bound in practice, we compute log 10 D for every (layer, module) pair in five representative models using 128 C4 calibration samples (sequence length 256). Figure 3 displays the results as heatmaps in the same (module × layer) layout as the bit-allocation maps. 
+
+Key observations. 
+
+• The distortion bound spans many orders of magnitude within a single model. For example, Qwen3-8B ranges from ∼10 1.8 (o_proj, layer 2) to ∼10 13 .2 (gate_proj, layer 1), a spread of over 11 orders. • Early layers (0–3) consistently exhibit the highest distortion across all models, with Q projections in Llama-3-8B reaching 10 10 and gate projections in Qwen3-8B reaching 10 13 .These early layers are exactly where scalar-proxy bit allocation diverges most from the activation-aware solution. 12 • Within each layer further weakens the scalar proxy: in Qwen3 layers, κ∼10 10 modules coexist with κ∼10 2 ones, so the upper bound pκ(A)κ(B)—the only a priori guarantee on scalar-proxy fidelity—varies by up to 8 orders of magnitude across modules of the same layer, precluding any uniform ranking guarantee for the scalar proxy. These heatmaps provide layer-by-layer empirical evidence that the theoretical bound is not a loose worst-case artifact: the distortion is large enough in practice to cause substantial misranking, motivat-ing the use of full activation-aware proxies as employed by CASA. 
+
+Figure 3: Per-module distortion bound log 10 D across (layer, module) pairs for five representative models. Each cell shows log 10 D; brighter colors indicate larger worst-case scalar-proxy distortion. Early-layer attention/MLP projections exhibit the largest distortion. 13 C Ablation Study: Single-Stage MCKP Combining Self- and Cross-Terms 
+
+CASA decouples the bit allocation into two stages: Stage 1 solves an MCKP on the self-term alone, and Stage 2 refines the assignment by a cross-layer-aware local search. A natural alternative is to fold the cross-term directly into the MCKP objective and solve a single-stage problem. We initially experimented with this approach and found that it does not improve over Stage 1 alone; this finding motivates the two-stage design of CASA. 
+
+Single-stage formulation. Adding the cross-term to Equation (5) yields the bilinear MCKP 
+
+min 
+
+> P
+
+X
+
+> l,m,q
+
+Pl,m,q ℓl,m,q + 2 
+
+> L−1
+
+X
+
+> l=1
+
+X
+
+> m,q,q ′
+
+Pl,m,q Pl+1 ,m,q ′ C(l,m ) 
+
+> q,q ′
+
+, (18) subject to the same assignment and budget constraints as in Equation (5). Here C(l,m ) 
+
+> q,q ′
+
+is a non-negative cross-term coefficient between layers l and l+1 for module m when these are quantized at bit-widths q and q′, respectively. 
+
+Two cross-term coefficient choices. We test two natural definitions of C(l,m ) 
+
+> q,q ′
+
+:• geo_abs : use the Cauchy–Schwarz upper bound ¯C(l,m ) 
+
+> q,q ′
+
+from Section 4.2, which depends only on the self-term diagonals already collected for Stage 1: 
+
+C(l,m ), geo  
+
+> q,q ′
+
+:= ¯C(l,m ) 
+
+> q,q ′
+
+= X
+
+> i,j
+
+q
+
+b(l,m ) 
+
+> i
+
+b(l+1 ,m )
+
+> i
+
+q
+
+a(l,m ) 
+
+> j
+
+a(l+1 ,m ) 
+
+> j
+
+∆w(l,m,q ) 
+
+> ij
+
+∆w(l+1 ,m,q ′) 
+
+> ij
+
+.
+
+(19) • raw_abs : use the absolute values of the cross-layer Fisher diagonals defined in Equa-tion (13), 
+
+C(l,m ), raw  
+
+> q,q ′
+
+:= X
+
+> i,j
+
+bcross ,(l,l +1 ,m ) 
+
+> i
+
+across ,(l,l +1 ,m ) 
+
+> j
+
+∆w(l,m,q ) 
+
+> ij
+
+∆w(l+1 ,m,q ′) 
+
+> ij
+
+. (20) Unlike geo_abs , which reuses the self-term diagonals from Stage 1, raw_abs requires the cross-Fisher diagonals across , b cross . These can be collected in the same calibration pass as the self-term diagonals, at the cost of additional memory for storing adjacent-layer activations. 
+
+McCormick linearization. Equation (18) is bilinear in P . Introducing auxiliary binary variables 
+
+zl,m,q,q ′ ∈ { 0, 1} together with the standard McCormick envelope linearizes the product into an integer linear programming problem: 
+
+min 
+
+> P,z
+
+X
+
+> l,m,q
+
+Pl,m,q ℓl,m,q + 2 
+
+> L−1
+
+X
+
+> l=1
+
+X
+
+> m,q,q ′
+
+zl,m,q,q ′ C(l,m ) 
+
+> q,q ′
+
+, (21) s.t. zl,m,q,q ′ ≤ Pl,m,q , zl,m,q,q ′ ≤ Pl+1 ,m,q ′ , zl,m,q,q ′ ≥ Pl,m,q + Pl+1 ,m,q ′ − 1, (22) together with the assignment and budget constraints of Equation (5). 
+
+Results. We use the same experimental setup as in Section 5; Table 4 reports the results. The linearized single-stage MCKP fails to improve over the self-term-only baseline under both coefficient choices, although for different reasons: • Under geo_abs , the LP relaxation of the McCormick envelope is loose: the solver collapses onto degenerate, near-uniform allocations (marked †), and the resulting perplexity is not even monotone in the bit budget. • Under raw_abs , the degeneracy is avoided, but the allocations only match or marginally improve the self-term-only MCKP despite a substantially larger optimization problem. These observations confirm that cross-layer effects are better handled outside the MCKP formulation, motivating the two-stage design of CASA. 14 Table 4: Wikitext-2 perplexity ( ↓) and 4-task average accuracy ( ↑, %) for single-stage MCKP with different objective functions. ℓself : self-term only; ℓself + Cgeo : adds the geometric-mean cross-term aggregate (Equation (19)); ℓself + Craw : adds the raw-absolute cross-term aggregate (Equation (20)). All use GPTQ with group size 128, C4 calibration, and no local search. Each cell: PPL / ACC. Bold PPL : lowest per row; bold ACC : highest per row. †Solver collapse: identical allocation across all BPW targets due to McCormick LP-relaxation looseness. Model BPW ℓself ℓself + Cgeo ℓself + Craw 
+
+Llama-2-7B 2.25 11.01 / 43.0 18.94 † / 39.8 10.93 / 42.8 2.50 7.51 / 47.8 18.94 † / 39.8 7.61 / 46.9 2.75 6.22 / 52.1 18.61 † / 40.2 6.22 / 51.6 3.00 5.16 / 55.3 18.94 † / 39.8 5.53 / 54.9 3.25 5.28 / 56.4 17.34 † / 39.1 5.28 / 56.0 3.50 5.16 / 55.3 17.52 † / 38.8 5.16 / 55.4 
+
+3.75 5.05 / 56.5 19.19 † / 38.9 5.05 / 56.5 
+
+4.00 4.98 / 57.1 17.52 † / 39.3 4.98 / 57.2 
+
+Llama-3-8B 2.25 35.75 / 36.8 27.05 / 37.8 35.62 / 37.0 2.50 13.21 / 46.2 13.21 / 45.4 13.49 / 44.5 2.75 9.69 / 53.0 117.30 † / 33.1 9.67 / 53.7 
+
+3.00 7.54 / 60.3 14.60 † / 58.9 7.49 / 59.6 3.25 6.60 / 62.8 14.60 † / 58.9 6.60 / 62.7 3.50 6.29 / 64.2 14.60 † / 58.9 6.30 / 64.2 
+
+3.75 6.07 / 65.2 14.60 † / 58.9 6.07 / 65.1 4.00 5.86 / 65.8 14.60 † / 58.9 5.87 / 65.8 
+
+Llama-3.1-8B 2.25 25.65 / 38.4 26.32 † / 37.4 25.59 / 38.5 
+
+2.50 13.01 / 46.0 78.15 † / 32.6 12.82 / 45.8 2.75 9.56 / 54.0 79.01 † / 31.5 9.42 / 54.0 
+
+3.00 7.31 / 59.8 22.70 † / 55.2 7.34 / 60.2 
+
+3.25 6.57 / 63.6 22.70 † / 55.2 6.56 / 63.5 3.50 6.31 / 64.7 22.70 † / 55.2 6.30 / 64.3 3.75 6.09 / 65.3 22.70 † / 55.2 6.09 / 64.9 4.00 5.89 / 65.8 22.70 † / 55.2 5.88 / 65.4 Qwen3-8B 2.25 14.63 / 40.5 24.98 † / 34.4 14.97 / 40.6 
+
+2.50 11.87 / 47.7 26.31 † / 34.0 11.60 / 49.3 
+
+2.75 10.60 / 54.1 23.44 † / 34.3 10.60 / 54.3 
+
+3.00 9.41 / 62.6 9.60 † / 63.5 9.37 / 62.8 3.25 9.25 / 64.9 9.60 † / 63.5 9.25 / 65.4 
+
+3.50 9.20 / 66.3 9.60 † / 63.5 9.17 / 66.2 3.75 8.94 / 66.7 9.60 † / 63.5 8.88 / 66.1 4.00 8.82 / 67.3 9.60 † / 63.5 8.82 / 67.3 
+
+Qwen3-14B 2.25 10.11 / 47.9 11.85 † / 44.0 10.11 / 49.6 
+
+2.50 9.40 / 53.6 11.76 † / 43.3 9.36 / 55.2 
+
+2.75 8.51 / 62.4 11.77 † / 43.3 8.57 / 61.4 3.00 8.24 / 68.0 8.25 † / 68.8 8.22 / 68.3 3.25 8.12 / 69.2 8.25 † / 68.8 8.11 / 69.2 
+
+3.50 8.02 / 70.0 8.25 † / 68.8 7.94 / 69.8 3.75 7.87 / 70.6 8.25 † / 68.8 7.82 / 70.5 4.00 7.82 / 71.1 8.25 † / 68.8 7.83 / 71.2 
+
+15 D Ablation Study: Local Search without Cross-Layer Awareness 
+
+In the second stage of CASA, we perform a local search that evaluates candidates using the full proxy objective including cross-term coupling between layers. To isolate the contribution of this cross-term awareness, we compare three configurations in Table 5: (1) CASA self , which uses the Stage-1 MCKP solution without any local search; (2) +LS self , which applies local search with the same budget as CASA but ranks candidates by the self-term proxy alone; and (3) the full CASA, whose local search ranks candidates by the complete proxy including cross-terms. +LS self almost always improves over CASA self (14 of 15 configurations), confirming that local search itself is beneficial; the full CASA further improves over +LS self in 13 of 15 configurations. The gap is most pronounced in ultra-low-bit regimes on the Llama-3 family: on Llama-3-8B at 2.25 BPW, perplexity drops from 28.15 (+LS self )to 22.41 (CASA), a 20% relative reduction. These results demonstrate that the self-term proxy alone cannot capture quantization error interactions across layers, and that incorporating cross-term coupling into the search objective is particularly beneficial for bit allocation in the low-bit regime. Table 5: Ablation: self-only local search (+LS self ) versus CASA self (no local search) and CASA (cross-term local search) in the low-bit regime. All methods share the same Stage 1 MCKP (self-only proxy) and GPTQ quantizer (group size 128, C4 calibration). +LS self uses the same search budget as CASA but ranks candidates by self-term proxy only (no cross-term coupling). Each cell: PPL / ACC. 
+
+Bold : best per row. Model BPW CASA self +LS self CASA Llama-2-7B (FP16: 4.86 / 58.6) 2.25 11.01 / 42.1 10.51 / 42.4 11.19 / 42.7 
+
+2.50 7.51 / 47.9 7.48 / 47.9 7.48 / 48.3 
+
+2.75 6.22 / 52.8 6.21 / 52.2 6.18 / 52.5 Llama-3-8B (FP16: 5.49 / 65.0) 2.25 35.75 / 35.6 28.15 / 38.0 22.41 / 39.2 
+
+2.50 13.21 / 45.3 12.44 / 46.6 11.86 / 47.0 
+
+2.75 9.69 / 52.2 9.47 / 52.9 8.83 / 53.3 
+
+Llama-3.1-8B (FP16: 5.57 / 65.8) 2.25 25.65 / 37.6 23.24 / 38.7 20.56 / 39.6 
+
+2.50 13.01 / 45.4 12.38 / 45.7 11.93 / 48.1 
+
+2.75 9.56 / 53.2 9.29 / 53.6 8.78 / 54.1 
+
+Qwen3-8B (FP16: 8.58 / 65.8) 2.25 14.63 / 39.7 14.10 / 40.2 13.63 / 40.8 
+
+2.50 11.87 / 46.7 11.68 / 46.7 11.60 / 47.5 
+
+2.75 10.60 / 51.7 10.52 / 53.1 10.29 / 54.5 
+
+Qwen3-14B (FP16: 7.58 / 69.7) 2.25 10.11 / 46.2 9.63 / 49.9 9.75 / 51.7 
+
+2.50 9.40 / 52.0 9.18 / 54.2 9.06 / 52.6 2.75 8.51 / 60.2 8.57 / 60.2 8.51 / 62.0 
+
+16 E Visualization of bit-allocation 
+
+In addition to Figure 2, we present bit-allocation results for additional models in Figures 4—7. 
+
+Figure 4: Visualization of bit-allocation for Llama-2-7B at 2.5BPW (blue: lower precision; white: higher precision) 
+
+Figure 5: Visualization of bit-allocation for Llama-3.1-8B at 2.5BPW (blue: lower precision; white: higher precision) 17 Figure 6: Visualization of bit-allocation for Qwen3-8B at 2.5BPW (blue: lower precision; white: higher precision) 
+
+Figure 7: Visualization of bit-allocation for Qwen3-14B at 2.5BPW (blue: lower precision; white: higher precision) 18 F Additional Experimental Results 
+
+In addition to Table 2, Table 6 shows the additional experimental results under different bit budgets. Table 6: WikiText-2 perplexity ( ↓) and 6-task average accuracy ( ↑, %) for various mixed-precision quantization methods and different bit budgets. Each cell: PPL / ACC. Bold PPL : lowest per row; 
+
+bold ACC : highest per row (among mixed-precision methods). †Uniform at 2-bit as reference values. Model BPW Q-Palette CASA self CASA Llama-2-7B (FP16: 4.86 / 58.6) 3.25 5.37 / 56.1 5.28 / 56.8 5.28 / 56.9 
+
+3.75 5.14 / 57.8 5.05 / 57.3 5.05 / 56.9 Llama-3-8B (FP16: 5.49 / 65.0) 3.25 7.71 / 59.8 6.60 / 61.1 6.59 / 61.2 
+
+3.75 6.29 / 63.4 6.07 / 63.2 6.07 / 63.2 Llama-3.1-8B (FP16: 5.57 / 65.8) 3.25 7.61 / 60.2 6.57 / 62.1 6.55 / 61.7 3.75 6.34 / 63.8 6.09 / 64.0 6.09 / 64.0 
+
+Qwen3-8B (FP16: 8.58 / 65.8) 3.25 10.57 / 49.8 9.25 / 62.5 9.29 / 63.1 
+
+3.75 9.24 / 62.9 8.94 / 64.2 8.89 / 63.9 Qwen3-14B (FP16: 7.58 / 69.7) 3.25 8.70 / 58.8 8.12 / 66.8 8.13 / 66.8 
+
+3.75 8.14 / 67.1 7.87 / 68.3 7.86 / 68.4 
+
+## G Additional Theoretical Results 
+
+This appendix provides additional theoretical support for the activation-aware proxy and the cross-layer extension. We use the notation from the main paper. For a module (l, m ) and a bit-width candidate q, let ∆W (l,m,q ) represent the quantization perturbation. The activation-aware self-cost used by CASA is 
+
+ℓlmq = tr 
+
+
+
+B(l,m )∆W (l,m,q )A(l,m ) ∆W (l,m,q )⊤
+
+. (23) When a statement concerns a single module, we suppress the superscript (l, m ) and write A, B, and 
+
+E.
+
+G.1 A Lower Bound Showing Why Scalar Proxies Can Fail Definition G.1 (Activation-aware and scalar quadratic proxies) . Let A ∈ Rdin ×din and B ∈
+
+Rdout ×dout be symmetric positive semidefinite matrices. For a perturbation E ∈ Rdout ×din , define the activation-aware quadratic proxy 
+
+Q(E) := tr( BEAE⊤). (24) 
+
+For a scalar α > 0, define the scalar proxy 
+
+Qα(E) := α∥E∥2 
+
+> F
+
+. (25) 
+
+The scalar α may include any layer-wise sensitivity coefficient, normalization by ∥W ∥2 
+
+> F
+
+, or other scalar rescaling. Thus, (25) represents any proxy that assigns the same weight to all directions of E.
+
+Theorem 3.1 (Sharp multiplicative distortion of scalar proxies) . Assume A ≻ 0 and B ≻ 0. Let 
+
+κ(A) := λmax (A)/λmin (A) and κ(B) := λmax (B)/λmin (B). Then 
+
+inf  
+
+> α> 0
+
+sup  
+
+> E̸=0
+
+max 
+
+ Q(E)
+
+Qα(E) , Qα(E)
+
+Q(E)
+
+
+
+= pκ(A)κ(B) =: D. (1) 
+
+Consequently, whenever either the input-side factor A or the output-side factor B is anisotropic, no scalar proxy can uniformly approximate the activation-aware quadratic proxy without incurring this worst-case multiplicative distortion. 
+
+19 Proof. Since A and B are real symmetric positive definite matrices, they admit orthogonal eigende-compositions 
+
+A = U diag( a1, . . . , a din )U ⊤, B = V diag( b1, . . . , b dout )V ⊤, (26) where 0 < a min := λmin (A) ≤ aj ≤ amax := λmax (A) for every j, and 0 < b min := λmin (B) ≤
+
+bi ≤ bmax := λmax (B) for every i.Fix any nonzero E ∈ Rdout ×din and define F := V ⊤EU . Since U and V are orthogonal, 
+
+∥F ∥2 
+
+> F
+
+= tr( F ⊤F ) (27) 
+
+= tr  U ⊤E⊤V V ⊤EU  (28) 
+
+= tr( E⊤E) (29) 
+
+= ∥E∥2 
+
+> F
+
+. (30) Using cyclic invariance of the trace, 
+
+Q(E) = tr  V diag( bi)V ⊤EU diag( aj )U ⊤E⊤ (31) 
+
+= tr  diag( bi)V ⊤EU diag( aj )U ⊤E⊤V  (32) 
+
+= tr  diag( bi)F diag( aj )F ⊤ (33) 
+
+=
+
+> dout
+
+X
+
+> i=1
+> din
+
+X
+
+> j=1
+
+biaj F 2 
+
+> ij
+
+. (34) Since E̸ = 0 , equation (30) implies F̸ = 0 . Define ωij := F 2 
+
+> ij
+
+/∥F ∥2 
+
+> F
+
+. Then ωij ≥ 0 and 
+
+Pdout 
+
+> i=1
+
+Pdin  
+
+> j=1
+
+ωij = 1 . Dividing (34) by ∥E∥2 
+
+> F
+
+= ∥F ∥2 
+
+> F
+
+gives 
+
+r(E) := Q(E)
+
+∥E∥2
+
+> F
+
+=
+
+> dout
+
+X
+
+> i=1
+> din
+
+X
+
+> j=1
+
+ωij biaj . (35) Thus r(E) is a convex combination of the numbers biaj . Therefore 
+
+m := amin bmin ≤ r(E) ≤ amax bmax =: M for every E̸ = 0 . (36) Both endpoints in (36) are attainable. Let umin be a unit eigenvector of A associated with amin , and let vmin be a unit eigenvector of B associated with bmin . Set Emin := vmin u⊤
+
+> min
+
+. Then ∥Emin ∥2 
+
+> F
+
+= 1 
+
+and 
+
+Q(Emin ) = tr  Bvmin u⊤
+
+> min
+
+Aumin v⊤
+
+> min
+
+ (37) 
+
+= tr  Bvmin (u⊤
+
+> min
+
+Aumin )v⊤
+
+> min
+
+ (38) 
+
+= amin tr  Bvmin v⊤
+
+> min
+
+ (39) 
+
+= amin tr  v⊤
+
+> min
+
+Bvmin 
+
+ (40) 
+
+= amin bmin = m. (41) Thus r(Emin ) = m. Similarly, if umax and vmax are unit eigenvectors associated with amax and 
+
+bmax , then Emax := vmax u⊤ 
+
+> max
+
+satisfies r(Emax ) = M .Now fix α > 0. Since Qα(E) = α∥E∥2 
+
+> F
+
+, for every nonzero E,
+
+Q(E)
+
+Qα(E) = r(E)
+
+α , Qα(E)
+
+Q(E) = αr(E) . (42) The bounds m ≤ r(E) ≤ M imply 
+
+max 
+
+ r(E)
+
+α , αr(E)
+
+
+
+≤ max 
+
+ Mα , αm
+
+
+
+for all E̸ = 0 . (43) Conversely, the perturbation Emax attains the value M/α in the first ratio, and Emin attains the value 
+
+α/m in the second ratio. Therefore, for this fixed α,
+
+D(α) := sup  
+
+> E̸=0
+
+max 
+
+ Q(E)
+
+Qα(E) , Qα(E)
+
+Q(E)
+
+
+
+= max 
+
+ Mα , αm
+
+
+
+. (44) 20 For any α > 0,
+
+D(α) ≥
+
+r Mα · αm =
+
+r Mm . (45) Equality is obtained when M/α = α/m , namely when α = √M m . Hence 
+
+inf  
+
+> α> 0
+
+D(α) = 
+
+r Mm (46) 
+
+=
+
+r amax bmax 
+
+amin bmin 
+
+(47) 
+
+=
+
+r amax 
+
+amin 
+
+bmax 
+
+bmin 
+
+(48) 
+
+= pκ(A)κ(B). (49) This proves the theorem. 
+
+Corollary G.2 (Singular curvature gives infinite scalar distortion) . Let A ⪰ 0 and B ⪰ 0. Use the convention that c/ 0 = + ∞ for every c > 0. If either A or B is singular, then for all α > 0,
+
+sup  
+
+> E̸=0
+
+max 
+
+ Q(E)
+
+Qα(E) , Qα(E)
+
+Q(E)
+
+
+
+= + ∞. (50) 
+
+Proof. Assume first that A is singular. Then there exists a unit vector u0 ∈ Rdin such that Au0 = 0 .Let v ∈ Rdout be any unit vector and set E0 := vu ⊤ 
+
+> 0
+
+. Then E0̸ = 0 , ∥E0∥2 
+
+> F
+
+= 1 , and 
+
+E0AE⊤ 
+
+> 0
+
+= vu ⊤ 
+
+> 0
+
+Au0v⊤ (51) 
+
+= v(u⊤ 
+
+> 0
+
+Au0)v⊤ (52) 
+
+= 0 . (53) Consequently, 
+
+Q(E0) = tr( BE0AE⊤ 
+
+> 0
+
+), Qα(E0) = α∥E0∥2 
+
+> F
+
+= α > 0. (54) Thus Q(E0) = 0 , and therefore Qα(E0)/Q (E0) = + ∞.If instead B is singular, choose a unit vector v0 such that Bv0 = 0 , choose any unit vector u, and set 
+
+E0 := v0u⊤. Then 
+
+Q(E0) = tr  Bv0u⊤Auv ⊤
+
+> 0
+
+ (55) 
+
+= ( u⊤Au) tr  Bv0v⊤
+
+> 0
+
+ (56) 
+
+= ( u⊤Au) tr  v⊤ 
+
+> 0
+
+Bv0
+
+ (57) 
+
+= 0 , (58) while Qα(E0) = α > 0. Hence, the supremum is again infinite. We presents a rigorous statement and proof of Proposition 3.2. We first formally restate Proposition 3.2 below. 
+
+Proposition G.3 (Proxy misranking can create arbitrarily large MCKP regret) . Consider two modules indexed by i ∈ { 1, 2} and two bit-width choices, L and H, where L is of lower precision and H
+
+is of higher precision. Suppose the bit budget allows exactly one module to use H. Let the true second-order cost be 
+
+Ci(b) = γidb, b ∈ { L, H }, (59) 
+
+where dL > d H > 0 and γi > 0. Let a proxy MCKP use the proxy cost, bCi(b) = bγidb, where bγi > 0.Suppose that the true sensitivities and proxy sensitivities have opposite rankings: γ1 > γ 2, bγ2 > bγ1.Then the true optimal allocation assigns H to module 1, whereas the proxy-optimal allocation assigns 
+
+H to module 2. The true regret of the proxy-optimal allocation is 
+
+Regret = ( γ1 − γ2)( dL − dH ). (60) 
+
+In particular, taking γ1 = R and γ2 = 1 makes the regret equal to (R − 1)( dL − dH ), which diverges as R → ∞ .
+
+21 Proof. Because exactly one module can use H, there are exactly two feasible allocations: 
+
+A1 = ( H, L ), A2 = ( L, H ), (61) where A1 assigns H to module 1 and L to module 2, while A2 assigns L to module 1 and H to module 2.First, consider the true objective. The true cost of A1 is 
+
+C(A1) = γ1dH + γ2dL, (62) and the true cost of A2 is 
+
+C(A2) = γ1dL + γ2dH . (63) Therefore, 
+
+C(A2) − C(A1) = γ1dL + γ2dH − γ1dH − γ2dL (64) 
+
+= γ1(dL − dH ) − γ2(dL − dH ) (65) 
+
+= ( γ1 − γ2)( dL − dH ). (66) Since γ1 > γ 2 and dL > d H , we have 
+
+C(A2) − C(A1) > 0. (67) Thus, C(A1) < C (A2). Since A1 and A2 are the only feasible allocations, A1 is the unique true optimum. Next, consider the proxy objective. The proxy cost of A1 is 
+
+bC(A1) = bγ1dH + bγ2dL, (68) and the proxy cost of A2 is 
+
+bC(A2) = bγ1dL + bγ2dH . (69) Subtracting gives 
+
+bC(A1) − bC(A2) = bγ1dH + bγ2dL − bγ1dL − bγ2dH (70) 
+
+= −bγ1(dL − dH ) + bγ2(dL − dH ) (71) 
+
+= ( bγ2 − bγ1)( dL − dH ). (72) Since bγ2 > bγ1 and dL > d H , we have 
+
+bC(A1) − bC(A2) > 0. (73) Therefore, 
+
+bC(A2) < bC(A1). (74) Since A1 and A2 are the only feasible allocations, A2 is the unique proxy optimum. The regret of the proxy-optimal allocation is defined as 
+
+Regret = C(A2) − C(A1). (75) Using the true-cost calculation above, 
+
+Regret = ( γ1 − γ2)( dL − dH ). (76) Finally, if γ1 = R and γ2 = 1 , then 
+
+Regret = ( R − 1)( dL − dH ). (77) Since dL − dH > 0 is fixed, this quantity tends to +∞ as R → ∞ .22 G.2 High-rate Quantization and the Optimal Bit-allocation Rule 
+
+Let i = ( l, m ) denote a module index, and let I be the finite set of modules over which mixed precision is performed. For each module i ∈ I , write 
+
+ni := size lm > 0 (78) for the number of scalar weights in module i. We use βi ∈ R to denote the continuous bit width assigned to module i, in order to avoid conflict with the diagonal entries bi,r of B(i). Throughout this subsection, vec stacks the columns of its matrix argument. 
+
+Assumption G.4 (High-rate second-moment model) . For each module i ∈ I and continuous bit width βi, let 
+
+Ei(βi) := ∆ W (i,β i) ∈ Rdout ,i ×din ,i (79) 
+
+be the random quantization perturbation. We assume that there exists a fixed positive semidefinite matrix 
+
+Σi ∈ Rdout ,i din ,i ×dout ,i din ,i , Σi ⪰ 0, (80) 
+
+such that 
+
+E vec( Ei(βi)) vec( Ei(βi)) ⊤ = 2 −2βi Σi. (81) 
+
+Thus the perturbation second moment decays proportionally to 2−2βi .
+
+The randomness in Ei(βi) may be interpreted either as randomness induced by stochastic rounding or as the standard high-rate quantization model in which quantization errors are analyzed under a source distribution. The results below use only the second-moment condition in Assumption G.4. 
+
+Proposition G.5 (Expected activation-aware distortion under the high-rate model) . Suppose Assump-tion G.4 holds. Assume also that 
+
+A(i) ∈ Rdin ,i ×din ,i , B(i) ∈ Rdout ,i ×dout ,i (82) 
+
+are symmetric positive semidefinite matrices. Define 
+
+Γi := tr 
+
+
+
+(A(i) ⊗ B(i))Σ i
+
+
+
+. (83) 
+
+Then 
+
+E
+
+h
+
+tr 
+
+
+
+B(i)Ei(βi)A(i)Ei(βi)⊤i 
+
+= Γ i2−2βi . (84) 
+
+Moreover, Γi ≥ 0. If, in addition, A(i) and B(i) are diagonal, with diagonal entries 
+
+A(i) = diag( ai, 1, . . . , a i,d in ,i ), B(i) = diag( bi, 1, . . . , b i,d out ,i ), (85) 
+
+and if the entrywise second moments satisfy 
+
+E
+
+
+
+∆w(i) 
+
+> rc
+
+(βi)
+
+2
+
+= σ2
+
+> i,rc
+
+2−2βi , 1 ≤ r ≤ dout ,i , 1 ≤ c ≤ din ,i , (86) 
+
+then 
+
+Γi =
+
+> dout ,i
+
+X
+
+> r=1
+> din ,i
+
+X
+
+> c=1
+
+bi,r ai,c σ2
+
+> i,rc
+
+. (87) 
+
+Proof. Fix a module i ∈ I and a bit width βi. For notational brevity, write 
+
+E := Ei(βi), A := A(i), B := B(i), z := vec( E). (88) Since E ∈ Rdout ,i ×din ,i , we have z ∈ Rdout ,i din ,i . The standard vectorization identity states that, for compatible matrices E, A, and B,
+
+tr( BEAE⊤) = vec( E)⊤(A⊤ ⊗ B) vec( E). (89) Because A is symmetric, A⊤ = A. Hence, if we define 
+
+M := A ⊗ B, (90) 23 then (89) gives 
+
+tr( BEAE⊤) = z⊤M z. (91) We next recall the elementary identity 
+
+E[z⊤M z ] = tr  M E[zz ⊤] . (92) Indeed, since z⊤M z is a scalar, it is equal to its trace. Therefore, 
+
+E[z⊤M z ] = E tr( z⊤M z ) (93) 
+
+= E tr( M zz ⊤) (94) 
+
+= tr  M E[zz ⊤] , (95) where the second equality uses the cyclic invariance of the trace and the third equality uses linearity of expectation and trace. Applying (92) to (91) yields 
+
+E tr( BEAE⊤) = tr  M E[zz ⊤] . (96) By Assumption G.4, 
+
+E[zz ⊤] = 2 −2βi Σi. (97) Substituting this into (96), and using M = A(i) ⊗ B(i), gives 
+
+E
+
+h
+
+tr 
+
+
+
+B(i)Ei(βi)A(i)Ei(βi)⊤i 
+
+= tr 
+
+
+
+(A(i) ⊗ B(i))2 −2βi Σi
+
+
+
+(98) 
+
+= 2 −2βi tr 
+
+
+
+(A(i) ⊗ B(i))Σ i
+
+
+
+(99) 
+
+= Γ i2−2βi . (100) This proves (84). It remains to prove nonnegativity of Γi. Since A(i) ⪰ 0 and B(i) ⪰ 0, the Kronecker product satisfies 
+
+A(i) ⊗ B(i) ⪰ 0. (101) Set 
+
+P := A(i) ⊗ B(i). (102) Then P ⪰ 0, so its unique positive semidefinite square root P 1/2 exists. Since Σi ⪰ 0, we have 
+
+P 1/2ΣiP 1/2 ⪰ 0. (103) Therefore its trace is nonnegative. Using cyclic invariance of the trace, 
+
+Γi = tr( P Σi) = tr( P 1/2P 1/2Σi) = tr( P 1/2ΣiP 1/2) ≥ 0. (104) This proves Γi ≥ 0.Finally, suppose A(i) and B(i) are diagonal as stated. For this diagonal case, again abbreviate 
+
+E = Ei(βi) and write its entries as Erc = ∆ w(i) 
+
+> rc
+
+(βi). The (r, r ) entry of EA(i)E⊤ is 
+
+(EA(i)E⊤)rr =
+
+> din ,i
+
+X
+
+> c=1
+
+ai,c E2
+
+> rc
+
+. (105) Since B(i) is diagonal, we obtain 
+
+tr 
+
+
+
+B(i)EA(i)E⊤
+
+=
+
+> dout ,i
+
+X
+
+> r=1
+
+bi,r (EA(i)E⊤)rr (106) 
+
+=
+
+> dout ,i
+
+X
+
+> r=1
+> din ,i
+
+X
+
+> c=1
+
+bi,r ai,c E2 
+
+> rc
+
+(107) 
+
+=
+
+> dout ,i
+
+X
+
+> r=1
+> din ,i
+
+X
+
+> c=1
+
+bi,r ai,c 
+
+
+
+∆w(i) 
+
+> rc
+
+(βi)
+
+2
+
+. (108) 24 Taking expectations and using (86) gives 
+
+E
+
+h
+
+tr 
+
+
+
+B(i)Ei(βi)A(i)Ei(βi)⊤i 
+
+=
+
+> dout ,i
+
+X
+
+> r=1
+> din ,i
+
+X
+
+> c=1
+
+bi,r ai,c E
+
+
+
+∆w(i) 
+
+> rc
+
+(βi)
+
+2
+
+(109) 
+
+=
+
+> dout ,i
+
+X
+
+> r=1
+> din ,i
+
+X
+
+> c=1
+
+bi,r ai,c σ2
+
+> i,rc
+
+2−2βi (110) 
+
+=
+
+
+
+> dout ,i
+
+X
+
+> r=1
+> din ,i
+
+X
+
+> c=1
+
+bi,r ai,c σ2
+
+> i,rc
+
+ 2−2βi . (111) Comparing this expression with (84), we conclude that 
+
+Γi =
+
+> dout ,i
+
+X
+
+> r=1
+> din ,i
+
+X
+
+> c=1
+
+bi,r ai,c σ2
+
+> i,rc
+
+. (112) This proves (87). In the diagonal case, the quantity tr( B(i)Ei(βi)A(i)Ei(βi)⊤) depends only on the squared entries 
+
+(∆ w(i) 
+
+> rc
+
+(βi)) 2. Hence the diagonal formula requires only the entrywise second moments in (86); it does not require the off-diagonal covariances E[∆ w(i) 
+
+> rc
+
+(βi)∆ w(i) 
+
+> r′c′
+
+(βi)] to vanish. 
+
+Assumption G.6 (Positive effective sensitivity) . For every module i ∈ I considered in the continuous bit-allocation problem, the effective activation-aware high-rate sensitivity satisfies 
+
+Γi > 0. (113) 
+
+Theorem 4.1 (Optimal continuous bit allocation under high-rate distortion) . Let I be a finite nonempty index set. Assume that Γi > 0 and ni > 0 for every i ∈ I . Consider the continuous relaxation 
+
+min 
+
+> {βi}i∈I
+
+F (β) := X
+
+> i∈I
+
+Γi2−2βi subject to X
+
+> i∈I
+
+niβi ≤ Btotal . (7) 
+
+Then the problem has a unique global minimizer. Moreover, the unique minimizer satisfies P 
+
+> i∈I
+
+niβ′ 
+
+> i
+
+= Btotal and is given by 
+
+β′ 
+
+> i
+
+= 12 log 2 (Γi/ni) + c, c = Btotal − 12
+
+P 
+
+> j∈I
+
+nj log 2 (Γj/nj )
+
+P 
+
+> j∈I
+
+nj
+
+. (8) 
+
+Consequently, for any two modules i, j ∈ I ,
+
+β′ 
+
+> i
+
+− β′ 
+
+> j
+
+= 12 log 2
+
+ Γi/ni
+
+> Γj
+
+/nj
+
+
+
+. (9) 
+
+Thus the optimal continuous bit width is larger for modules with larger activation-aware sensitivity per parameter, Γi/n i.Proof. We first prove strict convexity. For each i ∈ I , define 
+
+fi(βi) := Γ i2−2βi . (114) Then ddβ i
+
+fi(βi) = −2 ln(2)Γ i2−2βi , (115) and d2
+
+dβ 2
+
+> i
+
+fi(βi) = 4(ln 2) 2Γi2−2βi . (116) Since Γi > 0 and 2−2βi > 0, we have 
+
+d2
+
+dβ 2
+
+> i
+
+fi(βi) > 0 (117) 25 for every βi ∈ R. Hence each fi is strictly convex. Since F (β) = P 
+
+> i
+
+fi(βi) is a sum of strictly convex functions in separate coordinates, F is strictly convex on R|I| . The feasible set 
+
+(
+
+β ∈ R|I| : X
+
+> i∈I
+
+niβi ≤ Btotal 
+
+)
+
+(118) is convex because it is a half-space. We next prove existence of a minimizer. The feasible set is nonempty; for example, taking all βi
+
+sufficiently negative gives P 
+
+> i
+
+niβi ≤ Btotal . We first show that any optimal point, if it exists, must satisfy the budget equality. Suppose that β is feasible and satisfies 
+
+X
+
+> i
+
+niβi < B total . (119) Choose any k ∈ I . Since the inequality is strict and nk > 0, there exists ε > 0 sufficiently small such that the vector eβ defined by 
+
+eβk = βk + ε, eβi = βi for i̸ = k (120) is still feasible. Moreover, since fk is strictly decreasing, we have 
+
+fk( eβk) < f k(βk), (121) while all other terms in F are unchanged. Therefore 
+
+F ( eβ) < F (β). (122) Thus no point with slack budget can be optimal. Consequently, any minimizer must lie on the affine hyperplane 
+
+H := 
+
+(
+
+β ∈ R|I| : X
+
+> i
+
+niβi = Btotal 
+
+)
+
+. (123) It remains to show that a minimizer exists on H. Choose any ¯β ∈ H , for instance 
+
+¯βi = Btotal 
+
+P 
+
+> j
+
+nj
+
+for all i ∈ I . (124) Consider the sublevel set 
+
+S := β ∈ H : F (β) ≤ F ( ¯β) . (125) The set S is closed because H is closed and F is continuous. We now show that S is bounded. Suppose, for contradiction, that S is unbounded. Then there exists a sequence {β(t)}∞ 
+
+> t=1
+
+⊂ S such that 
+
+∥β(t)∥2 → ∞ . (126) Since I is finite, after passing to a subsequence, at least one coordinate is unbounded in absolute value. If some coordinate satisfies β(t) 
+
+> k
+
+→ −∞ along a subsequence, then 
+
+Γk2−2β(t) 
+
+> k
+
+→ +∞, (127) and hence 
+
+F (β(t)) → +∞, (128) contradicting F (β(t)) ≤ F ( ¯β). Otherwise, some coordinate satisfies β(t) 
+
+> k
+
+→ +∞ along a subse-quence. Since every β(t) ∈ H , X
+
+> i
+
+niβ(t) 
+
+> i
+
+= Btotal . (129) Because nk > 0 and ni > 0 for all i, the positive divergence of nkβ(t) 
+
+> k
+
+must be offset by at least one coordinate r̸ = k satisfying β(t) 
+
+> r
+
+→ −∞ along a further subsequence. Then again 
+
+Γr 2−2β(t) 
+
+> r
+
+→ +∞, (130) 26 so 
+
+F (β(t)) → +∞, (131) contradicting F (β(t)) ≤ F ( ¯β). Therefore S is bounded. Since S is closed and bounded in finite-dimensional Euclidean space, it is compact. By continuity of F , there exists a minimizer of F over 
+
+S, and therefore over H. Since every global minimizer must lie on H, this minimizer is also a global minimizer of the original inequality-constrained problem. Strict convexity of F and convexity of the feasible set imply that the global minimizer is unique. We now derive its closed form. The problem is convex and satisfies Slater’s condition because, for example, taking all βi sufficiently negative yields 
+
+X
+
+> i
+
+niβi < B total . (132) Hence the Karush–Kuhn–Tucker conditions are necessary and sufficient for global optimality. Let 
+
+λ ≥ 0 be the Lagrange multiplier for the constraint 
+
+X
+
+> i
+
+niβi ≤ Btotal . (133) The Lagrangian is 
+
+L(β, λ ) = X
+
+> i
+
+Γi2−2βi + λ X
+
+> i
+
+niβi − Btotal 
+
+!
+
+. (134) Stationarity at the unique minimizer β′ gives, for every i ∈ I ,
+
+−2 ln(2)Γ i2−2β′ 
+
+> i
+
++ λn i = 0 . (135) Since the budget is active, complementary slackness is consistent with any λ ≥ 0. However, (135) implies λ > 0, because Γi > 0, ni > 0, and 2−2β′ 
+
+> i
+
+> 0. Rearranging (135) gives 
+
+2−2β′ 
+
+> i
+
+= λn i
+
+2 ln(2)Γ i
+
+. (136) Taking base-two logarithms of both sides yields 
+
+−2β′ 
+
+> i
+
+= log 2 λ + log 2 ni − log 2(2 ln(2)) − log 2 Γi. (137) Multiplying by −1/2 gives 
+
+β′ 
+
+> i
+
+= 12 log 2
+
+ Γi
+
+ni
+
+
+
++ 12 log 2
+
+ 2 ln(2) 
+
+λ
+
+
+
+. (138) The second term is independent of i. Define 
+
+c := 12 log 2
+
+ 2 ln(2) 
+
+λ
+
+
+
+. (139) Then 
+
+β′ 
+
+> i
+
+= 12 log 2
+
+ Γi
+
+ni
+
+
+
++ c. (140) Substituting this expression into the active budget equality gives 
+
+Btotal = X
+
+> i
+
+niβ′ 
+
+> i
+
+(141) 
+
+= X
+
+> i
+
+ni
+
+ 12 log 2
+
+ Γi
+
+ni
+
+
+
++ c
+
+
+
+(142) 
+
+= 12
+
+X
+
+> i
+
+ni log 2
+
+ Γi
+
+ni
+
+
+
++ c X
+
+> i
+
+ni. (143) Solving this equation for c gives 
+
+c =
+
+Btotal − 12
+
+P 
+
+> j∈I
+
+nj log 2
+
+ Γj
+
+> nj
+
+P 
+
+> j∈I
+
+nj
+
+. (144) 27 Finally, subtracting the formula for β′ 
+
+> j
+
+from the formula for β′ 
+
+> i
+
+cancels the common constant c and gives 
+
+β′ 
+
+> i
+
+− β′ 
+
+> j
+
+= 12 log 2
+
+ Γi/n i
+
+Γj /n j
+
+
+
+. (145) This completes the proof. 
+
+Corollary G.7 (Bounded bit widths give clipped water-filling) . Assume Γi > 0 and ni > 0 for all 
+
+i ∈ I . Suppose practical constraints impose 
+
+βmin  
+
+> i
+
+≤ βi ≤ βmax  
+
+> i
+
+(146) 
+
+for every i ∈ I , with βmin  
+
+> i
+
+≤ βmax  
+
+> i
+
+, and suppose the budget satisfies 
+
+X
+
+> i
+
+niβmin  
+
+> i
+
+< B total < X
+
+> i
+
+niβmax  
+
+> i
+
+. (147) 
+
+Then the problem 
+
+min 
+
+> β
+
+X
+
+> i
+
+Γi2−2βi
+
+subject to X
+
+> i
+
+niβi ≤ Btotal ,βmin  
+
+> i
+
+≤ βi ≤ βmax  
+
+> i
+
+∀i ∈ I 
+
+(148) 
+
+has a unique global minimizer. Moreover, there exists a constant c ∈ R such that the unique minimizer is 
+
+β′ 
+
+> i
+
+= min 
+
+
+
+βmax  
+
+> i
+
+, max 
+
+
+
+βmin  
+
+> i
+
+, 12 log 2
+
+ Γi
+
+ni
+
+
+
++ c
+
+ 
+
+, (149) 
+
+where c is chosen so that X
+
+> i
+
+niβ′ 
+
+> i
+
+= Btotal . (150) 
+
+Proof. The objective is strictly convex by the same argument as in Theorem 4.1. The feasible set is the intersection of a closed box and a closed half-space, hence it is closed and bounded. It is nonempty because (147) implies that the lower-bound vector βmin is feasible. Therefore, by continuity, a global minimizer exists. Since the objective is strictly convex and the feasible set is convex, the global minimizer is unique. We next show that the budget constraint is active at the minimizer. Let β′ be the unique minimizer. Suppose, for contradiction, that X
+
+> i
+
+niβ′ 
+
+> i
+
+< B total . (151) If β′ 
+
+> i
+
+= βmax  
+
+> i
+
+for every i, then 
+
+X
+
+> i
+
+niβ′ 
+
+> i
+
+= X
+
+> i
+
+niβmax  
+
+> i
+
+> B total , (152) this contradicts feasibility. Hence there exists at least one index k such that 
+
+β′ 
+
+> k
+
+< β max  
+
+> k
+
+. (153) Since the budget inequality is strict and β′ 
+
+> k
+
+< β max  
+
+> k
+
+, there exists ε > 0 sufficiently small such that the vector eβ defined by 
+
+eβk = β′ 
+
+> k
+
++ ε, eβi = β′ 
+
+> i
+
+for i̸ = k (154) satisfies both the box constraints and the budget constraint. Since Γk2−2βk is strictly decreasing in 
+
+βk, we have 
+
+F ( eβ) < F (β′), (155) contradicting optimality. Therefore X
+
+> i
+
+niβ′ 
+
+> i
+
+= Btotal . (156) 28 We now derive the clipped form. For any λ > 0, define the box-constrained Lagrangian subproblem 
+
+min  
+
+> βmin
+> i≤βi≤βmax
+> i
+
+X
+
+> i
+
+Γi2−2βi + λn iβi
+
+ . (157) This problem separates across coordinates. For each i, define 
+
+ϕi(βi) := Γ i2−2βi + λn iβi. (158) Its derivative is 
+
+ϕ′
+
+> i
+
+(βi) = −2 ln(2)Γ i2−2βi + λn i, (159) and its second derivative is 
+
+ϕ′′  
+
+> i
+
+(βi) = 4(ln 2) 2Γi2−2βi > 0. (160) Thus ϕi is strictly convex. The unconstrained minimizer is the unique point satisfying 
+
+−2 ln(2)Γ i2−2βi + λn i = 0 . (161) Equivalently, 
+
+2−2βi = λn i
+
+2 ln(2)Γ i
+
+. (162) Taking base-two logarithms gives 
+
+βunc  
+
+> i
+
+= 12 log 2
+
+ Γi
+
+ni
+
+
+
++ 12 log 2
+
+ 2 ln(2) 
+
+λ
+
+
+
+. (163) Since ϕi is strictly convex, its minimizer over the interval [βmin  
+
+> i
+
+, β max  
+
+> i
+
+] is the projection of βunc  
+
+> i
+
+onto that interval. Therefore, if we define 
+
+c := 12 log 2
+
+ 2 ln(2) 
+
+λ
+
+
+
+, (164) then the coordinate-wise minimizer is 
+
+βi(c) = min 
+
+
+
+βmax  
+
+> i
+
+, max 
+
+
+
+βmin  
+
+> i
+
+, 12 log 2
+
+ Γi
+
+ni
+
+
+
++ c
+
+ 
+
+. (165) It remains to show that one can choose c so that the active budget is satisfied. Define 
+
+G(c) := X
+
+> i
+
+ni min 
+
+
+
+βmax  
+
+> i
+
+, max 
+
+
+
+βmin  
+
+> i
+
+, 12 log 2
+
+ Γi
+
+ni
+
+
+
++ c
+
+ 
+
+. (166) Each summand is continuous and nondecreasing in c, so G is continuous and nondecreasing. More-over, 
+
+lim  
+
+> c→−∞
+
+G(c) = X
+
+> i
+
+niβmin  
+
+> i
+
+, (167) and 
+
+lim  
+
+> c→+∞
+
+G(c) = X
+
+> i
+
+niβmax  
+
+> i
+
+. (168) By (147) and the intermediate value theorem, there exists c ∈ R such that 
+
+G(c) = Btotal . (169) Let β(c) denote the vector defined by the clipped formula with this value of c, and let 
+
+λ := 2 ln(2)2 −2c > 0. (170) By construction, β(c) minimizes X
+
+> i
+
+Γi2−2βi + λn iβi
+
+ (171) over the box constraints. Therefore, for every box-feasible β,
+
+F (β) + λ X
+
+> i
+
+niβi ≥ F (β(c)) + λ X
+
+> i
+
+niβi(c). (172) 29 Now let β be feasible for the original problem. Then 
+
+X
+
+> i
+
+niβi ≤ Btotal = X
+
+> i
+
+niβi(c). (173) Using λ > 0, we obtain 
+
+F (β) ≥ F (β(c)) + λ X
+
+> i
+
+niβi(c) − λ X
+
+> i
+
+niβi (174) 
+
+= F (β(c)) + λ Btotal − X
+
+> i
+
+niβi
+
+!
+
+(175) 
+
+≥ F (β(c)) . (176) Thus β(c) is globally optimal for the original bounded problem. Since the global minimizer is unique, 
+
+β(c) is the unique minimizer. This proves the clipped water-filling form. 
+
+G.3 Why cross-layer extensions are theoretically beneficial 
+
+The main MCKP objective uses only self-costs ℓlmq , corresponding to a block-diagonal Hessian approximation. We now formalize what is gained by retaining cross-layer Hessian blocks. 
+
+Definition G.8 (Self and cross-layer quadratic objectives) . Let i = ( l, m ) denote a module index, and let 
+
+eiq := vec(∆ W (i,q )) (177) 
+
+be the vectorized perturbation of module i under bit candidate q. Let Hii be the Hessian block for module i, and let Hij be the cross-Hessian block between modules i and j. The full Hessian is symmetric, so Hji = H⊤ 
+
+> ij
+
+. Let E be a set of unordered interacting pairs, for example adjacent pairs 
+
+(( l, m ), (l + 1 , m )) , each included once. For a feasible assignment P , define 
+
+S(P ) := X
+
+> i∈I
+
+X
+
+> q
+
+Piq siq , siq := e⊤ 
+
+> iq
+
+Hii eiq , (178) 
+
+and 
+
+X(P ) := 2 X
+
+> (i,j )∈E
+
+X
+
+> q,q ′
+
+Piq Pjq ′ cijqq ′ , cijqq ′ := e⊤ 
+
+> iq
+
+Hij ejq ′ . (179) 
+
+The cross-layer quadratic surrogate is 
+
+Cquad (P ) := S(P ) + X(P ). (180) 
+
+The factor 2 in (179) accounts for the symmetric (i, j ) and (j, i ) Hessian blocks. A common factor 
+
+1/2 from the Taylor expansion is omitted because it does not affect the optimizer. 
+
+Under the Kronecker self-approximation used in the main text, 
+
+Hii ≈ A(i) ⊗ B(i), (181) and therefore 
+
+siq = e⊤ 
+
+> iq
+
+Hii eiq ≈ tr 
+
+
+
+B(i)∆W (i,q )A(i)(∆ W (i,q ))⊤
+
+= ℓiq . (182) This section presents a rigorous statement and proof of Proposition 4.2. We first formally restate Proposition 4.2 below. 
+
+Proposition G.9 (Exact cross-aware optimization is never worse for the quadratic surrogate) . Let F
+
+be the feasible set defined by the MCKP assignment and budget constraints. Let 
+
+Pself ∈ arg min  
+
+> P∈F
+
+S(P ), Pcross ∈ arg min  
+
+> P∈F
+
+Cquad (P ). (183) 
+
+Then 
+
+Cquad (Pcross ) ≤ Cquad (Pself ). (184) 
+
+If Pself is not a minimizer of Cquad over F, then the inequality is strict. 
+
+30 Proof. By definition, Pcross is a global minimizer of Cquad over F. Since Pself ∈ F ,
+
+Cquad (Pcross ) = min   
+
+> P∈F
+
+Cquad (P ) ≤ Cquad (Pself ). (185) If Pself is not a minimizer of Cquad , then its objective value is strictly larger than the minimum value, which gives strict inequality. 
+
+Proposition G.10 (The self-only gap is controlled by omitted cross terms) . With Pself and Pcross as in Proposition 4.2, 
+
+0 ≤ Cquad (Pself ) − Cquad (Pcross ) ≤ X(Pself ) − X(Pcross ) ≤ 2 max   
+
+> P∈F
+
+|X(P )|. (186) 
+
+Proof. The first inequality follows from Proposition 4.2. For the second inequality, expand the difference: 
+
+Cquad (Pself ) − Cquad (Pcross ) = [ S(Pself ) + X(Pself )] − [S(Pcross ) + X(Pcross )] (187) 
+
+= [ S(Pself ) − S(Pcross )] + [ X(Pself ) − X(Pcross )] . (188) Since Pself minimizes S over F and Pcross ∈ F ,
+
+S(Pself ) ≤ S(Pcross ). (189) Therefore 
+
+S(Pself ) − S(Pcross ) ≤ 0, (190) and hence 
+
+Cquad (Pself ) − Cquad (Pcross ) ≤ X(Pself ) − X(Pcross ). (191) The last inequality follows from the triangle inequality: 
+
+X(Pself ) − X(Pcross ) ≤ | X(Pself )| + |X(Pcross )| (192) 
+
+≤ 2 max   
+
+> P∈F
+
+|X(P )|. (193) Combining the three inequalities proves the result. 
+
+Example G.11 (Self-costs alone can be arbitrarily poor in relative value) . For every R > 0 and 
+
+ρ ∈ (0 , 1) , there exists a two-module quadratic problem with a positive definite Hessian such that all feasible assignments have exactly the same self-cost, yet a self-only allocation can be worse than the cross-aware optimum by an additive gap 4ρR and by a multiplicative ratio 
+
+1 + ρ
+
+1 − ρ . (194) 
+
+As ρ ↑ 1, this ratio diverges to +∞.Proof. Consider two adjacent scalar modules. Each module has two feasible perturbation choices, represented by signs s, t ∈ {− 1, +1 }. Define 
+
+e1(s) = √Rs, e2(t) = √Rt. (195) Let the Hessian over the two scalar parameters be 
+
+H =
+
+1 ρρ 1
+
+
+
+. (196) The eigenvalues of H are 1 + ρ and 1 − ρ. Since ρ ∈ (0 , 1) , both eigenvalues are strictly positive, so 
+
+H ≻ 0.For an assignment (s, t ), the full quadratic cost is 
+
+Cquad (s, t ) = ( e1(s) e2(t)) 
+
+1 ρρ 1
+
+  e1(s)
+
+e2(t)
+
+
+
+(197) 
+
+= e1(s)2 + e2(t)2 + 2 ρe 1(s)e2(t) (198) 
+
+= R + R + 2 ρRst (199) 
+
+= 2 R + 2 ρRst. (200) 31 The self-only cost drops the cross term: 
+
+S(s, t ) = e1(s)2 + e2(t)2 = 2 R. (201) Thus all four assignments have identical self-cost, and a self-only criterion has no information with which to distinguish the sign patterns. In particular, an assignment with st = +1 is self-optimal. Its full quadratic cost is 
+
+Csame = 2 R + 2 ρR. (202) The cross-aware optimum chooses st = −1, for which 
+
+Copp = 2 R − 2ρR. (203) The additive gap is 
+
+Csame − Copp = (2 R + 2 ρR ) − (2 R − 2ρR ) = 4 ρR. (204) The multiplicative ratio is 
+
+Csame 
+
+Copp 
+
+= 2R + 2 ρR 
+
+2R − 2ρR = 1 + ρ
+
+1 − ρ . (205) Since 1 − ρ → 0 as ρ ↑ 1, the ratio diverges to +∞.
+
+Lemma G.12 (PSD Hessian blocks imply a Cauchy–Schwarz cross-term bound) . Let 
+
+Hii Hij 
+
+Hji Hjj 
+
+
+
+⪰ 0, Hji = H⊤ 
+
+> ij
+
+. (206) 
+
+Then, for all compatible real vectors x and y,
+
+|x⊤Hij y| ≤ px⊤Hii x
+
+q
+
+y⊤Hjj y. (207) 
+
+Proof. Define 
+
+a := x⊤Hii x, b := y⊤Hjj y, c := x⊤Hij y. (208) Since the block matrix is positive semidefinite, for every t ∈ R,
+
+0 ≤
+
+tx y
+
+⊤ Hii Hij 
+
+Hji Hjj 
+
+  tx y
+
+
+
+(209) 
+
+= t2x⊤Hii x + tx ⊤Hij y + ty ⊤Hji x + y⊤Hjj y. (210) Because Hji = H⊤ 
+
+> ij
+
+and all quantities are real scalars, 
+
+y⊤Hji x = y⊤H⊤ 
+
+> ij
+
+x = x⊤Hij y = c. (211) Hence 
+
+at 2 + 2 ct + b ≥ 0 for all t ∈ R. (212) If a > 0, then the quadratic polynomial in (212) has nonpositive discriminant; otherwise it would take a negative value for some real t. Thus 
+
+(2 c)2 − 4ab ≤ 0, (213) which is equivalent to c2 ≤ ab and hence |c| ≤ √ab .If a = 0 , then (212) becomes 
+
+2ct + b ≥ 0 for all t ∈ R. (214) This is possible only if c = 0 ; otherwise taking t → −∞ when c > 0 or t → +∞ when c < 0
+
+gives a contradiction. Hence |c| = 0 = √ab because a = 0 . The desired inequality follows in all cases. 32 Proposition G.13 (A conservative cross-layer objective upper-bounds the quadratic surrogate) . For every interacting pair (i, j ) ∈ E and candidates (q, q ′), define 
+
+siq := e⊤ 
+
+> iq
+
+Hii eiq , sjq ′ := e⊤ 
+
+> jq ′
+
+Hjj ejq ′ . (215) 
+
+Assume siq ≥ 0 and sjq ′ ≥ 0, and suppose there are constants ρij ∈ [0 , 1] such that 
+
+|e⊤ 
+
+> iq
+
+Hij ejq ′ | ≤ ρij 
+
+√siq sjq ′ for all q, q ′. (216) 
+
+Define 
+
+Uρ(P ) := X
+
+> i,q
+
+Piq siq + 2 X
+
+> (i,j )∈E
+
+X
+
+> q,q ′
+
+Piq Pjq ′ ρij 
+
+√siq sjq ′ . (217) 
+
+Then every feasible assignment P satisfies 
+
+Cquad (P ) ≤ Uρ(P ). (218) 
+
+If the Hessian block over (i, j ) is positive semidefinite, then (216) always holds with ρij = 1 by Lemma G.12. Proof. Starting from Definition G.8, 
+
+Cquad (P ) = X
+
+> i,q
+
+Piq siq + 2 X
+
+> (i,j )∈E
+
+X
+
+> q,q ′
+
+Piq Pjq ′ e⊤ 
+
+> iq
+
+Hij ejq ′ . (219) For every cross term, 
+
+e⊤ 
+
+> iq
+
+Hij ejq ′ ≤ | e⊤ 
+
+> iq
+
+Hij ejq ′ | ≤ ρij 
+
+√siq sjq ′ , (220) where the second inequality is (216). Since Piq Pjq ′ ≥ 0, multiplying by Piq Pjq ′ preserves the inequality. Summing over all interacting pairs and candidates yields 
+
+Cquad (P ) ≤ X
+
+> i,q
+
+Piq siq + 2 X
+
+> (i,j )∈E
+
+X
+
+> q,q ′
+
+Piq Pjq ′ ρij 
+
+√siq sjq ′ = Uρ(P ). (221) If the block Hessian for (i, j ) is positive semidefinite, then applying Lemma G.12 with x = eiq and 
+
+y = ejq ′ gives 
+
+|e⊤ 
+
+> iq
+
+Hij ejq ′ | ≤ 
+
+q
+
+e⊤ 
+
+> iq
+
+Hii eiq 
+
+q
+
+e⊤ 
+
+> jq ′
+
+Hjj ejq ′ = √siq sjq ′ , (222) which is (216) with ρij = 1 .
+
+Corollary G.14 (Robust cross-aware allocation improves the conservative upper bound) . Let 
+
+Pρ ∈ arg min  
+
+> P∈F
+
+Uρ(P ). (223) 
+
+Then 
+
+Uρ(Pρ) ≤ Uρ(Pself ). (224) 
+
+Proof. This follows immediately because Pρ minimizes Uρ over the same feasible set F and Pself ∈F.33
