@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-23</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-24</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 7 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 3 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>3</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>1</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>2</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-23 22:27:14 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-24 22:24:55 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日筛选 7 篇论文（精读 4、速读 3），主线集中在 LLM 与多模态模型的量化、剪枝与推理加速。</p>
-<p>最值得看的是两篇 9.0 分精读：激活感知的混合精度 LLM 量化（含跨层精修），以及把视觉 token 剪枝从&quot;重要性&quot;改写为&quot;条件可移除性&quot;的多模态新视角。</p>
-<p>普通读者可先读 7.0 分的 VLAQuantBench，用闭环评测理解量化真实收益，再决定是否深入 9 分方法。</p>
+<p>今日精读1篇、速读2篇，聚焦量化部署与长上下文压缩。最值得看的是部署前预测PTQ配置的量化代价（8.0分），以及音频量化中文本分数可能掩盖波形表现的问题（7.0分）。普通读者可先读精读那篇，理解如何少走量化调参弯路，再按需关注音频评测盲区。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">4 篇</strong>
+    <strong class="dpr-home-dashboard-count">1 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Beyond Scalar Sensitivity: Activation-Aware Mixed-Precision LLM Quantization with Cross-Layer Refinement">Beyond Scalar Sensitivity: Activation-Aware Mixed-Precision LLM Quantization with Cross-Layer Refinement</span></li><li><span class="dpr-home-dashboard-paper-title" title="From Token Importance to Conditional Removability: Rethinking Visual Token Pruning in Multimodal Large Language Models">From Token Importance to Conditional Removability: Rethinking Visual Token Pruning in Multimodal Large Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="RGSQ: Riemannian Geometry-Sensitive Quantization for Large Vision-Language Models">RGSQ: Riemannian Geometry-Sensitive Quantization for Large Vision-Language Models</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Predicting Quantization Price for Selecting PTQ Configurations Before Deployment">Predicting Quantization Price for Selecting PTQ Configurations Before Deployment</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>4</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>1</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">3 篇</strong>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="VLAQuantBench: Closed-Loop Evaluation of Post-Training Quantization for Vision-Language-Action Models">VLAQuantBench: Closed-Loop Evaluation of Post-Training Quantization for Vision-Language-Action Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="Disaggregated Quantization: Specializing LLM Prefill and Decode">Disaggregated Quantization: Specializing LLM Prefill and Decode</span></li><li><span class="dpr-home-dashboard-paper-title" title="QuantWM: Temporally Consistent 2-Bit KV Cache Quantization for World Models and Video Generation">QuantWM: Temporally Consistent 2-Bit KV Cache Quantization for World Models and Video Generation</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Text Scores Can Miss Waveform Use: A Qwen2-Audio Quantization Case Study">Text Scores Can Miss Waveform Use: A Qwen2-Audio Quantization Case Study</span></li><li><span class="dpr-home-dashboard-paper-title" title="Compressing Long Context into Answer-Aligned Memory Embeddings for LLM Inference">Compressing Long Context into Answer-Aligned Memory Embeddings for LLM Inference</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>3</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>2</strong></span></div>
 </section>
 </div>
 
