@@ -1,6 +1,9 @@
 * <a class="dpr-sidebar-root-link" href="#/">首页</a>
 * <a class="dpr-sidebar-root-link dpr-sidebar-noactive-link" href="javascript:void(0)" data-dpr-hash="#/tutorial/README">使用教程</a>
 * Daily Papers
+  * 2026-09-25 <!--dpr-date:20260925-->
+    * 速读区
+      * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202609/25/2609.29999v1-ghost-q-towards-studying-grounding-hallucinations-overlooked-under-same-score-tradeoffs-in-quantized-vlms" data-sidebar-item="{&quot;title&quot;: &quot;GHOST-Q: Towards Studying Grounding Hallucinations Overlooked Under Same-score TradeOffs in Quantized VLMS&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2609.29999v1-ghost-q-towards-studying-grounding-hallucinations-overlooked-under-same-score-tradeoffs-in-quantized-vlms&quot;, &quot;score&quot;: &quot;7.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;el&quot;}], &quot;evidence&quot;: &quot;VLM后训练量化评估，跨精度视觉grounding行为分析&quot;}">GHOST-Q: Towards Studying Grounding Hallucinations Overlooked Under Same-score TradeOffs in Quantized VLMS</a>
   * 2026-09-24 <!--dpr-date:20260924-->
     * 精读区
       * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202609/24/2609.28270v1-predicting-quantization-price-for-selecting-ptq-configurations-before-deployment" data-sidebar-item="{&quot;title&quot;: &quot;Predicting Quantization Price for Selecting PTQ Configurations Before Deployment&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2609.28270v1-predicting-quantization-price-for-selecting-ptq-configurations-before-deployment&quot;, &quot;score&quot;: &quot;8.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;el&quot;}], &quot;evidence&quot;: &quot;后训练量化配置选择，涉及变换与比特&quot;}">Predicting Quantization Price for Selecting PTQ Configurations Before Deployment</a>
