@@ -1,6 +1,9 @@
 * <a class="dpr-sidebar-root-link" href="#/">首页</a>
 * <a class="dpr-sidebar-root-link dpr-sidebar-noactive-link" href="javascript:void(0)" data-dpr-hash="#/tutorial/README">使用教程</a>
 * Daily Papers
+  * 2026-09-27 <!--dpr-date:20260927-->
+    * 速读区
+      * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202609/27/2609.28262v1-ramp-robust-adaptive-mixed-precision-quantization-for-edge-cpu-vision-models" data-sidebar-item="{&quot;title&quot;: &quot;RAMP: Robust Adaptive Mixed-Precision Quantization for Edge CPU Vision Models&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2609.28262v1-ramp-robust-adaptive-mixed-precision-quantization-for-edge-cpu-vision-models&quot;, &quot;score&quot;: &quot;6.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;el&quot;}], &quot;evidence&quot;: &quot;基于逐层敏感度指标的混合精度量化&quot;}">RAMP: Robust Adaptive Mixed-Precision Quantization for Edge CPU Vision Models</a>
   * 2026-09-26 <!--dpr-date:20260926-->
     * 速读区
       * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202609/26/2609.27355v1-quantization-robust-unlearning-through-the-lens-of-retain-forget-loss-landscapes-interaction" data-sidebar-item="{&quot;title&quot;: &quot;Quantization-Robust Unlearning through the Lens of Retain-Forget Loss Landscapes Interaction&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2609.27355v1-quantization-robust-unlearning-through-the-lens-of-retain-forget-loss-landscapes-interaction&quot;, &quot;score&quot;: &quot;6.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;el&quot;}], &quot;evidence&quot;: &quot;量化鲁棒遗忘，通过损失景观曲率定位量化敏感权重&quot;}">Quantization-Robust Unlearning through the Lens of Retain-Forget Loss Landscapes Interaction</a>

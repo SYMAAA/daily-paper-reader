@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-26</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-27</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 3 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 1 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>0</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>3</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>1</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-26 22:23:38 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-27 21:51:54 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>2026-09-26 日报速读 3 篇、精读挂零，三篇均获 6.0/10。最值得关注量化与模型鲁棒性的两条线：量化下的遗忘鲁棒性，以及同等位宽下 TTS 量化效果因架构而异。普通读者可先从 TTS 量化那篇入手，再按需回看另外两篇。</p>
+<p>今日精读挂零，仅速读 1 篇 6.0 分论文《RAMP: Robust Adaptive Mixed-Precision Quantization for Edge CPU Vision Models》。值得关注的是它主攻边缘 CPU 视觉模型的鲁棒自适应混合精度量化，方向偏向让模型在低算力设备上跑得更稳更省。普通读者可先看它的量化策略在精度损失与推理速度间如何权衡，再判断是否值得深入。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -84,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">3 篇</strong>
+    <strong class="dpr-home-dashboard-count">1 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Quantization-Robust Unlearning through the Lens of Retain-Forget Loss Landscapes Interaction">Quantization-Robust Unlearning through the Lens of Retain-Forget Loss Landscapes Interaction</span></li><li><span class="dpr-home-dashboard-paper-title" title="NS-ATTENTION: Newton-Schulz Transformations of Attention Outputs in Vision Transformers">NS-ATTENTION: Newton-Schulz Transformations of Attention Outputs in Vision Transformers</span></li><li><span class="dpr-home-dashboard-paper-title" title="Same Bit Width, Different Outcomes: Post-Training Quantization of Text-to-Speech Across Architectures">Same Bit Width, Different Outcomes: Post-Training Quantization of Text-to-Speech Across Architectures</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="RAMP: Robust Adaptive Mixed-Precision Quantization for Edge CPU Vision Models">RAMP: Robust Adaptive Mixed-Precision Quantization for Edge CPU Vision Models</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>3</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>1</strong></span></div>
 </section>
 </div>
 
