@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-28</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-29</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 5 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>3</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-28 23:54:43 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-29 23:05:33 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,10 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精选5篇LLM量化与高效适配论文，精读3篇、速读2篇。最值得看的是G²PTQ用广义梯度补偿改进LLM训练后量化（9.0分），以及Softmax重参数化优化输出头量化（8.0分）。普通读者可优先了解这两篇，把握量化精度提升的主流思路。</p>
+<p>今日共生成 17 篇推荐（精读 6 篇，速读 11 篇）</p>
+<p>精读：《P4Q: Co-designing Token Pruning and Quantization for Vision-Language Model Acceleration》（10.0/10）, 《PrismQuant: Optimal Null-Space Rotations for Grouped Quantizers》（9.0/10）</p>
+<p>速读：《QuantaSpike: Short-Window Spike-Driven Quantization for Large Language Models》（8.0/10）, 《DORA: Dynamic Online Reinforcement Agent for Token Pruning in Vision Transformers》（8.0/10）, 《MiCo: Mutual Information Coverage Optimization through Semantic Erasure Modeling for Efficient MLLM Inference》（8.0/10）</p>
+<p>这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +74,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">3 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="G$^2$PTQ: Improving LLM Post-Training Quantization with Generalized Gradient Compensation">G$^2$PTQ: Improving LLM Post-Training Quantization with Generalized Gradient Compensation</span></li><li><span class="dpr-home-dashboard-paper-title" title="Softmax Reparameterization for Output-Head Quantization">Softmax Reparameterization for Output-Head Quantization</span></li><li><span class="dpr-home-dashboard-paper-title" title="Generalization behavior of OPTQ and the role of regularization">Generalization behavior of OPTQ and the role of regularization</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="P4Q: Co-designing Token Pruning and Quantization for Vision-Language Model Acceleration">P4Q: Co-designing Token Pruning and Quantization for Vision-Language Model Acceleration</span></li><li><span class="dpr-home-dashboard-paper-title" title="PrismQuant: Optimal Null-Space Rotations for Grouped Quantizers">PrismQuant: Optimal Null-Space Rotations for Grouped Quantizers</span></li><li><span class="dpr-home-dashboard-paper-title" title="QuantForge: Discovering Residual Decompositions for MXFP4 Post-Training Quantization">QuantForge: Discovering Residual Decompositions for MXFP4 Post-Training Quantization</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>3</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>6</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +87,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Quantizing Looped Transformers: Feedback Exposure and Calibration Blindness">Quantizing Looped Transformers: Feedback Exposure and Calibration Blindness</span></li><li><span class="dpr-home-dashboard-paper-title" title="Automatic Rank Allocation for Low-Rank Adaptation in Large Language Models via lp Regularization">Automatic Rank Allocation for Low-Rank Adaptation in Large Language Models via lp Regularization</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="QuantaSpike: Short-Window Spike-Driven Quantization for Large Language Models">QuantaSpike: Short-Window Spike-Driven Quantization for Large Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="DORA: Dynamic Online Reinforcement Agent for Token Pruning in Vision Transformers">DORA: Dynamic Online Reinforcement Agent for Token Pruning in Vision Transformers</span></li><li><span class="dpr-home-dashboard-paper-title" title="MiCo: Mutual Information Coverage Optimization through Semantic Erasure Modeling for Efficient MLLM Inference">MiCo: Mutual Information Coverage Optimization through Semantic Erasure Modeling for Efficient MLLM Inference</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>11</strong></span></div>
 </section>
 </div>
 
