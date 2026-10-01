@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-30</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-01</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 12 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 4 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>7</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>1</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>3</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-30 23:05:54 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-01 23:25:36 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读5篇、速读7篇共12篇，重点聚焦视觉语言模型与Transformer量化。最值得看的是视觉token剪枝的设计原则和混合精度量化的层角色重访（均9.0分）。建议普通读者优先从这两篇精读入手，把握多模态效率优化的主线。</p>
+<p>今日精读1篇、速读3篇，聚焦Transformer与视觉语言模型的高效推理。最值得看的是《CoViST》用可组合状态压缩视觉token（8.0分），以及速读中量化Softmax注意力、序列计算蒸馏和免训练token缓存三条提效路线。普通读者可优先了解CoViST的视觉token压缩思路，再按需关注其余三篇的推理加速技巧。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">5 篇</strong>
+    <strong class="dpr-home-dashboard-count">1 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="When Text Matters: Design Principles for Visual Token Pruning in Vision-Language Model">When Text Matters: Design Principles for Visual Token Pruning in Vision-Language Model</span></li><li><span class="dpr-home-dashboard-paper-title" title="From Attention Sensitivity to Layer Role: Revisiting Mixed-Precision Quantization of Transformers">From Attention Sensitivity to Layer Role: Revisiting Mixed-Precision Quantization of Transformers</span></li><li><span class="dpr-home-dashboard-paper-title" title="SPIDER: Multi-Layer Semantic Token Pruning and Adaptive Sub-Layer Skipping in Multimodal Large Language Models">SPIDER: Multi-Layer Semantic Token Pruning and Adaptive Sub-Layer Skipping in Multimodal Large Language Models</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="CoViST: Visual Token Compression via Composable States">CoViST: Visual Token Compression via Composable States</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>5</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>1</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">7 篇</strong>
+    <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Teacher-Anchored Selection of Post-Training Quantized Models under Domain Shift">Teacher-Anchored Selection of Post-Training Quantized Models under Domain Shift</span></li><li><span class="dpr-home-dashboard-paper-title" title="Summarize Before Grounding: Query-Guided Chunk Condensation for Long-Video Temporal Grounding">Summarize Before Grounding: Query-Guided Chunk Condensation for Long-Video Temporal Grounding</span></li><li><span class="dpr-home-dashboard-paper-title" title="Resolution as a First-Class Decision: Task-Conditioned Routing for Efficient Multimodal Large Language Models">Resolution as a First-Class Decision: Task-Conditioned Routing for Efficient Multimodal Large Language Models</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Distilling Sequential Computation in Transformer Language Models">Distilling Sequential Computation in Transformer Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="Pretraining Transformers with Quantized Softmax in Attention">Pretraining Transformers with Quantized Softmax in Attention</span></li><li><span class="dpr-home-dashboard-paper-title" title="Text-Vision Synergistic Token Caching: A Training-Free Framework for Efficient Vision-Language-Action Inference">Text-Vision Synergistic Token Caching: A Training-Free Framework for Efficient Vision-Language-Action Inference</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>7</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>3</strong></span></div>
 </section>
 </div>
 
