@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-01</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-02</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 4 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>1</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>3</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-01 23:25:36 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-02 22:56:38 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读1篇、速读3篇，聚焦Transformer与视觉语言模型的高效推理。最值得看的是《CoViST》用可组合状态压缩视觉token（8.0分），以及速读中量化Softmax注意力、序列计算蒸馏和免训练token缓存三条提效路线。普通读者可优先了解CoViST的视觉token压缩思路，再按需关注其余三篇的推理加速技巧。</p>
+<p>今日筛出17篇，精读6篇、速读11篇，焦点集中在LLM量化与高效多模态/视频推理。</p>
+<p>最值得看两篇9分精读：TORQUE优化旋转前后“量化什么/不量化什么”，ThinQuant做权重与激活量化的可扩展旋转学习。</p>
+<p>普通读者可先读这两篇精读，再按部署或多模态需求扫速读中的量化、视觉token剪枝与视频token选择。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">1 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="CoViST: Visual Token Compression via Composable States">CoViST: Visual Token Compression via Composable States</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="TORQUE: Optimizing What (not) to Quantize Before and After Rotation">TORQUE: Optimizing What (not) to Quantize Before and After Rotation</span></li><li><span class="dpr-home-dashboard-paper-title" title="ThinQuant: Scalable Rotation Learning for Weight and Activation Quantization of LLMs">ThinQuant: Scalable Rotation Learning for Weight and Activation Quantization of LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="TReVS: Integrating Textual Relevance and Visual Saliency for Efficient Vision-Language Model Token Pruning">TReVS: Integrating Textual Relevance and Visual Saliency for Efficient Vision-Language Model Token Pruning</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>6</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">3 篇</strong>
+    <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Distilling Sequential Computation in Transformer Language Models">Distilling Sequential Computation in Transformer Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="Pretraining Transformers with Quantized Softmax in Attention">Pretraining Transformers with Quantized Softmax in Attention</span></li><li><span class="dpr-home-dashboard-paper-title" title="Text-Vision Synergistic Token Caching: A Training-Free Framework for Efficient Vision-Language-Action Inference">Text-Vision Synergistic Token Caching: A Training-Free Framework for Efficient Vision-Language-Action Inference</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Calibrate the Decisions That Change the Future: On-Policy Post-Training Quantization for Multimodal Large Language Models">Calibrate the Decisions That Change the Future: On-Policy Post-Training Quantization for Multimodal Large Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="Representation Dynamics Reveal Semantic Saliency and Similarity for Visual Token Pruning in MLLMs">Representation Dynamics Reveal Semantic Saliency and Similarity for Visual Token Pruning in MLLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="GleanVID: Complementary Token Selection for Efficient Video Large Language Models">GleanVID: Complementary Token Selection for Efficient Video Large Language Models</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>3</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>11</strong></span></div>
 </section>
 </div>
 

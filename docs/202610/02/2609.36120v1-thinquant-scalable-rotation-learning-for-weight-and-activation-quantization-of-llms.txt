@@ -1,0 +1,757 @@
+Title: ThinQuant: Scalable Rotation Learning for Weight and Activation Quantization of LLMs
+
+URL Source: https://arxiv.org/pdf/2609.36120v1
+
+Published Time: Wed, 30 Sep 2026 00:17:23 GMT
+
+Number of Pages: 18
+
+Markdown Content:
+# Th nQuant: Scalable Rotation Learning for Weight and Activation Quantization of LLMs 
+
+Mehdi Makni ∗, Ryan Lucas ∗, Rahul Mazumder Operations Research Center Massachusetts Institute of Technology 
+
+## Abstract 
+
+Learned rotations play an important role in enabling low-bit weight and ac-tivation quantization of large language models by smoothing outliers in the activation distribution. State-of-the-art approaches include gradient-based procedures such as SpinQuant and computationally friendlier gradient-free approaches such as DartQuant, but both remain hard to scale to the largest architectures. To address the computational bottlenecks in gradient-free rotation learning, we introduce two ideas for efficiency, (i) a data selection procedure which reduces the required number of calibration data points, and (ii) an exact reduction of the associated optimization on this reduced calibration set. Our data selection procedure exploits the geometric struc-ture of the convex hull of the activations. Using this idea, we show that a carefully selected calibration set with several orders of magnitude fewer activations than state-of-the-art rotation-based methods can match their performance in low-bit quantization settings. Under this extreme data efficiency, the selected activations span an r-dimensional subspace with 
+
+r < d, making optimization over a d × d rotation equivalent to optimizing a d × r matrix on the Stiefel manifold. We solve this reduced problem using an efficient ADMM algorithm that iteratively employs thin matrix updates at every step, hence the name ThinQuant. For Llama-3-70B with W4A4KV4 quantization, ThinQuant completes the entire rotation calibration in under 12 minutes and achieves a WikiText-2 perplexity of 5.63, compared with 7.55 for DartQuant, which requires 111 minutes. Unlike SpinQuant and DartQuant, ThinQuant also scales to Llama-3.1-405B on a single H200 GPU, completing rotation calibration in just over 2 hours and achieving WikiText-2 perplexity of 2.97 at W4A4, compared with 3.48 for GPTAQ+QuaRoT. 
+
+## 1 Introduction 
+
+State-of-the-art large language models (LLMs) contain billions of parameters and process long token sequences, leading to large memory footprints and slow inference time. As a result, post-training quantization (PTQ), where a pretrained checkpoint is compressed without retraining from scratch, has become a central tool for making LLM inference more efficient (Dettmers et al., 2022). Weight-only PTQ (e.g., INT8 or INT4 weights with higher-precision activations) substantially reduces memory and storage, and methods such as GPTQ (Frantar et al., 2023), GPTAQ (Li et al., 2025), and ADMM-Q (Lucas et al., 2026) achieve near-lossless accuracy even at 4-bit weight precision. However, weight-only schemes leave the dominant computation—matrix–vector products during inference—executed in higher precision (e.g. FP16 or BF16). Joint weight and activation quantization gives greater end-to-end speedups, since the core matrix multiplications can be executed by INT8 or INT4 tensor cores, which offer higher peak throughput than FP16 on modern GPUs. Joint weight and activation quantization is substantially harder than weight-only quan-tization. Weights are fixed after training and can be compressed offline using expensive optimization procedures. The resulting quantized tensors are then stored and reused at every inference step. Activations, by contrast, arrive at runtime, are different for every 
+
+> ∗
+
+Equal contribution. 
+
+1arXiv:2609.36120v1 [cs.LG] 28 Sep 2026 input, and must be quantized on-the-fly with a cheap deterministic rule, typically round-to-nearest (RTN) on a uniform grid. Moreover, it has been observed that for activations a small subset of input channels, often fewer than 1% of dimensions, carry values that are orders of magnitude larger than the remaining channels (Dettmers et al., 2022; Xiao et al., 2023). Rotations address this by changing the coordinate system of the network before quantization which does not change the full precision outputs, but makes the activations substantially easier to quantize. For an orthogonal transformation R ∈ Rd×d, a linear map can be equiv-alently written as Wx = ( WR T)( Rx ), so that activations are represented in the rotated basis while the inverse transformation is absorbed into the surrounding weights. Modern LLM quantization methods exploit this invariance at both global and local scales (Liu et al., 2025; Shao et al., 2025). A global change of basis uses a shared rotation across the hidden representation of multiple layers. Local changes of basis instead act within individual layers or modules, for example inside attention or feed-forward blocks, and can therefore use different rotations at different locations in the network. In both cases, the transformations can be absorbed into adjacent linear operators so that the full-precision network remains functionally identical, while its weights and activations can have substantially more favor-able distributions for low-bit quantization. Moreover, rotations can be incorporated into quantized inference pipelines to accelerate inference runtime; we refer the reader to (Liu et al., 2025), Section 4.5. SpinQuant learns rotations by optimizing an end-to-end loss through the quantized network using a straight-through estimator (Liu et al., 2025). While effective, this requires repeated forward and backward passes through the full network, making optimization expensive and potentially prone to overfitting to the fine-tuning objective. DartQuant substantially reduces this cost by replacing end-to-end training with a calibration objective on the activations (Shao et al., 2025). However, this still requires optimizing against a very large collection of activations, which leads to large computational cost. In its standard calibration setting, DartQuant uses a sample α of the tokens generated by N = 128 × 2048 ≈ 2.6 × 10 5 samples from each layer. Across L transformer blocks, the rotation is therefore calibrated using 
+
+αNL activation vectors, where α is the sampling ratio, set to 10% by default. For Llama-3-70B, L = 80, this is on the order of millions of activation vectors. ThinQuant, using geometry-aware activation selection, takes this to extreme efficiency: using only a few hundred activation vectors from the entire network, ThinQuant gives dramatic savings in disk storage ( ≈ 2000 ×) and runtime ( ≈ 10 ×) for Llama-3-70B with performance comparable to more expensive state-of-the-art methods (e.g. SpinQuant, DartQuant), see Figure 1 and Table 4. 10 −1 10 0 10 1
+
+> Rotation-calibration cost (GPU-hours, log scale)
+> 345678
+> WikiText-2 perplexity
+> 8B · 7.91 8B · 8.22 8B · 7.67 70B · 5.63 70B · 7.55 70B · 5.05 405B · 3.27
+> Method
+> ThinQuant DartQuant SpinQuant
+> Model size
+> Llama-3 8B Llama-3 70B Llama-3.1 405B
+> Llama quantization quality versus calibration cost
+
+Figure 1: Comparison of Wikitext-2 perplexity versus calibration cost for different rotation-based methods on LLaMA-3 series models at W4A4KV4. 
+
+Using our smart activation selection pro-cedure, ThinQuant can operate with a very small calibration dataset, mitigating the shortcomings of existing gradient-free methods such as DartQuant. We briefly provide some intuition for our selection procedure (see Section 3.1 for details). We mitigate the quantization error caused by large outliers in the activations space by controlling the ℓ∞ norm of the activations after rotation, similar to prior work such as DartQuant and QuaRot (Ashkboos et al., 2024). Our key observation is that these worst-case magnitudes are determined by the convex hull of the activations, rather than by the full activation distribution. For a cal-ibration set A = {x1, . . . , xN } ⊂ Rd, the extreme points of the symmetric convex hull 
+
+K = conv (A ∪ (−A )) captures the largest absolute projection in every direction. Its extreme points therefore suffice to determine the worst-case objective, while the interior activations can be discarded without changing it. Our data selection procedure thus selects geometri-cally prominent extreme points in the activations across many possible bases, rather than 2only those that are outliers in the original coordinates. In practice, this geometric selection lets us replace hundreds of thousands of calibration tokens per layer with a tiny subset of activations. Given this reduced number of data points, we show that loss functions commonly used to control quantization error (e.g. ℓ∞, kurtosis) admit an exact reduction to a smaller optimization problem. Generally, the budget B we use for activation vectors (order 100) is much smaller than the hidden dimension d (order thousands). Let U ∈ Rd×B collect the selected activation vectors, and let r = rank (U) ≤ B. Writing a thin factorization U = QS ,the columns of Q ∈ Rd×r are orthonormal, so Q ∈ St (d, r) = {Y ∈ Rd×r : YTY = Ir }. Since the calibration objective depends on the full rotation R ∈ Rd×d only through RU = ( RQ )S,it is determined entirely by the d × r matrix RQ . We show that optimization over the full orthogonal group is therefore exactly equivalent to optimization over the much smaller Stiefel manifold St (d, r). Hence ThinQuant, with a few hundred selected activations, replaces a dense d × d rotation by a d × r variable with r ≪ d, reducing the effective optimization dimension from quadratic to linear in d, with no additional approximation beyond the initial activation selection. We summarize our contributions as follows: • Reducing the calibration data. We develop a geometric activation-selection procedure to select activations that are frequently exposed as extreme along random Gaussian direc-tions. This reduces the calibration set required for rotation learning by several orders of magnitude, lowering activation storage and the cost of objective evaluations. We support this selection approach with a dimension-free bound on the expected discrepancy between the full and reduced calibration objectives under Haar-random rotations (Theorem 1). • Reducing the optimization dimension. We show that this reduced calibration set leads to an exact reduction of the rotation-learning problem. For selected activations spanning an 
+
+r-dimensional subspace with r < d, optimizing a d × d rotation is equivalent to optimizing a d × r matrix on the Stiefel manifold, with no additional approximation beyond activation selection (Theorem 2). We exploit this equivalence through an ADMM algorithm with thin matrix factorizations, reducing optimization memory and per-iteration cost without requiring forward or backward passes through the model during optimization. • Efficient rotation learning at scale. Combining these reductions, ThinQuant achieves highly competitive perplexity and downstream accuracy on Llama-2 and Llama-3 un-der W4A4KV4 quantization at substantially lower calibration cost. On Llama-3-70B, ThinQuant reduces total rotation-calibration time from 111 to approximately 12 minutes relative to DartQuant, while improving WikiText-2 perplexity from 7.55 to 5.63 (Table 1). Moreover, to demonstrate the extreme scalability of our method, we employ ThinQuant on Llama-3.1-405B. It runs in just over 2 hours on a single H200 GPU, and achieves WikiText-2 perplexity at W4A4 (2.97 vs 3.48 of GPTAQ+QuaRoT), where other optimization-based rotation learning methods fail to scale under similar hardware constraints. 
+
+## 2 Related work 
+
+Post-training quantization. Weight-only quantization reduces parameter storage and memory traffic while retaining higher-precision activations. GPTQ (Frantar et al., 2023) uses approximate second-order information for weight quantization. GPTAQ (Li et al., 2025) extends GPTQ with a different calibration scheme that uses extra closed-form weight updates to compensate for discrepancies between full-precision and quantized layer in-puts. AWQ uses activation statistics to protect salient weight channels (Lin et al., 2024), and ADMM-Q uses an ADMM-based method for weight-only quantization (Lucas et al., 2026). Beyond weight-only methods, joint weight and activation quantization additionally enables low-precision matrix multiplications, but must accommodate large outlier values in activation distributions (Dettmers et al., 2022; Xiao et al., 2023). SmoothQuant addresses this difficulty through function-preserving rescaling, transferring quantization difficulty from activations to weights (Xiao et al., 2023). OmniQuant further learns clipping parameters and equivalent transformations through block-wise reconstruction (Shao et al., 2024). Such equivalent transformations change the representation presented to the quantizer without changing the full-precision network output. Our method also falls within this post-training setting, targeting joint low-bit weight and activation quantization. Specifically, we focus on function-preserving rotations, and discuss rotation-based methods below. 3Rotation-based quantization. Rotation-based methods provide another way to obtain rep-resentations that are more amenable to low-bit quantization. QuIP uses random orthogonal preprocessing to improve weight and Hessian incoherence for weight-only quantization (Chee et al., 2023). QuaRot applies fixed randomized Hadamard rotations to support weight, activation, and KV-cache quantization (Ashkboos et al., 2024), and is generally the fastest method since it is calibration-free. SpinQuant improves substantially on the quality of QuaRot by instead learning rotations by optimizing an end-to-end quantized-network loss, using Cayley updates to maintain orthogonality (Liu et al., 2025), but can be slow since it requires full backward passes through the network. DartQuant reduces this cost by replacing end-to-end optimization with a direct activation-distribution objective, combining an exponential loss with a QR decomposition at every step (Shao et al., 2025). Our work builds on these function-preserving rotation frameworks and focuses on reducing the data and optimization dimensions required for calibration of the rotation. 
+
+## 3 Method 
+
+Let Xℓ ∈ RT×d contain the calibration activations associated with layer ℓ, with row t written as xT
+
+> ℓ,t
+
+. We adopt the function-preserving rotation placements of prior work (Ashkboos et al., 2024; Liu et al., 2025), which include a global change of basis R1 and a local change of basis 
+
+R2, ℓ for each layer. The rotation R1 ∈ SO (d) defines a single basis shared across all layers. Namely at every layer Xℓ is represented as eXℓ = Xℓ RT 
+
+> 1
+
+for ℓ = 1, . . . , L, with the change of basis inverted only at the output as XL = eXL R1. In contrast, each R2, ℓ acts only locally within layer ℓ, with eXℓ = Xℓ RT 
+
+> 2, ℓ
+
+and Xℓ = eXℓ R2, ℓ. In both cases, the rotations can be absorbed into the surrounding weight matrices, including the final inverse of R1 into the output projection, preserving the full-precision network function without introducing additional online matrix multiplications. Learning these rotations nevertheless leads to large-scale calibration problems. For R1, a single rotation must be calibrated jointly against activations from every layer, so the amount of calibration data grows with the entire network. For R2, ℓ,the calibration data are local to a single layer, but the rotation itself is still high-dimensional and a separate optimization problem must be solved for every ℓ = 1, . . . , L.ThinQuant addresses these costs with two complementary reductions. First, for learning both R1 and R2, ℓ, we select a small set of informative activations (Section 3.1), reducing both calibration storage and the amount of data processed at every optimization step. Second, we exploit the low-dimensional span of these activations to reduce the size of the optimization problem (Section 3.2). Instead of updating a dense d × d rotation, we optimize a d × r matrix, where r ≪ d is the rank of the selected activation matrix. This reformulation is exact for the selected set and replaces expensive square-matrix orthogonality updates with much cheaper thin matrix factorizations. Our ADMM solver (Section 3.3) operates on this smaller representation to reduce optimization memory and per-iteration cost. 
+
+3.1 Selecting a reduced calibration set Rotation calibration. We now turn to the rotation calibration problem. We remark that collecting and storing the full activation matrices can be prohibitively expensive for large models. For example, DartQuant (Shao et al., 2025) explicitly stores a sample of massive calibration activations, requiring approximately 960 GiB of disk storage for LLaMA-3 70B in their default setting used in our experiments (Table 4 in the appendix). Our goal is therefore to select a small subset of activations that approximately preserves the rotation objective (1). For R1, we consider activations from all layers, A1 = SL
+
+> ℓ=1
+
+{x(1) 
+
+> ℓ,t
+
+: 1 ≤ t ≤ T}, whereas for R2, ℓ we use only the corresponding layer, A2, ℓ = {x(2) 
+
+> ℓ,t
+
+: 1 ≤ t ≤ T}. Apart from this choice of calibration set, the method is applied identically to R1 and R2, ℓ. We therefore write 
+
+A = {x1, . . . , xN } ⊂ Rd for either collection, X = [ x1, . . . , xN ] ∈ Rd×N for its activation matrix, and R ∈ SO (d) for the corresponding rotation. Thus N = LT for R1 and N = T for each R2, ℓ. For either rotation, a natural worst-case objective including all calibration data is: min  
+
+> R∈SO (d)
+
+F(R), F(R) = ∥RX ∥∞ = max  
+
+> x∈A
+
+∥Rx ∥∞, (1) 4where ∥ · ∥ ∞ denotes the largest absolute entry. Geometrically, the goal is to find an or-thonormal basis in which no calibration activation develops a large coordinate. Uniform quantization is governed by the dynamic range of the activation, so the largest coordinate directly leads to a coarser quantization resolution. The ℓ∞ norm therefore provides a natural worst-case surrogate for suppressing activation outliers and reducing quantization error (Wei et al., 2023; Xiao et al., 2023; Chee et al., 2023; Ashkboos et al., 2024). Our goal is to solve (1) without requiring the full calibration data. Specifically, given an activation budget 
+
+B ≪ N, we want a subset I ⊆ [N] with |I| = B such that FI (R) = max i∈I ∥Rx i∥∞ ≈ F(R).The subset I is selected before rotation optimization, so it must represent this surrogate as the basis R changes, rather than only in the original coordinate system. 
+
+A geometric view of calibration data selection. We first give some intuition on how the calibration data A in (1) might naturally be reduced. First, notice that the worst-case objective in (1) is determined, for any fixed rotation R, by activations attaining max x∈A |rT 
+
+> k
+
+x|
+
+for one of the rows rT 
+
+> k
+
+of R. However, since the rows of R change during optimization (and the optimal R is not known in advance), the maximizer can also change, so activations that are not maximizers in the original basis may become so after rotation. Thus, rather than retaining only activations that are large in the original basis, we want a small subset that retains the activations that may become maximizers during rotation optimization. Classical convex geometry provides a precise language for describing these extreme di-rections (Ziegler, 1995). Define the symmetric convex hull K = conv  A ∪ (−A ) and its support function hK (v) = max z∈K vTz = max x∈A |vTx|, defined for every v ∈ Rd. Since A
+
+is finite and K is a polytope, maximizing the linear functional x 7 → vTx over K attains its optimum at an extreme point of K for every v (Bertsimas and Tsitsiklis, 1997). The candidate maximizers (in x) are therefore confined to ext (K) ⊆ A ∪ (−A ), where ext (·) is the set of extreme points of the polytope. This holds independently of v, so a single finite set of signed activations suffices to evaluate hK in every direction. Writing the rows of a rotation R as 
+
+rT 
+
+> 1
+
+, . . . , rT 
+
+> d
+
+, we can thus write (1) equivalently as: min  
+
+> R∈SO (d)
+
+F(R) = max  
+
+> 1≤k≤d
+
+hK (rk), (2) The key observation here is that changing R changes the viewing direction, but not the underlying polytope K. Figure 2 illustrates this. The directions r1, r2, r3 expose different activations x1, x2, x3, respectively, but each support value can only be attained at an extreme point of the same convex hull. Thus, the relevant boundary point can change as the rotation changes, but activations on the interior of K can never obtain an extreme point. This explains why the full calibration set can be redundant. An activation which is not an extreme point cannot become extreme along any direction. Any subset AI ⊆ A satisfying conv  AI ∪ (−A I ) = K preserves F(R) for every rotation R. This also connects rotation calibration to the literature on geometric coresets and, in particular, ε-kernels, where small subsets are constructed to approximately preserve the width of the convex hull in all directions (Agarwal et al., 2004).    
+
+> r1
+> r2
+> r3
+> x1
+> x2
+> x3
+> K=conv  A ∪ (−A )
+
+Figure 2: For any direction r, the sup-port value hK (r) = max x∈A |rT x| is at-tained at an extreme point of K. Hence, as the rotation changes, only the ex-posed boundary activations can deter-mine F(R) and interior activations do not determine the objective. 
+
+Selection algorithm. Although the relevant cal-ibration information is concentrated on extreme points, recovering all extreme points is unattrac-tive in our setting. For general polyhedra, decid-ing if a partial vertex list omits another vertex is NP-complete (Khachiyan et al., 2008). Even for a finite number of points, exact identification of all extreme points would require solving a sequence of high-dimensional convex-hull membership prob-lems. Similarly, ε-kernels, which approximate the directional width of a point set simultaneously over all directions, have worst-case size Θ
+
+
+
+ε−(d−1)/2 
+
+for preserving directional widths within a relative (1 − ε)
+
+factor (Agarwal et al., 2004). With hundreds of thou-5Algorithm 1 Activation selection   
+
+> Require: Activations
+
+A = {x1, . . . , xN }, number of random directions M, total activation budget B   
+
+> 1: g1, . . . , gMiid
+
+∼ N (0, Id) // Gaussian directions   
+
+> 2: ij
+
+← arg max 1≤i≤N |gT  
+
+> jxi
+
+|, j = 1, . . . , M // Extreme point?   
+
+> 3: ei
+
+← ∑Mj=1 1{ij = i}, i = 1, . . . , N // How often extreme?  
+
+> 4:
+
+I ← Top B(e) // Global ranking   
+
+> 5: return
+
+{xi : i ∈ I} 
+
+sands of activation vectors in dimensions of several thousand, these are considerably more expensive than the lightweight selection procedure we want. A natural and more lightweight approach is to query the support function hK (v) from (2) along random directions. This idea has precedent in randomized extreme-point detection. In particular, Damle and Sun (2017) generate Gaussian linear functionals, record the points attaining their extrema, and use selection frequency to identify geometrically prominent extreme points. We apply the same random-projection idea to the symmetric hull K =
+
+conv (A ∪ (−A )) . We give the procedure in Algorithm 1. We compare the results from this procedure with ℓ∞-based selection in Table 3 in the appendix, where we retain the B
+
+activations with the largest ℓ∞ norm either in the original basis or after an initial Hadamard rotation. 
+
+Interpretation of the algorithm. We now give an interpretation of Algorithm 1 in terms of the calibration objective. Notice that (2) describes the calibration objective under the best possible change of basis. Rather than requiring a small subset to preserve this objective for every possible rotation (which is clearly intractable), consider how well it is preserved on average over R ∼ Haar (SO (d)) , i.e., for a randomly sampled Haar rotation: 
+
+ER∼Haar (SO (d)) [F(R)] = ER∼Haar (SO (d)) 
+
+
+
+max  
+
+> 1≤k≤d
+
+hK (rk)
+
+
+
+. (3) Algorithm 1 can be interpreted as selecting a small subset of the activations with which to approximate the objective in (3). For the selected subset I ⊆ [N], let KI = conv {± xi :
+
+i ∈ I} and write FI (R) = max 1≤k≤d hKI (rk) as the corresponding reduced calibration objective. Since KI ⊆ K, we have FI (R) ≤ F(R) for every rotation R. Thus the subset objective is ER[FI (R)] , and we can measure the quality of the selected calibration set via 
+
+ER[F(R) − FI (R)] , which measures how well the selected activations represent the full calibration objective in (1) under a random change of basis. Theorem 1 gives a bound on this discrepancy. Specifically, let q(I) denote the probability that, along a random Gaussian direction, the maximum support value is attained by an activation that is not contained in the selected set I. The theorem shows that this probability directly controls the expected difference between the full and reduced calibration objectives. Thus, when Algorithm 1 selects activations that attain the directional maximum for most random Gaussian directions, the reduced objective closely approximates (1) on average over random changes of basis, without requiring recovery of the entire convex hull. 
+
+Theorem 1 (Expected Approximation Guarantee) . Let A = {x1, . . . , xN } ⊂ Rd, with d ≥ 2,and identify activations that coincide up to sign. For any fixed nonempty subset I ⊆ [N] returned by Algorithm 1, define: q(I) = Pr   
+
+> g∼N (0, Id)
+
+"
+
+arg max 
+
+> i∈[N]
+
+|gTxi| /∈ I 
+
+#
+
+,
+
+Then, for R ∼ Haar (SO (d)) :
+
+ER[F(R) − FI (R)] ≤
+
+
+
+max  
+
+> i∈[N]
+
+∥xi∥2
+
+ q 
+
+3q(I). (4) The proof is given in Appendix A. The main idea is to relate the Gaussian directions used by Algorithm 1 to the coordinate directions generated by a random rotation. If 6R ∼ Haar (SO (d)) , then each row direction rk is marginally uniform on the unit sphere. Likewise, for g ∼ N (0, Id), the normalized vector g/∥g∥2 is uniform on the unit sphere. Thus, projecting an activation onto a normalized Gaussian direction is distributionally equivalent to an individual coordinate after a Haar rotation. Although the rows of R are dependent through orthogonality, the proof bounds the objective gap by a sum of coordinate errors, whose expectation depends only on these marginal distributions. 12510 20 40 80 160 320 640 1280   
+
+> Number of selected activations
+> 0.0 0.2 0.4 0.6 0.8
+> qM( )
+> 0.118 0.111 0.097 0.067 0.000
+> 0.785 0.580 0.383 0.243 0.074 0.013 0.000
+> How often a small subset misses an extreme activation
+> Llama-3 8B Llama-3.1 405B
+
+Figure 3: Empirical estimate bqM (I) of the miss probability q(I) in Algorithm 1 as a func-tion of the activation budget B.
+
+An appealing feature of Theorem 1 is that the quantity controlling the bound is directly esti-mated by Algorithm 1. Indeed, for the selected set I, the counts ei gives the empirical estimate: 
+
+bqM(I) = 1 − 1
+
+M ∑
+
+> i
+
+∈I 
+
+ei,which is precisely the fraction of sampled Gaus-sian directions whose maximizing activation is not contained in I. As M → ∞, these empirical frequencies converge to their population prob-abilities, and hence bqM(I) → q(I). We report 
+
+bqM(I) for both Llama-3.1-405B and Llama-3-8B at M = 8192. We see that the counts are highly concentrated. Selecting a single activation already reduces the empirical miss probability bqM(I) to 0.78 and 0.12, respectively, and it reaches zero on both models at B = 1280 activations. For Llama-3-8B and Llama-3.1-405B, this is already far less than 0.1% of A. Finally, given the selected index set I returned by Algorithm 1, we collect the selected activations as columns of the reduced calibration matrix: 
+
+U = X:, I = [ xi]i∈I ∈ Rd×B. (5) We replace the calibration matrix X with the selected matrix U = [ xi]i∈I ∈ Rd×B, where 
+
+|I| = B:min 
+
+> R
+
+∈SO (d) FU (R), FU (R) = ∥RU ∥∞ = max 
+
+> i
+
+∈I ∥Rx i∥∞ (6) The calibration procedure thus retains activations that determine the maximum across many directions, while reducing the number of calibration vectors from N to B. This also restricts the span of the retained activations to dimension at most B, which we discuss next. 
+
+3.2 An exact reduction in the rotation optimization problem 
+
+Once U is fixed, the objective in (6) evaluates R only on the selected activations, all of which lie in span (U). Any two rotations that agree on this subspace therefore produce the same matrix RU and attain the same loss, regardless of how they act on its orthogonal complement. Thus, rather than tracking the action of R on all of Rd, it suffices to track its action on a basis for span (U). To make this clear, take an exact QR decomposition 
+
+U = QU S, where r = rank (U) ≤ B. Here, QU ∈ Rd×r has orthonormal columns spanning span (U), and S ∈ Rr×B contains the coordinates of the selected activations in this basis. The matrix V = RQ U records the images of these basis vectors under R, and hence determines every rotated activation through RU = VS . Moreover, orthogonality of R implies VTV =
+
+QT 
+
+> U
+
+RT RQ U = Ir, so V ∈ St (d, r) := {V ∈ Rd×r : VTV = Ir }. The following theorem proves the converse when r < d, showing that every V ∈ St (d, r) can be written as RQ U for some 
+
+R ∈ SO (d), so optimizing over V is equivalent to optimizing over the full rotation R.
+
+Theorem 2 (Exact selected-subspace reduction) . Let U = QU S ∈ Rd×B have rank 1 ≤ r < d, where Q U ∈ Rd×r, S ∈ Rr×B, and Q T 
+
+> U
+
+QU = Ir. Then {RU : R ∈ SO (d)} = {VS : V ∈
+
+St (d, r)}. Then for every continuous function ℓ : Rd×B → R:
+
+min 
+
+> R
+
+∈SO (d) ℓ(RU ) = min 
+
+> V
+
+∈St (d,r) ℓ(VS ). (7) 
+
+Every feasible reduced solution lifts to a full rotation with identical objective value. 
+
+7Proof. The forward inclusion follows from V = RQ U . Conversely, extend QU and V to orthogonal bases [QU Q⊥] and [V V ⊥] and set R = [ V V ⊥][ QU Q⊥]T. Then RQ U = V.Because r < d, a sign change in one complement column can enforce det R = 1 without changing RQ U . Hence RU = VS . Since SO (d) and St (d, r) are compact and ℓ is continuous, both minima are attained; equality of the feasible image sets therefore implies (7). Theorem 2 applies directly to the entrywise ℓ∞ objective in (6), since ℓ(RU ) = ∥RU ∥∞ is continuous. It also applies without modification to any continuous surrogate objective. 
+
+Calibration loss. In general, directly optimizing the ℓ∞ norm is not attractive, since it requires taking subgradients and can make convergence slow. For optimization, we thus use a fourth-power penalty as a smooth surrogate for the entrywise ℓ∞ objective. Since ∥RU ∥4 
+
+> ∞
+
+≤ ∥ RU ∥44, this provides a smooth upper bound on the fourth power of the maximum entry. This choice is motivated by related kurtosis-based approaches to activation outlier suppression (Akhondzadeh et al., 2025). Moreover, we center each rotated activation within the loss because a common shift of all coordinates changes their absolute magnitudes but leaves their range unchanged. This is relevant to the asymmetric activation quantization used in our experiments, where the quantization grid need not be centered at zero. We therefore penalize deviations from each rotated activation’s coordinate mean. Specifically, let Cd = Id − 1 
+
+> d
+
+1d1T 
+
+> d
+
+, where 1d ∈ Rd is the all-ones vector. We therefore replace the objective in (6) with a surrogate in (8). Since the centered loss is still continuous, Theorem 2 gives: min  
+
+> R∈SO (d)
+
+∥Cd RU ∥44 = min  
+
+> V∈St (d,r)
+
+∥CdVS ∥44. (8) 
+
+3.3 Fast optimization and rotation recovery 
+
+The reduced problem in (8) replaces the full rotation with a thin matrix V, but the loss remains coupled to the orthogonality constraint through CdVS . We use the Alternating Direction Method of Multipliers (ADMM) (Boyd et al., 2011) to separate these components. Specifically, introducing W = VS and Z = CdW, we can write the problem as: min  
+
+> V,W,Z
+
+∥Z∥44 subject to W = VS , Z = CdW, VTV = Ir. (9) ADMM alternates between updates of Z, W, and V – each of which can be computed via closed-form updates (see Appendix B) – followed by dual updates that track violations of the two linear constraints. The Z-update handles the fourth-power penalty through independent proximal updates by solving a cubic polynomial per entry. The W-update balances agreement with VS and the centered variable Z through a closed-form least-squares step. Since Cd is a projector, this step requires only column means rather than a dense matrix inverse. Finally, the V-update enforces orthogonality by solving an orthogonal Procrustes problem (Golub and Van Loan, 2013) using a thin d × r Singular Value Decomposition (SVD). This update remains exact even when S is not orthogonal, because ∥VS ∥2 
+
+> F
+
+= ∥S∥2
+
+> F
+
+on the Stiefel manifold. All iterations operate on the reduced calibration matrices, so no transformer forward or backward pass is needed during optimization. 
+
+Cost. Factoring U costs O(dB 2) once for B ≤ d. Each iteration costs O(drB + dr 2) and stores O(dB + dr + rB ) numbers. When r = B ≪ d, these become O(dB 2) work and O(dB )
+
+storage, replacing a square orthogonality step with O(d3) work and O(d2) rotation state. After optimization, we recover R using the completion in the proof of Theorem 2, with a random Hadamard rotation for the orthogonal complement. Completion leaves RU = VS 
+
+unchanged, although different completions can act differently on unseen activations outside span (U).
+
+## 4 Experiments 
+
+4.1 Experimental setup Models and baselines. We evaluate ThinQuant on LLaMA-2 (7B, 13B, and 70B), LLaMA-3 (8B and 70B) (Grattafiori et al., 2024). All models are evaluated under W4A4(KV4) quantiza-8Quantization performance Rotation calibration cost Model Method Wiki-2 ↓ C4 ↓ 0-shot ↑ Runtime ↓ Peak GPU ↓                                                                                          
+
+> Dense FP16 6.14 9.44 65.91
+> ThinQuant 7.91 12.83 59.70 1:56 18.5
+> DartQuant 8.22 13.37 59.00 19:03 37.1
+> LLaMA-3 8B
+> SpinQuant 7.67 12.69 59.62 53:35 20.7
+> Dense FP16 2.86 7.17 72.70
+> ThinQuant 5.63 10.34 65.83 11:57 31.9
+> DartQuant 7.55 15.69 58.64 111:00 134.9
+> LLaMA-3 70B
+> SpinQuant 5.05 9.71 67.87 16.7h ∗239.0 ∗
+> Dense FP16 5.47 7.26 61.16
+> ThinQuant 6.18 8.41 57.28 1:43 18.2
+> DartQuant 6.33 8.63 56.39 20:25 75.1
+> LLaMA-2 7B
+> SpinQuant 6.12 8.49 56.98 49:33 17.8
+> Dense FP16 4.88 6.73 64.30
+> ThinQuant 5.47 7.67 61.10 2:51 21.9
+> DartQuant 5.51 7.71 61.35 31:42 51.1
+> LLaMA-2 13B
+> SpinQuant 5.35 7.61 61.73 113:32 31.5
+> Dense FP16 3.32 5.71 69.52
+> ThinQuant 3.91 6.24 66.92 11:42 33.2
+> DartQuant 3.91 6.22 67.18 99:57 73.1
+> LLaMA-2 70B
+> SpinQuant 3.85 6.19 67.62 17.2h ∗224.3 ∗
+
+Table 1: W4A4KV4 quantization performance and ro-tation calibration cost. The 0-shot column averages nine downstream tasks. Dense FP16 denotes the unquantized reference model. Calibration-cost columns apply to the quantized methods. Runtime measures total rotation-calibration time for ThinQuant, DartQuant, and Spin-Quant. GPU denotes peak GPU process memory during calibration, in GiB. Times are in mm:ss unless marked in hours. ∗The 70B SpinQuant runs used 4 GPUs, so we re-port total GPU hours and total GPU memory summed across GPUs. Best quantized results are bold .
+
+Method LLaMA-3 70B LLaMA-3.1 405B 
+
+Dense FP16 2.86 1.44 
+
+GPTQ + QuaRot 6.04 5.82 
+
+GPTAQ + QuaRot 5.81 3.48 
+
+GPTQ + ThinQuant 5.63 3.10 
+
+GPTAQ + ThinQuant 5.46 2.97 
+
+Table 2: Scalability to extremely large ar-chitectures. WikiText-2 perplexity ( ↓) on LLaMA-3-70B and LLaMA-3.1-405B. The LLaMA-3-70B column is W4A4KV4 with symmetric weights and asymmetric acti-vations. The LLaMA-3.1-405B column is W4A4. For the 405B comparison, Thin-Quant uses the same asymmetric quan-tization as GPTAQ Li et al. (2025) for both weights and activations. The best quantized result in each column is bold .ThinQuant takes 2 hours 7 minutes for full rotation calibration on LLaMA-3.1-405B. We additionally run W4A4KV4 un-der GPTQ + ThinQuant for LLaMA-3.1-405B, and report the result in Figure 1. 
+
+tion, with weights, activations, and (when applicable) the KV cache quantized to 4 bits. We use symmetric quantization for weights and asymmetric quantization for activations and the KV cache. As in SpinQuant and DartQuant, we use fixed random Hadamard rotations for R3 and R4 (which are KV cache specific); these rotations are not optimized and are enabled for every ThinQuant, DartQuant, and SpinQuant evaluation. Unless otherwise stated, weight quantization is performed using GPTQ throughout all experiments, and is applied after rotation calibration so that GPTQ operates on the rotated weight matrices. We compare against DartQuant and SpinQuant under the same quantization settings. All ex-periments for all methods are conducted on a single NVIDIA H200 GPU, with the exception of SpinQuant where we use 4 H200 GPUs and report total GPU hours. 
+
+Evaluation. We measure language-modeling performance using perplexity ( ↓) on WikiText-2, C4, and Penn Treebank (PTB). For downstream evaluation, we report the average zero-shot accuracy ( ↑) across nine tasks using the LM Evaluation Harness (Gao et al., 2023): PIQA (Bisk et al., 2020), ARC-Easy and ARC-Challenge (Clark et al., 2018), HellaSwag (Zellers et al., 2019), Winogrande (Sakaguchi et al., 2021), RTE (Wang et al., 2018), OpenBookQA (Mihaylov et al., 2018), BoolQ (Clark et al., 2019), and Social IQa (Sap et al., 2019). 
+
+Calibration. Unless otherwise stated, ThinQuant uses M = 8192 independent Gaussian directions in Algorithm 1. For the shared residual rotation R1, we set the total activation budget to B = 2L + 1, where L denotes the number of transformer layers. The rotations are applied at the down-projection and output-projection layers, so this budget is sufficient to admit one activation vector from each projection in every layer, though we select the top B globally as in Algorithm 1. For R2, we set the budget to H vectors, where H is the number of transformer heads. The selected activations are used to construct the reduced optimization problem, which we solve using the ADMM procedure in Section 3.3. To assess computational efficiency, we report total rotation-calibration run-time and peak GPU memory in Table 1, with a more detailed breakdown in Table 4. Memory is reported in GiB. 9Results. Table 1 shows that ThinQuant improves or closely matches the performance of DartQuant across all reported evaluation metrics on LLaMA-2 and LLaMA-3 with substan-tially less calibration time. On LLaMA-3-70B, ThinQuant reduces WikiText-2 perplexity from 7.55 to 5.63 and C4 perplexity from 15.69 to 10.34, while reducing total rotation-calibration time from 111 minutes to under 12 minutes. Moreover, Table 4 in the appendix shows that ThinQuant requires several orders of magnitude less disk space than DartQuant. DartQuant requires storing large activation tensors, whereas ThinQuant selects and retains only a tiny subset of activations for rotation calibration. For LLaMA-3-70B, this reduces the required disk space from 960 GiB to 0.51 GiB. Finally, Table 2 shows that ThinQuant scales to LLaMA-3.1-405B, completing rotation calibration in just over 2 hours on a single H200 GPU. Under W4A4 quantization, replacing QuaRot’s fixed Hadamard rotations with ThinQuant reduces WikiText-2 perplexity from 5.82 to 3.10 with GPTQ and from 3.48 to 2.97 with GPTAQ, using the same asymmetric quantization setting as Li et al. (2025). We provide additional experiments on W4A4 including a comparison to OmniQuant in Table 5. 
+
+## 5 Conclusions and Limitations 
+
+ThinQuant combines geometric activation selection with an exact subspace reduction to make rotation learning substantially cheaper. ThinQuant achieves competitive low-bit quantization performance compared to state-of-the-art methods with much lower calibration runtime, GPU memory, and disk storage, making rotation calibration of LLaMA-3.1-405B possible on a single H200 GPU. 
+
+Limitations. We remark that we optimize rotations separately prior to using weight quan-tization algorithms like GPTQ, though the two could in principle be solved jointly. An interesting research direction is to design dedicated methods that can efficiently optimize rotation and weight quantization simultaneously. Moreover, some recent works have shown that learning rotation and diagonal scaling transforms jointly can improve quantization, though this can require expensive calibration (Hu et al., 2025). We leave scalable and efficient rotation and scaling optimization to future work. 
+
+## References 
+
+Pankaj K. Agarwal, Sariel Har-Peled, and Kasturi R. Varadarajan. Approximating extent measures of points. Journal of the ACM , 51(4):606–635, July 2004. doi: 10.1145/1008731. 1008736. Mohammad Sadegh Akhondzadeh, Aleksandar Bojchevski, Evangelos Eleftheriou, and Martino Dazzi. KurTail: Kurtosis-based LLM quantization. In Findings of the Association for Computational Linguistics: EMNLP 2025 , pages 17404–17419, Suzhou, China, 2025. Association for Computational Linguistics. doi: 10.18653/v1/2025.findings-emnlp.943. URL https://aclanthology.org/2025.findings-emnlp.943/ .Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L. Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. QuaRot: Outlier-free 4-bit inference in rotated LLMs. In Advances in Neural Information Processing Systems , 2024. URL https://arxiv.org/abs/2404.00456 .Dimitris Bertsimas and John N. Tsitsiklis. Introduction to Linear Optimization . Athena Scientific, Belmont, MA, 1997. Yonatan Bisk, Rowan Zellers, Ronan Le Bras, Jianfeng Gao, and Yejin Choi. PIQA: Reasoning about physical commonsense in natural language. In Proceedings of the AAAI Conference on Artificial Intelligence , volume 34, pages 7432–7439, 2020. doi: 10.1609/aaai.v34i05.6239. URL https://ojs.aaai.org/index.php/AAAI/article/view/6239 .Stephen Boyd, Neal Parikh, Eric Chu, Borja Peleato, and Jonathan Eckstein. Distributed optimization and statistical learning via the alternating direction method of multipliers. 
+
+Foundations and Trends in Machine Learning , 3(1):1–122, 2011. URL https://web.stanford. edu/~boyd/papers/admm_distr_stats.html .10 Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and Christopher De Sa. QuIP: 2-bit quan-tization of large language models with guarantees. In Advances in Neural Information Processing Systems , 2023. URL https://arxiv.org/abs/2307.13304 .Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and Kristina Toutanova. BoolQ: Exploring the surprising difficulty of natural yes/no questions. In Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 1 (Long and Short Papers) ,pages 2924–2936. Association for Computational Linguistics, 2019. doi: 10.18653/v1/ N19-1300. URL https://aclanthology.org/N19-1300/ .Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. Think you have solved question answering? try ARC, the AI2 reasoning challenge. arXiv preprint arXiv:1803.05457 , 2018. URL https://arxiv.org/abs/ 1803.05457 .Dario Cordero-Erausquin, Matthieu Fradelizi, and Bernard Maurey. The (B) conjecture for the Gaussian measure of dilates of symmetric convex sets and related problems. Journal of Functional Analysis , 214(2):410–427, 2004. doi: 10.1016/j.jfa.2003.12.001. Anil Damle and Yuekai Sun. A geometric approach to archetypal analysis and nonnegative matrix factorization. Technometrics , 59(3):361–370, 2017. doi: 10.1080/00401706.2016. 1247017. Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. GPT3.int8(): 8-bit matrix multiplication for transformers at scale. In Advances in Neural Infor-mation Processing Systems , volume 35, pages 30318–30332, 2022. doi: 10.52202/ 068431-2198. URL https://proceedings.neurips.cc/paper_files/paper/2022/hash/ c3ba4962c05c49636d4c6206a97e9c8a-Abstract.html .Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. GPTQ: Accurate post-training quantization for generative pre-trained transformers. In International Conference on Learning Representations , 2023. URL https://arxiv.org/abs/2210.17323 .Leo Gao, Jonathan Tow, Baber Abbasi, Stella Biderman, Sid Black, Anthony DiPofi, Charles Foster, Laurence Golding, Jeffrey Hsu, Alain Le Noac’h, Haonan Li, Kyle McDonell, Niklas Muennighoff, Chris Ociepa, Jason Phang, Laria Reynolds, Hailey Schoelkopf, Aviya Skowron, Lintang Sutawika, Eric Tang, Anish Thite, Ben Wang, Kevin Wang, and Andy Zou. A framework for few-shot language model evaluation, December 2023. URL 
+
+https://zenodo.org/records/10256836 .Gene H. Golub and Charles F. Van Loan. Matrix Computations . Johns Hopkins University Press, 4 edition, 2013. ISBN 9781421407944. doi: 10.56021/9781421407944. URL https: //doi.org/10.56021/9781421407944 .Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, et al. The Llama 3 herd of models. arXiv preprint arXiv:2407.21783 , 2024. URL https://arxiv.org/abs/2407. 21783 .Xing Hu, Yuan Cheng, Dawei Yang, Zhixuan Chen, Zukang Xu, Jiangyong Yu, Chen Xu, Zhihang Yuan, Zhe Jiang, and Sifan Zhou. OSTQuant: Refining large language model quantization with orthogonal and scaling transformations for better distribution fitting. In International Conference on Learning Representations , 2025. URL https://openreview. net/forum?id=rAcgDBdKnP .Leonid Khachiyan, Endre Boros, Konrad Borys, Khaled Elbassioni, and Vladimir Gurvich. Generating all vertices of a polyhedron is hard. Discrete & Computational Geometry , 39: 174–190, 2008. doi: 10.1007/s00454-008-9050-5. Yuhang Li, Ruokai Yin, Donghyun Lee, Shiting Xiao, and Priyadarshini Panda. GPTAQ: Efficient finetuning-free quantization for asymmetric calibration. In Proceedings of the 42nd International Conference on Machine Learning , volume 267 of Proceedings of Machine Learning Research , pages 36690–36706. PMLR, 2025. URL https://proceedings.mlr.press/v267/ li25dn.html .11 Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangx-uan Xiao, Xingyu Dang, Chuang Gan, and Song Han. AWQ: Activation-aware weight quantization for LLM compression and acceleration. In Proceedings of Machine Learning and Systems , 2024. URL https://arxiv.org/abs/2306.00978 .Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghuraman Krishnamoorthi, Vikas Chandra, Yuandong Tian, and Tijmen Blankevoort. SpinQuant: LLM quantization with learned rotations. In International Conference on Learning Represen-tations , 2025. URL https://openreview.net/forum?id=ogO6DGE6FZ .Ryan Lucas, Mehdi Makni, Xiang Meng, Adam Deng, and Rahul Mazumder. Admm-q: An improved hessian-based weight quantizer for post-training quantization of large language models, 2026. URL https://arxiv.org/abs/2605.11222 .Elizabeth S. Meckes. The Random Matrix Theory of the Classical Compact Groups . Cambridge Tracts in Mathematics. Cambridge University Press, 2019. Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal. Can a suit of armor conduct electricity? a new dataset for open book question answering. In Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing , pages 2381–2391. Association for Computational Linguistics, 2018. doi: 10.18653/v1/D18-1260. URL 
+
+https://aclanthology.org/D18-1260/ .Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. WinoGrande: An adversarial winograd schema challenge at scale. Communications of the ACM , 64(9): 99–106, 2021. doi: 10.1145/3474381. URL https://doi.org/10.1145/3474381 .Maarten Sap, Hannah Rashkin, Derek Chen, Ronan Le Bras, and Yejin Choi. Social IQa: Commonsense reasoning about social interactions. In Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Processing (EMNLP-IJCNLP) , pages 4463–4473. As-sociation for Computational Linguistics, 2019. doi: 10.18653/v1/D19-1454. URL 
+
+https://aclanthology.org/D19-1454/ .Wenqi Shao, Mengzhao Chen, Zhaoyang Zhang, Peng Xu, Lirui Zhao, Zhiqian Li, Kaipeng Zhang, Peng Gao, Yu Qiao, and Ping Luo. Omniquant: Omnidirectionally calibrated quan-tization for large language models. In International Conference on Learning Representations ,2024. Yuantian Shao, Yuanteng Chen, Peisong Wang, Jianlin Yu, Jing Lin, Yiwu Yao, Zhihui Wei, and Jian Cheng. DartQuant: Efficient rotational distribution calibration for LLM quantization. In Advances in Neural Information Processing Systems , 2025. URL https: //arxiv.org/abs/2511.04063 .Roman Vershynin. High-Dimensional Probability: An Introduction with Applications in Data Science . Cambridge University Press, 2018. Alex Wang, Amanpreet Singh, Julian Michael, Felix Hill, Omer Levy, and Samuel R. Bowman. GLUE: A multi-task benchmark and analysis platform for natural language understanding. In Proceedings of the 2018 EMNLP Workshop BlackboxNLP: Analyzing and Interpreting Neural Networks for NLP , pages 353–355. Association for Computational Linguistics, 2018. doi: 10.18653/v1/W18-5446. URL https://aclanthology.org/W18-5446/ .Xiuying Wei, Yunchen Zhang, Yuhang Li, Xiangguo Zhang, Ruihao Gong, Jinyang Guo, and Xianglong Liu. Outlier Suppression+: Accurate quantization of large language models by equivalent and effective shifting and scaling. In Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing , pages 1648–1665, Singapore, 2023. Association for Computational Linguistics. doi: 10.18653/v1/2023.emnlp-main.102. URL 
+
+https://aclanthology.org/2023.emnlp-main.102/ .Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. SmoothQuant: Accurate and efficient post-training quantization for large language mod-els. In International Conference on Machine Learning , 2023. URL https://arxiv.org/abs/ 2211.10438 .12 Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. HellaSwag: Can a machine really finish your sentence? In Proceedings of the 57th Annual Meeting of the Associ-ation for Computational Linguistics , pages 4791–4800. Association for Computational Lin-guistics, 2019. doi: 10.18653/v1/P19-1472. URL https://aclanthology.org/P19-1472/ .Günter M. Ziegler. Lectures on Polytopes , volume 152 of Graduate Texts in Mathematics .Springer, New York, 1995. 13 A Proof of Theorem 1 
+
+Proof. Throughout the proof, the activations and the subset I are fixed. Write q = q(I) and 
+
+H = max i∈[N] ∥xi∥2. Recall that: 
+
+K = conv {± xi : i ∈ [N]}, KI = conv {± xi : i ∈ I} .For u ∈ Rd, define: 
+
+f (u) = hK (u) − hKI (u) = max  
+
+> i∈[N]
+
+|uTxi| − max  
+
+> i∈I
+
+|uTxi|
+
+Since I ⊆ [N], we have f (u) ≥ 0. The absolute values also imply that f (−u) = f (u)
+
+and f (tu ) = t f (u) for every t ≥ 0. We also have 0 ≤ f (u) ≤ hK (u) ≤ H∥u∥2, so f (g) is square-integrable for g ∼ N (0, Id).We first show that the expected gap in objectives is bounded by: 
+
+ER
+
+h
+
+(F(R) − FI (R)) 2i
+
+≤ Eg[ f (g)2] (10) Write the rows of R as rT 
+
+> 1
+
+, . . . , rT 
+
+> d
+
+. For every rotation, 
+
+F(R) = max 
+
+> 1≤k≤d
+
+hKI (rk) + f (rk)
+
+≤ max  
+
+> 1≤k≤d
+
+hKI (rk) + max  
+
+> 1≤k≤d
+
+f (rk)= FI (R) + max  
+
+> 1≤k≤d
+
+f (rk).Since FI (R) ≤ F(R) and f ≥ 0, this gives: 0 ≤ (F(R) − FI (R)) 2 ≤ max  
+
+> 1≤k≤d
+
+f (rk)2 ≤
+
+> d
+
+# ∑
+
+> k=1
+
+f (rk)2 (11) Since d ≥ 2, if R ∼ Haar (SO (d)) , each row rk is marginally uniform on the unit sphere Sd−1
+
+(Meckes, 2019). Let v be uniform on Sd−1. Taking expectations in (11) therefore gives: 
+
+ER
+
+h
+
+(F(R) − FI (R)) 2i
+
+≤ d Ev[ f (v)2]. (12) Now take g ∼ N (0, Id) and write ρ = ∥g∥2 and v = g/∥g∥2. Then v is uniform on the sphere and independent of ρ (Vershynin, 2018). Moreover, 
+
+E[ρ2] = E∥g∥22 =
+
+> d
+
+# ∑
+
+> j=1
+
+E[g2 
+
+> j
+
+] = d
+
+Since f (tu ) = t f (u) for every t ≥ 0 and ρ and v are independent: 
+
+Eg[ f (g)2] = Eρ,v[ρ2 f (v)2] = E[ρ2]Ev[ f (v)2] = d Ev[ f (v)2]
+
+Combining this with (12) proves (10). It remains to bound the right-hand side of (10). We do this by establishing two variance bounds: 
+
+(1 − q)Eg[ f (g)2] ≤ Var g( f (g)) ≤ 2H2q.For q < 1, the lower bound will allow us to bound the second moment by Var g( f (g)) /(1 −
+
+q). The upper bound will then give an estimate in terms of H and q.We first establish the lower bound by relating q to the probability that f (g) is nonzero. For distinct indices i, j, a tie |gTxi| = |gTxj| can occur only if: 
+
+gT(xi − xj) = 0 or gT(xi + xj) = 0. Both vectors xi − xj and xi + xj are nonzero by the identification of activations up to sign. Each equality therefore describes a proper hyperplane, which has probability zero under the standard Gaussian. There are only finitely many pairs of indices, so the maximizing index is unique almost surely. Whenever this unique maximizing index belongs to I, the 14 two support values coincide and f (g) = 0. Whenever it does not belong to I, every selected activation has a strictly smaller absolute projection, and hence f (g) > 0. It follows that: Pr [ f (g) > 0] = Pr [i⋆(g) /∈ I ] = q(I). (13) The function f (g) is zero outside the event { f (g) > 0}, which has probability q by (13). Cauchy–Schwarz therefore gives: 
+
+ Eg[ f (g)] 2 =
+
+
+
+Eg
+
+h
+
+f (g)1{ f (g)>0}
+
+i 2
+
+≤ Eg[ f (g)2] Eg
+
+h
+
+12  
+
+> {f(g)>0}
+
+i
+
+= q Eg[ f (g)2] (14) Using the definition of variance and (14), we obtain the required lower bound: Var g( f (g)) = Eg[ f (g)2] −  Eg[ f (g)] 2
+
+≥ (1 − q)Eg[ f (g)2]. (15) We now establish the upper bound on the variance. We use the strengthened Gaussian Poincaré inequality for functions orthogonal to constants and linear functions (Cordero-Erausquin et al., 2004). Evenness ensures orthogonality to linear functions, but does not imply a zero mean. To satisfy both conditions, we apply the inequality to the function: 
+
+ef (u) = f (u) − Eg[ f (g)] 
+
+By construction, Eg[ ef (g)] = 0. Moreover, subtracting a constant preserves evenness, so symmetry gives: 
+
+Eg[gj ef (g)] = 0, j = 1, . . . , d.Thus, centering removes the constant component, while evenness eliminates the linear component. Subtracting a constant also leaves the gradient unchanged, ∇ ef = ∇ f almost everywhere. The strengthened inequality therefore gives: Var g( f (g)) = Eg[ ef (g)2]
+
+≤ 12 Eg∥∇ ef (g)∥22 = 12 Eg∥∇ f (g)∥22. (16) To bound the right-hand side of (16), we next control the gradient of f . We first show that f is 2 H-Lipschitz, which implies ∥∇ f (u)∥2 ≤ 2H wherever f is differentiable. Since 
+
+f = hK − hKI , it suffices to show that each support function is H-Lipschitz. Indeed, for any 
+
+u, v ∈ Rd,
+
+|hK (u) − hK (v)| ≤ max  
+
+> i∈[N]
+
+|uTxi| − | vTxi|
+
+≤ max  
+
+> i∈[N]
+
+|(u − v)Txi|≤ H∥u − v∥2.The same argument applies to hKI . By the triangle inequality, their difference therefore satisfies: 
+
+| f (u) − f (v)| ≤ 2H∥u − v∥2 (17) Both support functions are maxima of finitely many linear functions. Their difference f is therefore piecewise linear and differentiable almost everywhere. At any differentiability point u satisfying f (u) = 0, the nonnegativity of f implies that u is a global minimum. Hence ∇ f (u) = 0. At every other differentiability point, (17) implies ∥∇ f (u)∥2 ≤ 2H.Thus, 
+
+∥∇ f (u)∥22 ≤ 4H21{ f (u)>0}
+
+Since the Gaussian measure is absolutely continuous, (13) gives: 
+
+Eg∥∇ f (g)∥22 ≤ 4H2q (18) 15 Applying (16) and then (18), we obtain the required upper bound: Var g( f (g)) ≤ 2H2q (19) We now use these two variance bounds to control the second moment required by (10). Suppose first that q < 1. Rearranging the lower bound (15) gives the first inequality below, and substituting the upper bound (19) gives the second: 
+
+Eg[ f (g)2] ≤ Var g( f (g)) 
+
+1 − q ≤ 2H2q
+
+1 − q (20) Substituting (20) into (10) therefore yields: 
+
+ER
+
+h
+
+(F(R) − FI (R)) 2i
+
+≤ Eg[ f (g)2] ≤ 2H2q
+
+1 − q (21) Cauchy–Schwarz, followed by (21), then gives: 
+
+ER[F(R) − FI (R)] ≤
+
+
+
+ER
+
+h
+
+(F(R) − FI (R)) 2i 1/2 
+
+≤ H
+
+s
+
+2q
+
+1 − q (22) For every R ∈ SO (d) and every activation, 
+
+∥Rx i∥∞ ≤ ∥ Rx i∥2 = ∥xi∥2 ≤ H
+
+Thus: 0 ≤ F(R) − FI (R) ≤ H (23) If 0 ≤ q ≤ 1/3, then 1 − q ≥ 2/3, and hence: 2q
+
+1 − q ≤ 3q.Equation (22) therefore gives: 
+
+ER[F(R) − FI (R)] ≤ Hp3q.If 1/3 ≤ q ≤ 1, then p3q ≥ 1, so (23) gives: 
+
+ER[F(R) − FI (R)] ≤ H ≤ Hp3q.Substituting q = q(I) proves (4). 
+
+## B Reduced ADMM updates 
+
+Let C = Cd and let Λ, Γ be scaled dual variables for VS − W = 0 and CW − Z = 0. With 
+
+V ∈ St (d, r), we write the augmented Lagrangian of (9) as: 
+
+Lρ = ∥Z∥44 + ρ
+
+2 ∥VS − W + Λ∥2 
+
+> F
+
++ ρ
+
+2 ∥CW − Z + Γ∥2 
+
+> F
+
+− ρ
+
+2
+
+ ∥Λ∥2 
+
+> F
+
++ ∥Γ∥2
+
+> F
+
+ (24) Holding ρ fixed within each sweep, we update 
+
+Z+ = prox ∥·∥ 44/ρ(CW + Γ), (25) 
+
+W+ = ( Id − 12 C) VS + Λ + C(Z+ − Γ), (26) 
+
+V+ = PQ T, PΣQT = svd thin 
+
+ (W+ − Λ)ST, (27) 
+
+Λ+ = Λ + V+S − W+, Γ+ = Γ + CW + − Z+. (28) For an input entry a, the proximal value is the unique real solution of 4 z3 + ρ(z − a) = 0. The W-update uses (Id + C)−1 = Id − C/2, while the V-update is an orthogonal Procrustes problem because ∥VS ∥2 
+
+> F
+
+= ∥S∥2 
+
+> F
+
+on St (d, r).
+
+Penalty selection. For R1, we initialize ρ0 = 10 ∥CU ∥2 
+
+> F
+
+/(dB ), ten times the mean squared entry of the centered activation matrix. We then adapt ρ every 20 iterations by primal–dual residual balancing (Boyd et al., 2011). Let: 
+
+rp = max  ∥W+ − V+S∥F, ∥CW + − Z+∥F
+
+,
+
+rd = ρ max  ∥W+ − W∥F, ∥Z+ − Z∥F
+
+.16 Selection Optimization                      
+
+> Algorithm 1 Top B(∥R0x∥∞)Top B(∥x∥∞)Random BR1,R2R1only R2only
+> Wiki-2 ppl ↓5.63 6.94 7.00 29.51 5.63 5.69 6.01
+
+Table 3: LLaMA-3 70B W4A4KV4 ablations. Selection : all four columns optimize the same ThinQuant rotation and differ only in how the B tokens are chosen. The first column is the Gaussian direction procedure of Algorithm 1. Top B(∥R0 x∥∞) scores the tokens after the initial Hadamard R0. Top B(∥x∥∞) keeps the tokens of largest residual ℓ∞ norm in the original basis. Random samples the same budget uniformly. Optimization : we compare keeping only the global rotation ( R1) or only the local rotatons ( R2). R1, R2 is the full Llama-3-70B run. R1 only optimizes the residual rotation and leaves R2 at initialization. R2 only optimizes this rotation and leaves R1 at the initial Hadamard. Best results in each block are 
+
+bold .At each adjustment step, set: 
+
+ρ+ =
+
+
+
+1.25 ρ, rp > 10 rd,
+
+ρ/1.25, rd > 10 rp,
+
+ρ, otherwise, and clip the result to [10 −8, max (10 ρ0, 10 −3)] . The local R2 problems are generally well behaved in our experiments, so each R2 solve uses a fixed ρ = 10. 
+
+Iteration counts and stopping. Each solve alternates one R1 problem with R2, ℓ problem per layer. R1 runs for at most 1000 iterations and for at least 300. After iteration 300 it stops when both the primal and dual residuals are below 10 −4:max  ∥W − VS ∥F, ∥CW − Z∥F
+
+ < 10 −4, ρ max  ∥W+ − W∥F, ∥Z+ − Z∥F
+
+ < 10 −4.Each R2 solve runs for 300 iterations. In every case the returned factor is the feasible iterate with the smallest objective value. 
+
+## C Ablations and Additional Experiments 
+
+Activation selection. Table 3 compares four selection rules on LLaMA-3-70B under W4A4KV4 quantization, keeping the activation budget and subsequent rotation optimiza-tion fixed. Algorithm 1 achieves a WikiText-2 perplexity of 5.63, compared with 6.94 when selecting the largest ℓ∞ activations after the initial Hadamard rotation and 7.00 when se-lecting them in the original basis. Uniformly sampling the same number of activations performs substantially worse, with a perplexity of 29.51. These results show that the choice of calibration activations is important at such a small budget. 
+
+Global and local rotations. The optimization ablation in Table 3 relates to the contribution of learning the global residual rotation R1 and the local rotations R2. Optimizing only R1,while leaving R2 at initialization, achieves a perplexity of 5.69, close to the 5.63 obtained when both are optimized. Optimizing only R2, while keeping R1 at its initial Hadamard rotation, gives a perplexity of 6.01. Thus, learning the global residual basis is sufficient to approach the performance of the full method in this setting, while also optimizing the local rotations provides a further improvement. 
+
+Calibration cost breakdown. Table 4 separates rotation optimization from the total cali-bration procedure and reports the associated disk storage. On LLaMA-3-70B, ThinQuant reduces optimization time from 74 minutes 46 seconds to 1 minute 22 seconds, approx-imately a 55 × speedup over DartQuant. The total calibration time decreases from 111 minutes to 11:57 minutes, approximately a 10 × speedup. The smaller reduction in total time reflects the cost of activation collection, selection, and data preparation, which together account for most of ThinQuant’s calibration time. Across all five models, ThinQuant also 17 Cost Method LLaMA-3 8B LLaMA-3 70B LLaMA-2 7B LLaMA-2 13B LLaMA-2 70B                                  
+
+> Optimization ThinQuant 23.4s 1:22 22.0s 34.5s 1:31
+> DartQuant 12:14 74:46 12:05 21:22 60:47 Total calibration ThinQuant 1:56 11:57 1:43 2:51 11:42
+> DartQuant 19:03 111:00 20:25 31:42 99:57 Disk storage ThinQuant 0.13 0.51 0.13 0.20 0.51
+> DartQuant 192 960 193 300 961
+
+Table 4: Breakdown of rotation-calibration cost. Optimization measures rotation opti-mization only, while total calibration additionally includes activation collection, selection, training-data preparation, and folding the rotation into the weights. Times are in mm:ss 
+
+unless marked in seconds. Disk storage is in GiB. Lower values are better, and best results are bold .    
+
+> Quantization performance Calibration cost Model Method Wiki-2
+
+↓ C4 ↓ 0-shot ↑ Runtime ↓ Peak GPU ↓                                                                           
+
+> LLaMA-3 8B
+> ThinQuant 7.75 12.55 60.87 1:56 18.5
+> DartQuant 8.03 13.09 59.98 19:03 37.1
+> OmniQuant 71.32 92.86 32.00 54:57 17.2 LLaMA-3 70B
+> ThinQuant 5.52 10.14 66.18 11:57 31.9
+> DartQuant 7.15 14.88 59.05 111:00 134.9
+> OmniQuant 482.73 775.47 –406:49 127.0
+> LLaMA-2 7B
+> ThinQuant 6.12 8.32 57.58 1:43 18.2
+> DartQuant 6.25 8.52 56.93 20:25 75.1
+> OmniQuant 11.21 16.05 45.68 53:59 16.2 LLaMA-2 13B
+> ThinQuant 5.43 7.59 61.25 2:51 21.9
+> DartQuant 5.46 7.63 61.65 31:42 51.1
+> OmniQuant 10.64 16.62 44.49 93:07 27.3
+> LLaMA-2 70B
+> ThinQuant 3.88 6.20 67.01 11:42 33.2
+> DartQuant 3.89 6.19 67.31 99:57 73.1
+> OmniQuant 8.43 12.19 49.76 404:08 125.9
+
+Table 5: W4A4 quantization performance and calibration cost. Weights and activations are 4-bit; the KV cache is left at 16 bits. The 0-shot column averages nine downstream tasks. For ThinQuant and DartQuant, runtime is total rotation-calibration time, including activation collection, selection, and training-data preparation. Both reuse the rotations from the W4A4KV4 runs, so those calibration costs match Table 1. OmniQuant runtime is activation-scale collection plus LET/LWC fitting. GPU denotes peak GPU process memory during calibration, in GiB. Times are in mm:ss . Best results are bold .reduces disk storage by more than three orders of magnitude. For example, LLaMA-3-70B requires 0.51 GiB rather than 960 GiB. These savings arise from not needing to store the large calibration set used by DartQuant. 18

@@ -1,0 +1,1119 @@
+Title: STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization
+
+URL Source: https://arxiv.org/pdf/2609.38169v1
+
+Published Time: Wed, 30 Sep 2026 02:32:23 GMT
+
+Number of Pages: 27
+
+Markdown Content:
+STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization 
+
+# STEPQ UANT : W HEN AND WHERE ERRORS MATTER IN DELTA -R ULE RECURRENT STATE QUANTIZATION 
+
+Bingchen Yao ∗1, Haobo Xu ∗3, Haokun Lin ‡2,4B, Yichen Wu 5,Ziyu Guo 6, Renrui Zhang 6, Zhichao Lu 4, Zhenan Sun 2, Ying Wei 1B 
+
+> 1
+
+Zhejiang University 2 NLPR & MAIS, Institute of Automation, CAS 3 Tsinghua University  
+
+> 4
+
+City University of Hong Kong 5 Harvard University 6 The Chinese University of Hong Kong 
+
+> ∗
+
+Equal Contribution ‡Project Leader BCorresponding Author 
+
+§ Code: https://github.com/Dreamer-Toby/STEPQuant 
+
+## ABSTRACT 
+
+Linear attention replaces growing KV caches with fixed-size recurrent states, yet these persistent states can become a substantial memory bottleneck under con-current serving. Directly quantizing recurrent states to low precision often leads to severe accuracy degradation, as quantization errors propagate through succes-sive state updates. We discover that the impact of these errors depends on two complementary dimensions: temporally , errors in long-lived memory can per-sist across many decoding steps; spatially , errors in different key rows affect model outputs differently, while state magnitudes vary substantially along both rows and columns. Motivated by these observations, we propose STEPQuant, a spatial-temporal post-training quantization framework for Delta-rule recurrent states. STEPQuant allocates precision according to error magnitude and mem-ory lifetime, and jointly fits key-row and value-column scales based on state dis-tributions and key-row impact on output error. Experiments on Qwen3.8-27B and Kimi-Linear-48B-A3B-Instruct across both long- and short-generation bench-marks show that STEPQuant closely matches FP32-state accuracy under a nom-inal 6-bit budget and outperforms uniform INT8 in its 4-bit configuration. Inte-grated into SGLang with optimized GPU kernels, 6-bit STEPQuant achieves over 5× recurrent-state compression and reduces total serving memory by up to 68.7%. 
+
+## 1 INTRODUCTION 
+
+Unlike conventional softmax attention, which maintains a KV cache that grows with sequence length, linear attention summarizes past tokens into a fixed-size recurrent state (Yang et al., 2023). Recent hybrid models, including Qwen3.8-27B (Qwen Team, 2026a) and Kimi-Linear-48B-A3B-Instruct (Team et al., 2025), combine gated Delta-rule recurrent memory (Yang et al., 2025) with standard attention to balance efficiency and performance. Despite its fixed size across context length, the recurrent state introduces a different memory bottleneck during serving. Each concurrent re-quest requires a separate persistent state, while serving systems may reserve additional state slots for caching and scheduling. As a result, the memory footprint of the state pool grows with concur-rency even for short contexts . In official SGLang deployment, the FP32 state pool of Qwen exceeds the memory footprint of its BF16 weights at 70 supported concurrent requests, as shown in Fig. 1(a). This growing memory overhead motivates efficient compression of recurrent states. However, directly applying uniform quantization to recurrent states severely degrades model perfor-mance. Each Delta update operates on an approximate state and produces a newly quantized one, allowing quantization errors to propagate through subsequent decoding steps. Fig. 1(c) shows that mean accuracy drops sharply at 4 and 6 bits on both models, and a clear gap remains even at 8 bits. To understand this failure, we investigate state quantization error from two complementary dimen-sions: when and where the error accumulates. First, temporally , recurrent states are updated and re-quantized at every decoding step, causing quantization errors to accumulate over time. Each update 1arXiv:2609.38169v1 [cs.CL] 29 Sep 2026 STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization )*0 *-.  &##%9#"&$%$ ).9 9'% .13/ ,4%9 9'% *31 )2/3/                                              
+
+> " "  
+> +* 4 7. ,0). +* .%%9%$ 2*-2-)22 /4%$9&#(9586
+> ! !  "  " "  
+> '9  '9  '9+* 9  9  9+* 23) )2 ))22 %9495% $6 )2 2)2 *)2 ,)2 .&&%9$%%9## #
+> "   " " 
+> 2)*0 *-.  &##%9#"&$%$ 2-2 )22 )-2 *22 %%9!  95  6 ).9 9'% .13/ ,4%9 9'% **31 )2/3/
+>  " "  
+> +* 4 7. ,0). +* .%%9%$ 2*--2 /-)22 /4%$9&#(9586
+> ! !  "  " "  
+> '9  '9+* 9  9+* 23) )2 )%9495% $6 )2 2)2 *)2 ,)2 .&&%9$%%9## #
+> "   " " 
+> (b) State lifetime vs. quantization error (c) State precision vs. accuracy (a) State memory footprint
+> 2)*0 *-.  &##%9#"&$%$ 2-2 )22 )-2 *22 ).9 9'% .13/ ,4%9 9'% **31 )2/3/
+>  " "  
+> +* ,0). +* .%%9%$ 2*--2 /-)22 /4%$9&#(9586
+> ! !  "  " "  
+> '9  '9  '9+* 9  9  9+* 23) )2 ))22 %9495% $6 )2 2)2 *)2 ,)2 .&&%9$%%9## #
+> "   " " 
+> Qwen Ours KDA Ours
+> Ours
+> Memory usage (GiB)
+
+Figure 1: Why recurrent state needs structured compression. (a) Recurrent state memory grows with concurrent requests and can exceed model weight memory. STEPQuant substantially reduces memory cost at 6bit. (b) Heads with longer gate half-lives tend to accumulate larger state errors under uniform INT6 quantization across 2304 Qwen heads. (c) Mean accuracy across seven tasks for Qwen (solid) and KDA (dashed). STEPQuant achieves 6.93 × and 5.03 × compression of Qwen recurrent states at 4 and 6 bits, respectively, with negligible degradation in mean accuracy. carries forward existing error while introducing new quantization error, and stronger gate retention allows these errors to persist longer. Our preliminary experiments discover that longer-lived state units tend to exhibit larger accumulated errors (Fig. 1(b)). Motivated by this observation, we intro-duce Lifetime-aware Bit Allocation, a mixed-precision quantization method that jointly considers the quantization error of each unit at different bit widths and its persistence over time. Under a fixed memory budget, it allocates higher precision to units with larger and longer-lived errors. Second, spatially , the effect of quantization error also depends on where it occurs in the recurrent state. The spatial structure matters in two ways: errors of similar magnitude in different key rows can have different impacts on the model output, while state magnitudes vary substantially across both rows and columns (Fig. 2). Scaling along a single axis cannot accommodate both patterns as the state evolves during decoding. We therefore propose Key-Row-Aware Dual-axis Fitting to reduce spatial quantization error. Specifically, we assign separate scales to key rows and value columns. The row scales account for both the current magnitude of each row and its measured impact on output error, while the column scales are fitted with greater weight on rows where errors matter more. Together, these temporal and spatial designs form Spatial-TE mPoral Quant ization (STEPQuant), which compresses recurrent states throughout decoding. We evaluate STEPQuant on two strong hybrid models, Qwen3.8-27B and Kimi-Linear-48B-A3B-Instruct, across seven long-generation and six short-generation tasks. Under a nominal 6-bit budget, STEPQuant closely matches FP32-state accuracy on both models. Even with a 4-bit budget, STEPQuant outperforms uniform INT8 on both models, nearly matching FP32-state performance on Qwen while maintaining a modest gap on Kimi. With optimized kernels integrated into SGLang, 6-bit STEPQuant compresses recurrent-state memory by 5.03 × and 5.08 ×, reducing total memory consumption, including model weights, by 68.7% and 53.7% on Qwen and Kimi, respectively. Our contributions are summarized as follows: • Error analysis. We analyze how quantization errors propagate through gated Delta-rule updates temporally and spatially, showing that both state lifetime and error location affect their impact. • Quantization method. We propose STEPQuant, which combines lifetime-aware bit allocation with key-row-aware dual-axis fitting. Under a nominal 6-bit budget, STEPQuant closely matches FP32-state accuracy, while its 4-bit configuration outperforms uniform INT8 on both models. • Serving implementation. We integrate STEPQuant into SGLang with optimized GPU kernels, achieving over 5 × recurrent-state compression and up to 2.91 × faster state updates. 
+
+## 2 PRELIMINARIES 
+
+2.1 GATED DELTA -R ULE LINEAR ATTENTION 
+
+Unlike softmax attention, which maintains a KV cache that grows with sequence length, recurrent linear attention summarizes past tokens in a fixed-size state matrix. For a single head in a given 2STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization layer, we omit the layer and head indices and denote the state after token t by St ∈ Rdk ×dv , with query qt ∈ Rdk , key kt ∈ Rdk , and value vt ∈ Rdv . Gated DeltaNet (GDN) (Yang et al., 2025) and Kimi Delta Attention (KDA) (Team et al., 2025) update this state through a gated Delta rule: 
+
+St = DtSt−1 + βtkt
+
+ v⊤ 
+
+> t
+
+− k⊤ 
+
+> t
+
+DtSt−1
+
+ = ( I − βtktk⊤ 
+
+> t
+
+)DtSt−1 + βtktv⊤ 
+
+> t
+
+, yt = S⊤ 
+
+> t
+
+qt, (1) where Dt controls memory retention and βt ∈ [0 , 1] controls the write strength. The update first applies the retention gate Dt to the previous state, yielding the retained state DtSt−1. The current key kt retrieves k⊤ 
+
+> t
+
+DtSt−1 from the retained state. The residual v⊤ 
+
+> t
+
+− k⊤ 
+
+> t
+
+DtSt−1 is used to update the state along the key direction kt. The head output (readout) is then computed as yt = S⊤ 
+
+> t
+
+qt.The two architectures differ in their retention gate Dt. GDN uses a scalar gate per head, Dt = αtI,while KDA uses channel-wise gates Dt = diag (dt, 1, · · · , d t,d k ). Both updates can be written as 
+
+St = AtSt−1 + Bt, where At = ( I − βtktk⊤ 
+
+> t
+
+)Dt, Bt = βtktv⊤ 
+
+> t
+
+. (2) Here, At ∈ Rdk ×dk transports and selectively modifies the previous memory, while Bt ∈ Rdk ×dv
+
+introduces the new value. The state contains dk · dv elements per head, independent of sequence length, but must persist across decoding steps for each active request. 2.2 RECURRENT -S TATE QUANTIZATION 
+
+Quantization maps floating-point values to a finite set of discrete levels, reducing storage require-ments. In symmetric uniform quantization, each value x is encoded as a b-bit integer with a positive scale s shared within a quantization group. The reconstructed value is 
+
+Qb,s (x) = s · clip 
+
+
+
+round 
+
+ xs
+
+
+
+, −qb, q b
+
+
+
+, qb = 2 b−1 − 1, (3) We focus on quantizing persistent recurrent states and also evaluate the combination with weight quantization. Let St denote the full-precision reference state obtained by recursively applying Eq. (2) without state quantization. At each decoding step, the model updates the reconstructed state in floating point and computes the output. The updated state is then quantized for storage: 
+
+Xt = At ˆSt−1 + Bt, ˆyt = X⊤ 
+
+> t
+
+qt, ˆSt = Qt(Xt), (4) where Qt quantizes Xt and returns its dequantized approximation ˆSt.
+
+## 3 TEMPORAL DIMENSION : L IFETIME -AWARE BIT ALLOCATION 
+
+3.1 LIFETIME -D EPENDENT ERROR ACCUMULATION 
+
+From Eq. 4, quantization error is recursively fed back through the state update. The following proposition characterizes how this error propagates across decoding steps. Proof is in Appendix A. 
+
+Proposition 1 (Conditional error propagation) . For identical inputs and gates, let Et = bSt − St
+
+denote the accumulated error and εt = Qt(Xt) − Xt the quantization error added at step t. Then 
+
+Et = ( I − βtktk⊤ 
+
+> t
+
+)DtEt−1 + εt = AtEt−1 + εt, byt − yt = E⊤
+
+> t−1
+
+A⊤ 
+
+> t
+
+qt. (5) 
+
+If ∥kt∥2 ≤ 1, 0 ≤ βt ≤ 1, and 0 ⪯ Dt ⪯ I, then ∥At∥2 ≤ ∥ Dt∥2 ≤ 1.
+
+According to Proposition 1, previously accumulated error is propagated through At, while quanti-zation at step t introduces a new error. The transition At reduces existing error through two mecha-nisms. The retention gate Dt first attenuates the error carried over from the previous step. The Delta update then further reduces its component along the current key kt through the factor (I − βtktk⊤ 
+
+> t
+
+),while leaving components orthogonal to kt unchanged. We verify this effect experimentally in Ap-pendix B.1. Thus, errors in directions rarely aligned with subsequent keys depend mainly on gate decay. When retention is close to one, these errors can persist for many decoding steps. Together, 
+
+these results identify memory lifetime as a key predictor of recurrent-state quantization risk. 
+
+This analysis indicates that longer-lived memory should exhibit larger accumulated quantization error. To examine this assumption, we evaluate all recurrent heads of Qwen3.8-27B under uniform INT6 state quantization on C4. Fig. 1(b) shows that heads with longer gate half-lives exhibit larger accumulated state error, with Spearman’s ρS ≈ 0.80 (see Appendix B.5 for more details). This indicates that recurrent heads with longer lives tend to result in larger quantization error. 
+
+3STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization 
+
+Figure 2: Spatial structure of recurrent states. (a) Key rows are ranked by readout impact and divided into eight groups. Quantizing one group at a time to INT4 generally causes larger perplexity increases for higher-impact groups. (b) A representative Qwen state exhibits obvious outliers in both key rows and value columns. (c) Channel RMS relative to the median across 2048 decoding steps. The outliers remain prominent throughout decoding. 3.2 LIFETIME -AWARE BIT ALLOCATION 
+
+Mixed-precision quantization is widely used in LLMs to preserve accuracy by assigning more bits to sensitive components (Dettmers et al., 2022; 2023). For recurrent states, bit allocation should ad-ditionally account for memory lifetime, as quantization errors can persist across subsequent updates. Consequently, we propose Lifetime-aware Bit Allocation, which assigns precision under a fixed bit budget based on the persistence of quantization errors. Lifetime-aware Bit Allocation operates on recurrent-state units: each unit u is an entire head in Qwen and a key row in KDA. We estimate du(b), the reconstruction distortion of unit u quantized to b bits, and its mean log retention ℓu where the expectation is taken over calibration tokens. Here, 
+
+rt,u is the retention gate for unit u: rt,u = αt for GDN and rt,u = dt,i for key row i in KDA. A larger ℓu indicates stronger retention and a longer memory lifetime. Considering gate retention alone, the error retention factor after j updates is approximated by 
+
+> j
+
+Y
+
+> s=1
+
+rt+s,u ≈ exp( jℓ u). (6) The squared error therefore decays by a factor of approximately exp(2 jℓ u), giving the lifetime weight over H steps: 
+
+Lu =
+
+> H−1
+
+X
+
+> j=0
+
+exp(2 jℓ u). (7) Let nu denote the number of state elements in unit u. Given an average bit budget ¯b, we select bit widths from the candidate set B¯b to minimize the lifetime-weighted reconstruction distortion: 
+
+min 
+
+> bu∈B ¯b
+
+X
+
+> u
+
+Ludu(bu) s.t. X
+
+> u
+
+nubu ≤ ¯b X
+
+> u
+
+nu. (8) This objective accounts for both the magnitude of quantization error and how long it persists through subsequent updates . Nevertheless, a small number of units remain difficult to quantize even with mixed-precision allocation. We therefore retain the highest-risk units in FP16 as sparse pivots. In summary, Lifetime-aware Bit Allocation assigns higher precision to units with larger quantization errors and longer memory lifetimes. The pivot selection and bit allocation are determined during offline calibration and fixed across requests. Further details are provided in Appendix C.2 and D. 4STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization 
+
+## 4 SPATIAL DIMENSION : K EY -R OW -A WARE DUAL -A XIS FITTING 
+
+4.1 KEY -ROW IMPACT ON READOUT ERROR 
+
+The temporal analysis above characterizes how quantization errors propagate across recurrent up-dates. We now examine their spatial distribution within the state matrix: errors of equal magnitude in different key rows can affect the readout differently. From Eq. (5), the readout error is 
+
+∆yt = ˆ yt − yt = E⊤
+
+> t−1
+
+A⊤ 
+
+> t
+
+qt = X
+
+> i
+
+(A⊤ 
+
+> t
+
+qt)iE⊤
+
+> t−1,i, :
+
+, (9) We define gt = A⊤ 
+
+> t
+
+qt ∈ Rdk , where gt,i weights the contribution of the error in key row i, Et−1,i, :,to the current readout error. For errors of equal norm confined to individual key rows, a larger g2
+
+> t,i
+
+implies a larger squared readout error. To account for variation across decoding steps, we define the row-impact score as 
+
+ωi = Ecal [g2
+
+> t,i
+
+]. (10) To validate this row-impact score, we rank key rows within each head by ωi and divide them into eight groups. We quantize one group at a time to INT4 while keeping the remaining rows in full precision, and measure the resulting increase in perplexity. As shown in Fig. 2(a), groups with larger 
+
+ωi generally produce greater PPL degradation in both models. This observation suggests using the row-impact score to guide quantization scale selection , as described in Sec. 4.3. 4.2 TWO -A XIS STATE GEOMETRY 
+
+Beyond differences in how key-row errors affect the readout, recurrent states exhibit another spatial property: large-magnitude outliers occur along both key rows and value columns. Unlike con-ventional LLM quantization settings that often target outliers along a single dominant axis (e.g., channels or tokens) (Xiao et al., 2023; Shao et al., 2024), we discover that the recurrent state matrix exhibits large-magnitude structures along both key rows and value columns, as shown in Fig. 2(b). We further examine how these magnitude patterns evolve throughout decoding. Fig. 2(c) shows that pronounced magnitude differences persist along both axes, with a small subset of rows and columns consistently exhibiting substantially larger magnitudes. Quantitative results show that the maximum-to-median RMS contrasts along the key-row and value-column axes are 10 .3× and 
+
+19 .4×, respectively. Both exceed 3× in 98.6% of sampled states. Together, these observations motivate dual-axis scaling to accommodate the magnitude distributions of recurrent states .4.3 KEY -R OW -A WARE DUAL -AXIS FITTING 
+
+Sec. 4.1 and 4.2 identify two spatial properties of recurrent states: key rows differ in their impact on readout error, and state magnitudes vary substantially along both axes. To account for both, we propose Key-Row-Aware Dual-Axis Fitting, which combines calibrated row-impact scores with separate row and column scales. Specifically, we represent the updated state X = Xt as: 
+
+ˆXij = ricj zij , (11) where ri > 0 and cj > 0 are the scale factors for key row i and value column j, respectively, and zij 
+
+is the low-bit integer. We incorporate the key-row impact factor into ri, and the two factors allow the quantization independently to vary along the two state axes. 
+
+Row factors. The row factor ri should account for both (i) the current magnitude of a row and (ii) the impact of key row on readout error (Sec. 4.1). We first estimate the magnitude of key row i as 
+
+mi = 1
+
+dv
+
+X
+
+> j
+
+|Xij |. (12) Rows with larger mi require a wider quantization range, so the row factor should increase with mi.In addition, key rows with larger impact scores ωi are more vulnerable to quantization. Inspired 5STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization by fractional-power smoothing in prior quantization methods (Xiao et al., 2023), we consider both effects using square-root scaling and a dimension-normalized wi1:
+
+ri = m1/2 
+
+> i
+
+w−1/2 
+
+> i
+
+. (13) Thus, larger-magnitude rows receive a wider range, while higher-impact rows receive finer quanti-zation resolution. 
+
+Column factors. Given the row factors {ri}, we fit the column scales {cj } by minimizing the impact-weighted reconstruction error: 
+
+min  
+
+> {cj>0}
+
+X
+
+> i,j
+
+w2 
+
+> i
+
+(Xij − ricj zij )2 . (14) This objective captures the remaining variation along value columns, while assigning larger penalties to reconstruction errors on high-impact key rows. 
+
+Quantization. Given the fitted scales, we quantize each scaled entry Xij /(ricj ) to the nearest representable level at its assigned precision bi. The reconstructed state is then bXij = ricj zij .Implementation details of scale fitting and quantized-state storage are provided in Appendix C.3. 4.4 KERNEL IMPLEMENTATION IN SGL ANG 
+
+We implement STEPQuant as packed-state kernels integrated with SGLang’s recurrent-state pool. Lifetime-Aware Bit Allocation and FP16 pivot selection are performed offline, adding no per-token allocation overhead and fixing the packed layout across requests. During decoding, we implement a kernel to fuse tilewise state reconstruction, the Delta update, and the current readout. This avoids a separate pass over the full state for reconstruction and reduces memory traffic. Once the head output is available, later layers continue processing the token while Key-Row-Aware Dual-Axis Fitting and packed writeback run on a separate CUDA stream. This overlaps scale updates with model computation and keeps the state compressed between tokens (see more details in Appendix F.1). 
+
+## 5 EXPERIMENTS 
+
+5.1 SETUP 
+
+Models and hardware. We evaluate Qwen3.8-27B (Qwen Team, 2026a) and Kimi-Linear-48B-A3B-Instruct (Team et al., 2025) with BF16 and 4-bit AWQ (Lin et al., 2024b) quantized weights on SGLang (Zheng et al., 2024), using four NVIDIA A800 GPUs. We use SGLang’s default FP32 SSM-state precision as the full-precision baseline, alongside symmetric rowwise-absmax INT4/6/8 baselines. STEPQuant uses the fused state kernels described in Sec. 4.4. 
+
+Calibration. For all measured benchmarks, we use 32 WikiText-2 (Merity et al., 2016) training segments with 2048 tokens each to determine bit allocation, FP16 pivots, and row-impact scores. 
+
+Long-generation reasoning. We compare quantized models on seven reasoning benchmarks: Live-CodeBench v6 (Jain et al., 2025), EvalPlus (Liu et al., 2023), AIME 2026 (Dekoninck et al., 2026), MATH-500 (Lightman et al., 2024), HMMT February 2026 (Dekoninck et al., 2026), GPQA Dia-mond (Rein et al., 2023), and IFBench (Pyatkin et al., 2026). We generate 5, 5, 64, 4, 64, 8, and 4 samples per question, respectively, using temperature T = 1 .0, top-k = 20 , top-p = 0 .95 , and a maximum of 65536 generated tokens per sample. 
+
+Short generation. We also report results on six language understanding tasks: MMLU (Hendrycks et al., 2020), ARC-C (Clark et al., 2018), OpenBookQA (Mihaylov et al., 2018), HellaSwag (Zellers et al., 2019), WinoGrande (Sakaguchi et al., 2021), and LAMBADA (Paperno et al., 2016). We gen-erate one answer per example with greedy decoding ( T = 0 ) and score the generated answers rather than candidate likelihoods. This aligns the autoregressive decoding setting targeted by STEPQuant.             
+
+> 1We temper the dynamic range and normalize within each head as wi=ωγ/ 2
+> i/GM k(ωγ/ 2
+> k),γ= 0 .25 ,so that the geometric mean of wiis one while preserving relative row importance, following (Box & Cox, 1964).
+
+6STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization Table 1: Long-generation reasoning accuracy with BF16 weights (%).                                                                                                         
+
+> State LCB v6 EvalPlus AIME 26 MATH-500 HMMT GPQA-D IFBench Avg.
+> Qwen3.8-27B
+> FP32 85.31 84.87 87.71 97.60 74.24 80.81 53.67 80.60 INT8 72.23 80.26 78.54 97.00 58.71 75.25 41.00 71.86 INT6 30.43 69.00 33.96 87.40 16.67 51.52 26.33 45.04 INT4 7.87 31.55 0.00 34.00 0.00 4.04 11.67 12.73
+> STEPQuant@6bit 85.42 85.54 87.24 97.35 73.30 80.87 54.42 80.59 STEPQuant@4bit 86.35 84.87 86.25 97.00 73.86 81.57 53.67 80.51
+> Kimi-Linear-48B-A3B-Instruct
+> FP32 54.52 76.75 68.33 93.25 45.08 69.70 23.00 61.52 INT8 52.61 75.46 51.88 92.45 35.61 62.88 21.25 56.02 INT6 42.37 71.96 22.71 88.00 17.42 57.83 19.58 45.70 INT4 28.82 46.86 0.00 45.80 0.00 14.58 15.33 21.63
+> STEPQuant@6bit 54.86 76.57 67.71 93.60 46.21 68.43 22.92 61.47 STEPQuant@4bit 53.29 74.54 59.17 92.60 43.56 64.14 22.33 58.52
+
+Table 2: Short-generation accuracy with BF16 weights (%).                                                                                            
+
+> State MMLU ARC-C OpenBookQA HellaSwag WinoGrande LAMBADA Avg.
+> Qwen3.8-27B
+> FP32 82.25 96.93 95.40 93.15 90.06 68.91 87.78 INT8 82.19 96.16 94.60 92.00 87.69 64.89 86.25 INT6 78.86 94.28 92.80 87.72 79.79 61.50 82.49 INT4 78.80 73.63 77.60 60.51 46.57 57.31 65.74
+> STEPQuant@6bit 82.23 96.67 95.80 93.01 89.19 68.35 87.54 STEPQuant@4bit 82.07 96.84 95.80 93.08 89.50 68.50 87.63
+> Kimi-Linear-48B-A3B-Instruct
+> FP32 71.21 91.64 88.60 67.42 55.88 35.40 68.36 INT8 70.67 91.98 88.40 66.78 55.80 33.17 67.80 INT6 67.73 87.54 83.40 61.77 41.28 26.37 61.35 INT4 57.36 69.37 72.80 19.88 17.36 16.67 42.24
+> STEPQuant@6bit 71.21 90.61 89.40 68.77 57.70 35.20 68.82 STEPQuant@4bit 71.08 90.96 88.80 67.95 54.93 34.93 68.11
+
+5.2 ACCURACY ACROSS LONG AND SHORT TASKS 
+
+For long reasoning tasks, Table 1 shows that 6-bit STEPQuant closely matches the FP32-state base-line on both Qwen (GDN) and Kimi (KDA). STEPQuant achieves mean accuracies of 80.59% on Qwen and 61.47% on Kimi, whereas uniform INT6 reaches only 45.04% and 45.70%, respectively. At 4 bits, uniform INT4 suffers substantial performance degradation, while STEPQuant achieves competitive performance across the seven tasks. The advantage also holds on the short-generation benchmarks in Table 2. Here, 4-bit STEPQuant trails FP32 by only 0.15 points on Qwen and 0.25 points on Kimi, whereas uniform INT4 degrades sharply and can fail to produce valid answers even on short tasks. These results show that recurrent states can be quantized below 8 bits with limited accuracy loss, a regime that the concurrent work DAMP identifies as challenging (see Appendix G). 5.3 COMPATIBILITY WITH W4 WEIGHTS 
+
+We further evaluate STEPQuant with 4-bit AWQ-quantized weights, a setting more representative of practical deployment. From Table 3, 6-bit STEPQuant achieves seven-task average accuracies of 79.27% on Qwen and 58.62% on Kimi, only 0.05 and 0.33 points below their corresponding FP32-state baselines, respectively. At the lower 4-bit state budget, STEPQuant also maintains competitive performance. These results show that STEPQuant remains effective when combined with weight quantization. As weight memory decreases, recurrent states account for a larger fraction of the serv-ing memory, making state compression increasingly important for memory-efficient deployment. 7STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization Table 3: Reasoning performance of STEPQuant with 4-bit AWQ-quantized weights. 
+
+State LCB v6 EvalPlus AIME 26 MATH-500 HMMT GPQA-D IFBench Avg. 
+
+Qwen3.8-27B 
+
+FP32 85.23 85.06 82.92 97.20 71.78 81.06 52.00 79.32 
+
+STEPQuant@6bit 85.33 85.42 82.76 97.25 71.02 80.93 52.17 79.27 STEPQuant@4bit 83.98 84.69 85.42 96.40 70.83 81.06 50.50 78.98 
+
+Kimi-Linear-48B-A3B-Instruct 
+
+FP32 52.80 74.72 59.79 93.80 41.86 66.92 22.75 58.95 
+
+STEPQuant@6bit 52.74 74.94 59.38 93.75 41.10 66.16 22.25 58.62 STEPQuant@4bit 51.94 74.17 51.88 92.20 40.91 63.38 22.17 56.66 
+
+Table 4: Component ablation on three long-reasoning tasks using Qwen3.8-27 BF16 weights. 
+
+Nominal 6-bit budget 
+
+Variant AIME GPQA LCB Avg. FP32 87.71 80.81 85.31 84.61 INT6 33.96 51.52 30.43 38.63 Q-Mamba@6bit 73.13 76.77 77.97 75.95 Spatial only 79.79 80.68 80.09 80.19 Temporal w/o pivots 60.42 71.97 69.00 67.13 Temporal only 74.58 79.67 72.64 75.63 STEPQuant@6bit 87.24 80.87 85.42 84.51 Nominal 4-bit budget 
+
+Variant AIME GPQA LCB Avg. FP32 87.71 80.81 85.31 84.61 INT4 0.00 4.04 7.87 3.97 Q-Mamba@4bit 0.00 6.06 16.87 7.64 Spatial only 75.21 70.71 75.92 73.95 Temporal w/o pivots 0.00 6.57 11.94 6.17 Temporal only 3.96 11.62 23.03 12.87 STEPQuant@4bit 86.25 81.57 86.35 84.72 FP32 INT8 INT6 INT4 @6 @4 010 20 30 40 Length (K tokens)        
+
+> 6.5 10.5 16.2 39.2 6.6 8.0
+> (a) Qwen: length
+> FP32 INT8 INT6 INT4 @6 @4 010 20 30 40 Length (K tokens)
+> 11.9 14.8 17.4 41.1 11.7 11.5
+> (b) KDA: length
+> 32 64 128 256 512 Batch size 080 160 240 320 400 480 Total memory (GiB)
+> 419.73 GiB 131.18 GiB
+> −68.7%
+> (c) Serving memory with W4
+> FP32 state STEPQuant@6 State memory State time
+> Batch size = 512, slot = 5 020 40 60 80 100 Normalized to FP32 state (%)
+> 360.14 GiB 29.63 ms 71.59 GiB 10.20 ms
+> −80.1% −65.6%
+> (d) Memory & Time of State Updating
+> FP32 state STEPQuant@6
+
+Figure 3: Generation length and serving efficiency of STEPQuant. (a–b) Mean generated tokens across seven tasks, weighting tasks equally. Blue bars show FP32 and uniform INT8/6/4. Orange bars show STEPQuant@6bit/@4bit (marked @6/@4). Lengths include thinking, incorrect answers, and capped outputs. (c) Total serving memory of Qwen with W4 weights across different batch sizes. (d) Normalized recurrent-state memory and updating time of Qwen at batch size 512. 5.4 COMPONENT ABLATION 
+
+We evaluate the components on AIME 2026, GPQA Diamond, and LiveCodeBench v6 with BF16 weights under nominal 4- and 6-bit budgets. We also adapt the dual-axis state quantization (DSQ) component of Q-Mamba (Tianqi et al., 2025), originally designed for Mamba models, as a baseline. Spatial only retains uniform precision but applies key-row-aware dual-axis fitting. Temporal only uses calibrated mixed-precision allocation and FP16 pivots without spatial fitting, while Temporal w/o pivots removes the pivots. STEPQuant combines the spatial and temporal components. All quantization methods are evaluated under the same nominal bit budget (4 or 6 bits). Table 4 presents the Qwen results, with the corresponding Kimi results provided in Appendix E.4. 
+
+Component analysis. (i) Spatial fitting. At 4 bits, our spatial fitting substantially outperforms DSQ on Qwen (73.95% vs. 7.64%), with consistent improvements at 6 bits. This highlights the benefit of incorporating key-row impact into dual-axis quantization. (ii) Pivot protection. Protecting only 1.39% of Qwen heads with FP16 pivots improves the 4-bit three-task average by 6.70 points and the 6-bit AIME accuracy by 14.16 points. This demonstrates that protecting a small fraction of high-risk units can substantially improve accuracy. (iii) Combining both components. At 4 bits, STEPQuant achieves 84.72% on Qwen, outperforming both Spatial only (73.95%) and Temporal only (12.87%). At 6 bits, STEPQuant achieves 84.51%, compared with 80.19% and 75.63% for the individual com-8STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization ponents, closely matching FP32 (84.61%). These results demonstrate the complementary benefits of our spatial and temporal components. Similar trends are observed on Kimi under both bit budgets. 5.5 GENERATION LENGTH ON SEVEN LONG -GENERATION TASKS 
+
+Prior works (Liu et al., 2025; Lotfi et al., 2026) have observed that quantized models may exhibit overthinking, producing excessively long outputs without improving reasoning accuracy. We there-fore examine generation length to further understand the behavior of STEPQuant on reasoning tasks. As presented in Fig. 3(a)(b), uniform quantization substantially increases output length. For exam-ple, Kimi generates an average of 63.40K tokens on AIME and 64.22K on HMMT under 4-bit quantization, approaching the 65536-token limit while achieving near 0 accuracy on both tasks. This suggests that the increased generation length does not translate into effective reasoning under aggressive uniform quantization. In contrast, STEPQuant maintains output lengths close to those of the FP32-state model, consistent with its preserved accuracy on long reasoning tasks. 5.6 EFFICIENCY EVALUATION 
+
+We evaluate the serving efficiency of STEPQuant using SGLang on A800 GPUs. Fig. 3(c) reports the total serving memory of Qwen with W4 weights across different batch sizes. At a batch size of 512, STEPQuant@6bit reduces total memory from 419.73 to 131.18 GiB, a 68.7% reduction. Beyond the overall memory savings, we further examine recurrent-state memory and state-update time. Fig.3(d) shows that STEPQuant@6bit reduces recurrent-state memory by 80.1% (5.03 × com-pression) and state-update time by 65.6% (2.91 × faster). Additional results, including the evaluation protocol, state memory and update time on Kimi, and full-model decode throughput on both models, are provided in Appendix F. 
+
+## 6 RELATED WORK 
+
+Efficient LLM inference has been pursued through efficient decoding procedures (Chen et al., 2026; Xu et al., 2026; Qian et al., 2026b;a), parameter pruning (Zhang et al., 2024; Xing et al., 2025; Lin et al., 2026d), low-bit quantization (Frantar et al., 2022; Yang et al., 2026c;a;b; Ma et al., 2023a;b; 2024), and architectural approaches (Yang et al., 2023; 2024; Lin et al., 2026a). Our work combines the latter two directions by quantizing the recurrent states used in gated linear attention models. We therefore review these architectures and related PTQ methods below. 6.1 LINEAR ATTENTION TRANSFORMERS 
+
+Standard self-attention incurs quadratic computation in sequence length and maintains a growing KV cache during autoregressive decoding (Zhang et al., 2023). Linear attention can instead sum-marize past key-value interactions in a fixed-size recurrent state, enabling linear-time sequence pro-cessing and constant state storage with respect to sequence length. Subsequent works improve memory management and computational efficiency: RetNet (Sun et al., 2023) introduces multiscale retention with parallel and recurrent formulations, while Gated Linear Attention (Yang et al., 2023) uses data-dependent gates to control information retention. Related state-space models, including Mamba (Gu & Dao, 2024) and Mamba-2 (Dao & Gu, 2024), also combine recurrent inference with efficient training algorithms. Gated DeltaNet (GDN) (Yang et al., 2025) combines head-wise forget-ting with delta-rule updates to selectively modify associations stored in its matrix-valued state. Kimi Delta Attention (KDA) (Team et al., 2025) extends this mechanism with channel-wise forgetting and serves as the main component of Kimi Linear and K3 (Team et al., 2026), which interleave KDA and softmax attention layers. Qwen families (Qwen Team, 2026b;c;d;a) also adopt the hybrid GDN architecture to deliver high-throughput inference with minimal latency overhead. These advances improve how recurrent states store and update information, but fixed state size does not eliminate storage costs: total state memory scales with batch size, layer count, and state dimensions. We study low-bit quantization of GDN recurrent states to reduce this inference memory footprint. 6.2 POST -TRAINING QUANTIZATION 
+
+Post-training quantization (PTQ) reduces model memory by representing weights in low-bit for-mats (Kim et al., 2023; Lin et al., 2024b; Shao et al., 2024; Zhong et al., 2024; 2025a;b; Zhang 9STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization et al., 2026a), while jointly quantizing weights and activations can accelerate inference through low-bit kernels (Ashkboos et al., 2024; Lin et al., 2024a; 2026b;c). PTQ can also reduce the grow-ing KV cache in long-context inference (Liu et al., 2024a; Hooper et al., 2024; Zandieh et al., 2026). For example, KIVI (Liu et al., 2024b) quantizes keys and values along different axes. For state-space models, Quamba (Chiang et al., 2025b) and MambaQuant (Xu et al., 2025) target weight and acti-vation quantization, while Quamba2 (Chiang et al., 2025a) additionally quantizes cached recurrent states to 8 bits. Q-Mamba (Tianqi et al., 2025) addresses state-cache quantization through dual-axis scaling and selectivity reconstruction. Quantization of GDN recurrent states remains less explored. Concurrent work, DAMP (Zhang et al., 2026b), uses decay-based persistence to select key channels for FP16 protection while quantizing the remaining channels to INT8, reporting preserved accuracy at 9.9 bits per state value in its evaluated settings. Our work demonstrates that lower precision is fea-sible: STEPQuant quantizes recurrent states in KDA and Qwen3.8 models to 6 bits with negligible accuracy degradation on the evaluated benchmarks. 
+
+## 7 CONCLUSION 
+
+We study low-bit quantization of recurrent states in Delta-rule models and show that quantization errors are shaped by both temporal persistence and spatial structure. Based on these observations, we propose STEPQuant, combining lifetime-aware bit allocation with Key-Row-Aware Dual-axis Fitting. Experiments across long- and short-generation tasks show that STEPQuant enables accurate low-bit state quantization and substantially reduces recurrent-state memory for concurrent serving. 
+
+## AI U SE STATEMENT 
+
+AI assistants were used only for language polishing, L ATEX checking, and debugging assistance. All scientific ideas, methodological designs, experiments, analyses, and conclusions were developed, conducted, and verified by the authors. 
+
+## REPRODUCIBILITY STATEMENT 
+
+We describe every component needed to reproduce our experiments. We provide the recurrent-state update and quantization definitions in Section 2, the precision-allocation objective in Section 3.2, and the spatial fitting procedure in Section 4.3. Appendix A gives the proof of conditional error propagation and defines the calibration statistics. Appendices C.2 and C.3 describe the calibra-tion data, candidate precisions, FP16 pivots, allocation procedures, and quantized decode workflow. Section 5.1 specifies the models, benchmarks, and generation settings, while Appendix F documents the SGLang integration, hardware configurations, decode timing protocol, and memory accounting. Additional per-task generation lengths and component ablations are provided in Appendix E. 
+
+## REFERENCES 
+
+Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. Quarot: Outlier-free 4-bit inference in rotated llms. Advances in Neural Information Processing Systems , 37:100213–100240, 2024. George EP Box and David R Cox. An analysis of transformations. Journal of the Royal Statistical Society Series B: Statistical Methodology , 26(2):211–243, 1964. Jian Chen, Yesheng Liang, and Zhijian Liu. Dflash: Block diffusion for flash speculative decoding. 
+
+arXiv preprint arXiv:2602.06036 , 2026. Hung-Yueh Chiang, Chi-Chih Chang, Natalia Frumkin, Kai-Chiang Wu, Mohamed S Abdelfattah, and Diana Marculescu. Quamba2: A robust and scalable post-training quantization framework for selective state space models. arXiv preprint arXiv:2503.22879 , 2025a. Hung-Yueh Chiang, Chi-Chih Chang, Natalia Frumkin, Kai-Chiang Wu, and Diana Marculescu. Quamba: A post-training quantization recipe for selective state space models. In International Conference on Learning Representations , volume 2025, pp. 101328–101354, 2025b. 10 STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. Think you have solved question answering? try arc, the ai2 reasoning challenge. 
+
+arXiv preprint arXiv:1803.05457 , 2018. Tri Dao and Albert Gu. Transformers are ssms: Generalized models and efficient algorithms through structured state space duality. arXiv preprint arXiv:2405.21060 , 2024. Jasper Dekoninck, Nikola Jovanovi´ c, Tim Gehrunger, K´ ari R¨ ognvaldsson, Ivo Petrov, Chenhao Sun, and Martin Vechev. Beyond benchmarks: Matharena as an evaluation platform for mathematics with llms. arXiv preprint arXiv:2605.00674 , 2026. Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. Gpt3. int8 (): 8-bit matrix multiplication for transformers at scale. Advances in neural information processing systems , 35: 30318–30332, 2022. Tim Dettmers, Ruslan Svirschevski, Vage Egiazarian, Denis Kuznedelev, Elias Frantar, Saleh Ashk-boos, Alexander Borzunov, Torsten Hoefler, and Dan Alistarh. Spqr: A sparse-quantized repre-sentation for near-lossless llm weight compression. arXiv preprint arXiv:2306.03078 , 2023. Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. Gptq: Accurate post-training quantization for generative pre-trained transformers. arXiv preprint arXiv:2210.17323 , 2022. Albert Gu and Tri Dao. Mamba: Linear-time sequence modeling with selective state spaces. In First Conference on Language Modeling , 2024. URL https://openreview.net/forum?id= tEYskw1VY2 .Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. Measuring massive multitask language understanding. arXiv preprint arXiv:2009.03300 , 2020. Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W Mahoney, Yakun S Shao, Kurt Keutzer, and Amir Gholami. Kvquant: Towards 10 million context length llm inference with kv cache quantization. Advances in Neural Information Processing Systems , 37:1270–1303, 2024. Naman Jain, King Han, Alex Gu, Wen-Ding Li, Fanjia Yan, Tianjun Zhang, Sida Wang, Armando Solar-Lezama, Koushik Sen, and Ion Stoica. Livecodebench: Holistic and contamination free evaluation of large language models for code. In International Conference on Learning Repre-sentations , volume 2025, pp. 58791–58831, 2025. Sehoon Kim, Coleman Hooper, Amir Gholami, Zhen Dong, Xiuyu Li, Sheng Shen, Michael W Mahoney, and Kurt Keutzer. Squeezellm: Dense-and-sparse quantization. arXiv preprint arXiv:2306.07629 , 2023. Hunter Lightman, Vineet Kosaraju, Yuri Burda, Harrison Edwards, Bowen Baker, Teddy Lee, Jan Leike, John Schulman, Ilya Sutskever, and Karl Cobbe. Let’s verify step by step. In International Conference on Learning Representations , volume 2024, pp. 39578–39601, 2024. Haokun Lin, Haobo Xu, Yichen Wu, Jingzhi Cui, Yingtao Zhang, Linzhan Mou, Linqi Song, Zhenan Sun, and Ying Wei. Duquant: Distributing outliers via dual transformation makes stronger quan-tized llms. Advances in Neural Information Processing Systems , 37:87766–87800, 2024a. Haokun Lin, Xinle Jia, Shaozhen Liu, Shujun Xia, Weitao Huang, Haobo Xu, Junyang Li, Yicheng Xiao, Xingrun Xing, Ziyu Guo, et al. Efficient diffusion language models: A comprehensive survey. 2026a. Haokun Lin, Xinle Jia, Haobo Xu, Bingchen Yao, Xianglong Guo, Yichen Wu, Zhichao Lu, Ying Wei, Qingfu Zhang, and Zhenan Sun. Duquant++: Fine-grained rotation enhances microscaling fp4 quantization. arXiv preprint arXiv:2604.17789 , 2026b. Haokun Lin, Haobo Xu, Yichen Wu, Ziyu Guo, Renrui Zhang, Zhichao Lu, Ying Wei, Qingfu Zhang, and Zhenan Sun. Quantization meets dllms: A systematic study of post-training quanti-zation for diffusion llms. Machine Intelligence Research , pp. 1–17, 2026c. 11 STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization Haokun Lin, Kaijie Zhu, Haobo Xu, Yichen Wu, Zhichao Lu, Qingfu Zhang, and Zhenan Sun. Benchmarking trustworthiness of slms: Pre-trained vs. compressed. arXiv preprint arXiv:2608.11981 , 2026d. Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. Awq: Activation-aware weight quantization for on-device llm compression and acceleration. Proceedings of machine learning and systems ,6:87–100, 2024b. Jiawei Liu, Chunqiu Steven Xia, Yuyao Wang, and Lingming Zhang. Is your code generated by chat-gpt really correct? rigorous evaluation of large language models for code generation. Advances in neural information processing systems , 36:21558–21572, 2023. Ruikang Liu, Haoli Bai, Haokun Lin, Yuening Li, Han Gao, Zhengzhuo Xu, Lu Hou, Jun Yao, and Chun Yuan. Intactkv: Improving large language model quantization by keeping pivot tokens intact. arXiv preprint arXiv:2403.01241 , 2024a. Ruikang Liu, Yuxuan Sun, Manyi Zhang, Haoli Bai, Xianzhi Yu, Tiezheng Yu, Chun Yuan, and Lu Hou. Quantization hurts reasoning? an empirical study on quantized reasoning models. arXiv preprint arXiv:2504.04823 , 2025. Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu. Kivi: A tuning-free asymmetric 2bit quantization for kv cache. arXiv preprint arXiv:2402.02750 , 2024b. Sanae Lotfi, Polina Kirichenko, Steven Li, and Zechun Liu. Quantized reasoning models think they need to think longer, but they do not. arXiv preprint arXiv:2606.00206 , 2026. Yuexiao Ma, Taisong Jin, Xiawu Zheng, Yan Wang, Huixia Li, Yongjian Wu, Guannan Jiang, Wei Zhang, and Rongrong Ji. Ompq: Orthogonal mixed precision quantization. In Proceedings of the AAAI conference on artificial intelligence , volume 37, pp. 9029–9037, 2023a. Yuexiao Ma, Huixia Li, Xiawu Zheng, Xuefeng Xiao, Rui Wang, Shilei Wen, Xin Pan, Fei Chao, and Rongrong Ji. Solving oscillation problem in post-training quantization through a theoret-ical perspective. In 2023 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , pp. 7950–7959, 2023b. doi: 10.1109/CVPR52729.2023.00768. Yuexiao Ma, Huixia Li, Xiawu Zheng, Feng Ling, Xuefeng Xiao, Rui Wang, Shilei Wen, Fei Chao, and Rongrong Ji. Outlier-aware slicing for post-training quantization in vision transformer. In 
+
+Forty-first International Conference on Machine Learning , 2024. Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer sentinel mixture models. arXiv preprint arXiv:1609.07843 , 2016. Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal. Can a suit of armor conduct elec-tricity? a new dataset for open book question answering. In Proceedings of the 2018 conference on empirical methods in natural language processing , pp. 2381–2391, 2018. Denis Paperno, Germ´ an Kruszewski, Angeliki Lazaridou, Ngoc-Quan Pham, Raffaella Bernardi, Sandro Pezzelle, Marco Baroni, Gemma Boleda, and Raquel Fern´ andez. The lambada dataset: Word prediction requiring a broad discourse context. In Proceedings of the 54th annual meeting of the association for computational linguistics (volume 1: Long papers) , pp. 1525–1534, 2016. Valentina Pyatkin, Saumya Malik, Victoria Graf, Hamish Ivison, Shengyi Huang, Pradeep Dasigi, Nathan Lambert, and Hannaneh Hajishirzi. Generalizing verifiable instruction following. In 
+
+The Thirty-ninth Annual Conference on Neural Information Processing Systems Datasets and Benchmarks Track , 2026. URL https://openreview.net/forum?id=yfYgwjj5F8 .Yu-Yang Qian, Junda Su, Lanxiang Hu, Peiyuan Zhang, Zhijie Deng, Peng Zhao, and Hao Zhang. d3llm: Ultra-fast diffusion llm using pseudo-trajectory distillation. arXiv preprint arXiv:2601.07568 , 2026a. 12 STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization Yu-Yang Qian, Hao-Cong Wu, Chen Chen, Jiacheng Sun, Zhenhua Dong, Peng Zhao, and Zhi-Hua Zhou. Adaflash: Adaptive speculative decoding via on-policy distilled diffusion drafters. arXiv preprint arXiv:2607.19223 , 2026b. Qwen Team. Qwen3.8-Max: A new bar for coding and cowork, August 2026a. URL https: //qwen.ai/blog?id=qwen3.8 .Qwen Team. Qwen3.5: Towards native multimodal agents, February 2026b. URL https:// qwen.ai/blog?id=qwen3.5 .Qwen Team. Qwen3.6-27B: Flagship-level coding in a 27B dense model, April 2026c. URL 
+
+https://qwen.ai/blog?id=qwen3.6-27b .Qwen Team. Qwen3.6-35B-A3B: Agentic coding power, now open to all, April 2026d. URL 
+
+https://qwen.ai/blog?id=qwen3.6-35b-a3b .Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang, Michael Matena, Yanqi Zhou, Wei Li, and Peter J Liu. Exploring the limits of transfer learning with a unified text-to-text transformer. Journal of machine learning research , 21(140):1–67, 2020. David Rein, Betty Li Hou, Asa Cooper Stickland, Jackson Petty, Richard Yuanzhe Pang, Julien Di-rani, Julian Michael, and Samuel R Bowman. Gpqa: A graduate-level google-proof q&a bench-mark. arXiv preprint arXiv:2311.12022 , 2023. Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. Winogrande: An adver-sarial winograd schema challenge at scale. Communications of the ACM , 64(9):99–106, 2021. Wenqi Shao, Mengzhao Chen, Zhaoyang Zhang, Peng Xu, Lirui Zhao, Zhiqian Li, Kaipeng Zhang, Gao Peng, Yu Qiao, and Ping Luo. Omniquant: Omnidirectionally calibrated quantization for large language models. In International Conference on Learning Representations , volume 2024, pp. 45472–45496, 2024. Yutao Sun, Li Dong, Shaohan Huang, Shuming Ma, Yuqing Xia, Jilong Xue, Jianyong Wang, and Furu Wei. Retentive network: A successor to transformer for large language models. arXiv preprint arXiv:2307.08621 , 2023. Kimi Team, Yu Zhang, Zongyu Lin, Xingcheng Yao, Jiaxi Hu, Fanqing Meng, Chengyin Liu, Xin Men, Songlin Yang, Zhiyuan Li, et al. Kimi linear: An expressive, efficient attention architecture. 
+
+arXiv preprint arXiv:2510.26692 , 2025. Kimi Team, Tongtong Bai, Yifan Bai, Yiping Bao, Jianfeng Cai, Xinyuan Cai, Peizhou Cao, Yux-uan Cao, Ziwei Chai, Y Charles, et al. Kimi k3: Open frontier intelligence. arXiv preprint arXiv:2607.24653 , 2026. Chen Tianqi, Yuanteng Chen, Peisong Wang, Weixiang Xu, Zeyu Zhu, and Jian Cheng. Q-mamba: Towards more efficient mamba models via post-training quantization. In Findings of the Associ-ation for Computational Linguistics: ACL 2025 , pp. 10594–10610, 2025. Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. Smoothquant: Accurate and efficient post-training quantization for large language models. In International conference on machine learning , pp. 38087–38099. PMLR, 2023. Xingrun Xing, Zheng Liu, Shitao Xiao, Boyan Gao, Yiming Liang, Wanpeng Zhang, Haokun Lin, Guoqi Li, and Jiajun Zhang. Efficientllm: Scalable pruning-aware pretraining for architecture-agnostic edge language models. arXiv preprint arXiv:2502.06663 , 2025. Haobo Xu, Sirui Chen, Yuanchen Bei, Lingjie Chen, Yuchen Yan, Dongqi Fu, Jingrui He, and Hanghang Tong. Predict, don’t iterate: Efficient adaptive-length infilling for diffusion language models. arXiv preprint arXiv:2609.02108 , 2026. Zukang Xu, Yuxuan Yue, Xing Hu, Zhihang Yuan, Zixu Jiang, Zhixuan Chen, Jiangyong Yu, Chen Xu, Sifan Zhou, and Dawei Yang. Mambaquant: Quantizing the mamba family with variance aligned rotation methods. In International Conference on Learning Representations , volume 2025, pp. 33231–33250, 2025. 13 STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization Lianwei Yang, Haokun Lin, Yichen Wu, Caifeng Shan, Zhenan Sun, and Qingyi Gu. Reshape and rotate: Adaptive weight reshaping and fine-grained rotation for ultra-low-bit diffusion transform-ers quantization. Neurocomputing , pp. 133830, 2026a. Lianwei Yang, Haokun Lin, Yichen Wu, Zhenan Sun, and Qingyi Gu. Dapq-dit: Distribution-aware post-training quantization for efficient generative tasks in diffusion transformers. In Proceedings of the 2026 International Conference on Multimedia Retrieval , pp. 2371–2380, 2026b. Lianwei Yang, Haokun Lin, Tianchen Zhao, Yichen Wu, Hongyu Zhu, Ruiqi Xie, Zhenan Sun, Yu Wang, and Qingyi Gu. Lrq-dit: Log-rotation post-training quantization of diffusion trans-formers for image and video generation. IEEE Transactions on Circuits and Systems for Video Technology , 2026c. Songlin Yang, Bailin Wang, Yikang Shen, Rameswar Panda, and Yoon Kim. Gated linear attention transformers with hardware-efficient training. arXiv preprint arXiv:2312.06635 , 2023. Songlin Yang, Bailin Wang, Yu Zhang, Yikang Shen, and Yoon Kim. Parallelizing linear transform-ers with the delta rule over sequence length. Advances in neural information processing systems ,37:115491–115522, 2024. Songlin Yang, Jan Kautz, and Ali Hatamizadeh. Gated delta networks: Improving mamba2 with delta rule. In International Conference on Learning Representations , volume 2025, pp. 29687– 29707, 2025. Amir Zandieh, Majid Daliri, Majid Hadian, and Vahab Mirrokni. Turboquant: Online vector quan-tization with near-optimal distortion rate. In International Conference on Learning Representa-tions , volume 2026, pp. 56418–56439, 2026. Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. Hellaswag: Can a ma-chine really finish your sentence? In Proceedings of the 57th annual meeting of the association for computational linguistics , pp. 4791–4800, 2019. Jingxuan Zhang, Yunta Hsieh, Zhongwei Wan, Haokun Lin, Xin Wang, Ziqi Wang, Yingtie Lei, and Mi Zhang. Quantvla: Scale-calibrated post-training quantization for vision-language-action models. arXiv preprint arXiv:2602.20309 , 2026a. Tao Zhang, Jianchao Tan, Pingwei Sun, Yanqi Yu, Zixu Jiang, Yuchen Xie, Xunliang Cai, and Ziqian Zeng. Damp: Decay-aware mixed-precision recurrent-state quantization. arXiv preprint arXiv:2608.27513 , 2026b. Yingtao Zhang, Haoli Bai, Haokun Lin, Jialin Zhao, Lu Hou, and Carlo Vittorio Cannistraci. Plug-and-play: An efficient post-training pruning method for large language models. In International Conference on Learning Representations , volume 2024, pp. 50490–50508, 2024. Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher R´ e, Clark Barrett, et al. H2o: Heavy-hitter oracle for efficient gen-erative inference of large language models. Advances in neural information processing systems ,36:34661–34710, 2023. Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody H Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E Gonzalez, et al. Sglang: Efficient execution of structured language model programs. Advances in neural information processing systems , 37:62557–62583, 2024. Yunshan Zhong, Jiawei Hu, You Huang, Yuxin Zhang, and Rongrong Ji. Erq: Error reduction for post-training quantization of vision transformers. In Forty-first International Conference on Machine Learning , 2024. Yunshan Zhong, Jiawei Hu, Mingbao Lin, Mengzhao Chen, and Rongrong Ji. I&s-vit: An inclusive & stable method for pushing the limit of post-training vits quantization. IEEE Transactions on Pattern Analysis & Machine Intelligence (TPAMI) , 2025a. doi: 10.1109/TPAMI.2025.3610466. Yunshan Zhong, You Huang, Jiawei Hu, Yuxin Zhang, and Rongrong Ji. Towards accurate post-training quantization of vision transformers via error reduction. IEEE Transactions on Pattern Analysis and Machine Intelligence , 2025b. 14 STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization 
+
+## A RECURRENT -S TATE ERROR PROPAGATION AND CALIBRATION STATISTICS 
+
+This appendix proves the conditional error propagation in Section 3 and relates cumulative squared output error to the row-impact scores used by Key-Row-Aware Dual-axis Fitting in Section 4.3. It also defines the calibration statistics used by STEPQuant’s temporal and spatial components. A.1 PROOF OF PROPOSITION 1Subtracting the reference recurrence from the quantized update gives 
+
+Et = Qt(At bSt−1 + Bt) − (AtSt−1 + Bt)= At( bSt−1 − St−1) + εt.
+
+At step t, the output is read from Xt before Qt(Xt) is stored, so byt − yt = ( AtEt−1)⊤qt. Let 
+
+Pt = I − βtktk⊤ 
+
+> t
+
+. Under the proposition’s conditions, 0 ⪯ Pt ⪯ I, so ∥Pt∥2 ≤ 1. Therefore 
+
+∥At∥2 = ∥PtDt∥2 ≤ ∥ Pt∥2 ∥Dt∥2 ≤ ∥ Dt∥2 ≤ 1.
+
+A.2 CUMULATIVE SQUARED OUTPUT ERROR 
+
+Condition on the same keys, values, queries, and gates in both paths, as in Proposition 1. Let 
+
+Φs,t = As · · · At+1 transport a state perturbation from step t to s. Over a horizon of H future reads, an isolated quantization error Z produces cumulative squared output error 
+
+> t+H
+
+X
+
+> s=t+1
+
+∥Z⊤Φ⊤
+
+> s,t
+
+qs∥22 = tr( Z⊤Wt,H Z), Wt,H =
+
+> t+H
+
+X
+
+> s=t+1
+
+Φ⊤
+
+> s,t
+
+qsq⊤ 
+
+> s
+
+Φs,t . (15) For a single perturbation Z at time t and no subsequent quantization errors, the state perturbation after transition s is Φs,t Z. The output perturbation is Z⊤Φ⊤
+
+> s,t
+
+qs. Using Z⊤u 22 = tr( Z⊤uu ⊤Z)
+
+and summing proves Equation 15. Here Wt,H is the readout-error Gram matrix and tr denotes the matrix trace. This matrix is positive semidefinite. For a single future read, H = 1 , this matrix reduces to 
+
+Wt, 1 = gt+1 g⊤
+
+> t+1
+
+, gt+1 = A⊤
+
+> t+1
+
+qt+1 .
+
+A unit-Frobenius-norm perturbation confined to key row i therefore produces squared output error at the next step g2
+
+> t+1 ,i
+
+. Both Qwen and KDA calibrate ωi = Ecal [g2
+
+> t,i
+
+], the mean diagonal of this one-step readout-error matrix. STEPQuant’s spatial component normalizes ωi into the row-impact factors wi. These determine the row scales ri = m1/2 
+
+> i
+
+w−1/2 
+
+> i
+
+and the squared weights w2 
+
+> i
+
+in the column-fitting objective (Section 4.3 and Appendix C). With quantization errors εr introduced at successive steps and E0 = 0 , the accumulated error is 
+
+Et =
+
+> t
+
+X
+
+> r=1
+
+Φt,r εr , Φt,t = I. 
+
+The squared norm includes cross terms between propagated quantization errors. A.3 CALIBRATION STATISTICS FOR TEMPORAL AND SPATIAL COMPONENTS 
+
+STEPQuant’s temporal component uses Lifetime-aware Bit Allocation and sparse FP16 pivots, while its spatial component uses Key-Row-Aware Dual-axis Fitting. The statistics below connect their calibration. 
+
+Mean log retention. For allocation unit u, define 
+
+ℓu = Ecal [log rt,u ], Lu =
+
+> H−1
+
+X
+
+> j=0
+
+exp(2 jℓ u). (16) 15 STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization The expectation is taken over calibration tokens. For Qwen, u is a state head and rt,u = αt,u ; for KDA, u is a key row and rt,u = dt,u . The lifetime weight Lu is applied to the candidate-format distortion after that distortion is averaged over state samples. Let C contain the sampled reference states, with each batch element counted as a separate state sam-ple. Let Ss,u be the reference state of unit u at sample s, and bS(b) 
+
+> s,u
+
+its candidate-format reconstruction at precision b.
+
+Qwen reconstruction distortion. For Qwen, u is an entire head and nu = dkdv . Its candidate-format calibration uses the spatial component’s row-impact factors wu,i :
+
+du(b) = 1
+
+|C| nu
+
+X
+
+> s∈C
+
+X
+
+> i,j
+
+w2
+
+> u,i
+
+ bS(b) 
+
+> s,u,ij
+
+− Ss,u,ij 
+
+2
+
+. (17) The squared row-impact factors w2 
+
+> u,i
+
+weight the reconstruction error. Weighted squared error is averaged over the elements within each head and then over state samples; the temporal lifetime weight Lu is applied afterward. 
+
+KDA reconstruction distortion. For a KDA key row, nu = dv and the calibrated distortion is the unweighted per-element MSE: 
+
+du(b) = 1
+
+|C| nu
+
+X
+
+> s∈C
+
+bS(b) 
+
+> s,u
+
+− Ss,u 
+
+> 22
+
+. (18) KDA samples states every eight recurrent updates, averages squared error over batch elements and value coordinates, and then averages over the sampled update positions. Once FP16 pivots are fixed, their rows do not participate in fitting the shared column scales for integer rows. Thus, Qwen’s temporal allocation uses a distortion measure that already accounts for spatial row impact. In KDA, the allocation MSE is unweighted, but the candidate reconstruction is produced with the spatial codec and the shared column fit excludes FP16 pivot rows. The two components have distinct roles, while sharing the calibrated state representation. Within each model, all allocation units have the same nu. Converting per-element MSE to total squared error therefore multiplies the allocation objective by a model-specific constant and does not change the selected precision assignment. 
+
+## B ANALYSIS OF TEMPORAL ERROR ACCUMULATION AND SPATIAL ROW 
+
+## IMPACT 
+
+These controlled experiments support the temporal analysis in Section 3 and the spatial analysis in Sections 4.1 and 4.2. They use reference input streams to distinguish error persistence from differences in key-row impact and state geometry. B.1 EFFECT OF DELTA FEEDBACK ON QUANTIZATION ERROR 
+
+For GDN, the directional contraction is 
+
+∥α(I − βkk ⊤)E∥2 
+
+> F
+
+= α2[∥E∥2 
+
+> F
+
+− β(2 − β∥k∥22)∥k⊤E∥22]. (19) Let P = I − βkk ⊤. Expanding P ⊤P gives I − β(2 − β∥k∥22)kk ⊤, which proves Equation 19. For KDA, the corresponding subtraction is applied to DtEt−1, retaining the native order of decay and correction. The mechanism does not require the state transition to amplify perturbations: repeated injections can accumulate under a non-expansive transition. The exact-read oracle replaces only the state inside the Delta residual: 
+
+eSoracle  
+
+> t
+
+= Dt bSoracle  
+
+> t−1
+
++ βtkt(v⊤ 
+
+> t
+
+− k⊤ 
+
+> t
+
+DtSt−1).
+
+Subtracting the reference update leaves DtEoracle  
+
+> t−1
+
+. This intervention removes the correction of the path’s own state error. With continuous quantization it also changes future rounding errors. Therefore we use a matched single-injection experiment to isolate feedback. 16 STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization Each of four fixed C4 (Raffel et al., 2020) Qwen trajectories provides native keys, values, queries, and gates for 8,192 updates. We use the deterministic Cartesian subset of global model-layer indices 
+
+{0, 8, 16 , 24 , 32 , 40 , 48 , 62 } and global heads {0, 12 , 24 , 36 }, giving 32 heads fixed before replay and independent of quantization outcomes. We inject one quantization error at step 256 and perform the remaining 7,936 updates without further quantization. Both paths start from the identical error. We sum squared output error over heads, trajectories, and subsequent steps. Relative to native Delta feedback, the exact-read oracle increases this error by 26 .82 × for INT6 and 18 .65 × for INT8; both ratios exceed one on each of the four trajectories. B.2 PREFILL AND DECODE PREDICTION DRIFT 
+
+An uninterrupted native prefill evolves an uncompressed state and packs it once at the boundary. De-code then reads and rewrites the compressed state after each token. This probe measures prediction drift caused by repeated compressed-state updates. On four held-out C4 streams per model, each with a 2,048-token native prefill and 6,144 forced decode updates, prefill predictions match the FP32-state reference. Mean excess NLL (quantized minus reference) over the first and last 256 compressed-read predictions rises from 0.102 to 2.102 for Qwen INT6, and from 0.0228 to 0.1422 for KDA INT6. Across all 6,144 decode predictions, STEPQuant@6bit has mean excess NLL of 0.0011 on Qwen and −0.0120 on KDA. B.3 READOUT ERROR AT FIXED PRECISION 
+
+For Qwen, the calibrated row-impact factor satisfies wi ∝ ω1/8 
+
+> i
+
+, where ωi = E[( A⊤ 
+
+> t
+
+qt)2 
+
+> i
+
+] includes the immediate Delta transition and readout (Section 4.3). Within a head, the normalization constant cancels in row-impact ratios. We recover a proportional row-impact score as w8 
+
+> i
+
+from the frozen full-precision calibration record, retaining its numerical floor, and compute the interpolated P90/P10 ratio across 128 key channels. Across all 2,304 heads, the median ratio is 15.95. The 10th and 90th percentiles across heads are 3.74 and 79.84. All channels within each such head share exactly the same scalar gate. This difference is thus additional to gate lifetime and directly motivates the spatial component’s within-head row-impact factor. Figure B1d isolates row impact at fixed assigned precision. A group is one integer Qwen head, or the integer rows sharing both head and bit width in KDA, using frozen STEPQuant@6bit assign-ments. FP16 pivots are excluded. Requiring at least eight rows per group retains 2,272 Qwen groups (290,816 rows) and 1,567 KDA groups (80,333 rows). 1,075 KDA integer rows in smaller groups are excluded, without filtering on measured error. Qwen rows in a group share a scalar gate. KDA rows can have different keywise gates despite sharing their assigned bit width. On reference-state traces, we inject a unit-Frobenius-norm perturbation Ei confined to key row 
+
+i. With At = ( I − βtktk⊤ 
+
+> t
+
+)Dt and gt = A⊤ 
+
+> t
+
+qt, its isolated next-read squared error is exactly 
+
+∥E⊤ 
+
+> i
+
+gt∥22 = g2
+
+> t,i
+
+. We average 32 probe positions following 128 replay updates over four Qwen and two KDA C4 streams. Direct propagation checks agree with this identity within 7.1 × 10 −7 relative error. Rows are ranked within each group using independent WikiText calibration: frozen w8 
+
+> i
+
+for Qwen and one-step transported-query row-impact scores for KDA. Each row’s held-out read error is divided by its own group’s mean. We split each ranked group into eight near-equal bins and average bin means with equal group weight. Points are measured means at the averaged percentile centers. Curves use shape-preserving interpolation without extrapolation. The highest-to-lowest bin ratios are 117.4 for Qwen and 35.1 for KDA. These within-group contrasts motivate Key-Row-Aware Dual-axis Fitting even after lifetime-aware precision allocation. B.4 KEY -R OW QUANTIZATION AND PERPLEXITY 
+
+The perplexity experiment in Figure 2(a) tests whether calibrated row impact predicts the effect of state quantization on model outputs (Section 4.1). Within each head, we rank key rows by the independently calibrated ωi and divide them into eight near-equal groups. We quantize one ranked group at a time to INT4 across the model, keeping all other rows in full precision. Perplexity is measured on eight 1,024-token streams per model and compared with the FP32-state reference. 17 STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization Markers show the measured bin results, and curves use shape-preserving interpolation. Higher-impact groups generally cause larger perplexity increases in both models. Unlike the equal-norm probe above, this experiment measures the effect of quantizing actual state values on the model’s predictive distribution. B.5 GATE HALF -L IFE AND ACCUMULATED INT6 S TATE ERROR 0 25 50 75 100 
+
+> Units included (%)
+> 025 50 75 100
+> Cumulative share (%)
+> 52.5% in final 25%
+
+(a) Qwen: state error     
+
+> 025 50 75 100
+> Units included (%)
+> 025 50 75 100
+> 78.8% in final 25%
+
+(b) KDA: state error     
+
+> 0.01 1100 10K 1M
+> Gate half-life (tokens)
+> 10 −4
+> 10 −2
+> 10 0
+> 10 2
+> 10 4
+> 10 6
+> Accumulated state error
+
+(c) KDA: lifetime vs. error      
+
+> INT6 state error Unit count 025 50 75 100
+> Units included (%)
+> 025 50 75 100
+> Cumulative share (%)
+> 52.5% in final 25%
+
+(a) Qwen: state error     
+
+> 025 50 75 100
+> Units included (%)
+> 025 50 75 100
+> 78.8% in final 25%
+
+(b) KDA: state error    
+
+> 0.01 1100 10K
+> Gate half-life (tokens)
+> 10 −4
+> 10 −2
+> 10 0
+> 10 2
+> 10 4
+> 10 6
+> Accumulated state error
+
+(c) KDA: lifetime vs. error     
+
+> INT6 state error Unit count 25 50 75 100
+> Units included (%)
+> 78.8% in final 25%
+
+) KDA: state error     
+
+> 0.01 1100 10K 1M
+> Gate half-life (tokens)
+> 10 −4
+> 10 −2
+> 10 0
+> 10 2
+> 10 4
+> 10 6
+> Accumulated state error
+
+(c) KDA: lifetime vs. error 
+
+> Unit count (d) Same-bit row impact
+> Row impact percentile
+
+Figure B1: Gate lifetime and key-row impact of recurrent state. (a–b) Cumulative INT6 squared error (red) and unit count (blue), ordered by increasing gate half-life within each layer or head. The longest-lived quarter accounts for 52.5% of Qwen error and 78.8% of KDA error across all 2,304 heads and 81,920 channels. (c) KDA half-life versus accumulated INT6 error for 79,864 channels after excluding near-zero errors; color encodes error. (d) Held-out equal-norm readout-error contrast across row-impact octiles within fixed-precision groups, using independent WikiText ranking. Figure 1b shows the Qwen heads, and Figure B1c shows the corresponding KDA key channels. Both scatters measure state error under uniform INT6. Full-population Spearman correlations are 0.8004 and 0.8017, respectively. For legibility, the KDA scatter omits 2,056 channels (2.51%) with squared error below 10 −15 . The remaining 79,864 channels are shown on logarithmic axes. A Qwen head has 16,384 state entries and a KDA key row has 128, so raw error magnitudes across models are not directly comparable. For Figure B1, frozen WikiText calibration estimates ℓu as defined in Appendix A.3, and gives the gate half-life τu = log(2) /(−ℓu). This gate-only statistic describes forgetting. The Delta correction remains part of the measured recurrence. The error experiment uses four frozen C4 sequences per model with their model-specific tokenizers. After a two-token FP32 boundary, a separate INT6 trajectory follows the reference keys, values, and gates for 2,046 decode updates. Every key row uses an absmax/31 scale stored in FP16, clamped to [2 −14 , 65504] , and nearest-integer codes in 
+
+[−31 , 31] . Quantization is applied at the boundary and after every recurrent update. For unit u we record 
+
+Du =
+
+> 4
+
+X
+
+> r=1 2046
+
+X
+
+> t=1
+
+( bSr,t − Sr,t )u
+
+> 2
+> F
+
+.
+
+18 STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization A Qwen unit is a whole head matrix. A KDA unit is a key row containing 128 value components. These units partition each state, so their squared errors sum exactly. We sort by lifetime within each group, sum Du across groups at each rank, and then accumulate from shortest to longest. The error curve is normalized by its model-wide total. No per-layer or per-head normalization precedes pooling. The longest quarter contains 12 heads per Qwen layer or 32 channels per KDA head. Shape-preserving cubic interpolation passes through every measured cumulative-rank point. Qwen replays captured native FP32 inputs, checking reference readouts against the capture. KDA executes its native recurrent kernel on a separate shadow state. These controlled mechanism replays isolate persistent-state distortion along reference input streams. B.6 LIFETIME RANKINGS AND DUAL -A XIS STATE GEOMETRY 0 64 128           
+
+> Value channel
+> 064 128
+> Key channel
+> 064 127
+> Value 064 127
+> Key
+> 040 80
+> 064 128
+> Value channel
+> 064 127
+> Value 064 127
+> Key
+> 040 80
+> 064 128
+> Value channel
+> 064 127
+> Value 064 127
+> Key
+> 040 80
+> 064 128
+> Value channel
+> 064 127
+> Value 064 127
+> Key
+> 040 80
+> (a) Qwen L53 H1
+> (e) Same state, surface view
+> (b) Qwen L61 H39
+> (f) Same state, surface view
+> (c) KDA L2 H25
+> (g) Same state, surface view
+> (d) KDA L4 H17
+> (h) Same state, surface view
+
+Figure B2: Dual-axis state geometry across Qwen and KDA. Four native-order 128 × 128 states (Qwen, Qwen, KDA, KDA). Top: entries below 10 × the matrix-median absolute magnitude are white; larger entries use graded greens. Marginal traces show row and column RMS relative to their axis medians. Bottom: matching surfaces use the same style as the Qwen surface in Figure 2(b). Floor traces show the same normalized RMS profiles, rescaled for display; heights are capped at 
+
+80 ×. Each state has seven or eight rows and columns above 5× their axis-median RMS. Figure B3 compares gate-lifetime ordering under WikiText-2 (Merity et al., 2016), C4, and Live-CodeBench (Jain et al., 2025) text. The frozen WikiText calibration is independent of the task streams. The BF16 Qwen gate observer covers all 2,304 recurrent heads using four archived 2,048-token C4 streams and the first four unique sample-0 LiveCodeBench trajectories in sorted archive order. The latter combine original prompts and FP32-reference generated token IDs, truncated at 2,048 tokens without padding, for 6,218 observed tokens per head. KDA covers all 81,920 key channels. Its C4 inputs are four 2,048-token evaluation streams. Its LiveCodeBench inputs follow the same selection rule, combining original prompts with archived KDA W4 FP32-state generated tokens; the BF16 KDA gate observer processes 8,192 C4 and 3,275 LiveCodeBench tokens per layer. For each text source, we compute token-weighted mean log gate retention and rank the resulting half-lives from shortest to longest across all units of each model. Figure B3 plots these global ranks as percentiles. Full-population Spearman correlations with WikiText are 0.989 (C4) and 0.985 (LiveCodeBench) for Qwen, and 0.991 and 0.982 for KDA. For Qwen, the short/middle/long classes defined by within-layer ranks 1–12, 13–36, and 37–48 retain their WikiText labels for 93.6% of heads on C4 and 90.1% on LiveCodeBench. 19 STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization 0 25 50 75 100 025 50 75 100 C4 ρ = 0.989 LiveCodeBench ρ = 0.985           
+
+> Qwen · 2,304 heads
+> 025 50 75 100
+> C4 ρ= 0.991 LiveCodeBench ρ= 0.982
+> KDA · 81,920 key channels
+> Global WikiText lifetime rank (%) Global rank on task text (%)
+> WikiText (y = x) C4 LiveCodeBench
+
+Figure B3: Global lifetime rankings remain similar across text sources. Qwen (2,304 heads) and KDA (81,920 key channels) are ranked separately, from shortest to longest gate half-life. Each point compares its global WikiText rank percentile with its C4 (orange-red) or LiveCodeBench (sky blue) percentile. The thin black diagonal is WikiText compared with itself ( y = x). Spearman coefficients use the complete population in each panel. Figure B2 uses two Qwen C4 snapshots at step 2,048 from distinct layers and heads. The two KDA snapshots are replayed from captured C4 keys, values, gates, and update coefficients at steps 128 or 256, also from distinct layers and heads. The native channel order and all matrix entries are retained. We chose the four examples by the 5× RMS criterion in the caption. Across the full KDA capture of 3,840 snapshots at steps 128, 256, and 512, median maximum-to-median RMS contrasts are 12 .7×
+
+for key rows and 5.4× for value columns; both contrasts exceed 3× in 3,262 snapshots (84.9%). For the Qwen state-geometry analysis in Section 4.2, FP32 state matrices are reconstructed from native recorded inputs at positions 128, 512, and 2,048. Define rrms  
+
+> i
+
+=
+
+q 1128 
+
+P 
+
+> j
+
+S2 
+
+> ij
+
+and crms  
+
+> j
+
+=
+
+q 1128 
+
+P 
+
+> i
+
+S2 
+
+> ij
+
+. The outlier contrasts are max i rrms  
+
+> i
+
+/ median i rrms  
+
+> i
+
+and the analogous column ratio. Medians use linear interpolation. Four C4 streams provide 27,648 matrices and two AIME streams provide 13,824. These repeated snapshots describe state geometry and are not independent model replicates. On C4, the median contrasts are 10 .3× for key rows and 19 .4× for value columns, and both exceed 3× in 98.6% of snapshots, as reported in Section 4.2. The representative Qwen surface in Figure 2(b) uses global layer 57, head 2, C4 stream 2 at step 2,048. It was selected for clearly visible extended row and column ridges whose intersection is also an outlier. All 128 × 128 entries retain their native order. The linear height axis ends at 0.2, with larger values clipped for display. The time-resolved row and column profiles in Figure 2(c) apply the same RMS normalization at each recorded decode update. They show how large-magnitude channels persist over the trajectory; the snapshot-based population statistics use all recorded matrices. 
+
+## C CALIBRATION , P RECISION ALLOCATION , AND DECODE PROCEDURE 
+
+This appendix complements STEPQuant’s Lifetime-aware Bit Allocation, Key-Row-Aware Dual-axis Fitting, and execution steps in Sections 3.2 and 4.3 and Appendix C.3. C.1 ROW -I MPACT CALIBRATION FOR KDA For KDA, the spatial component uses the same one-step transported-read definition as Qwen, evaluated in KDA’s native state coordinates. Write Dt = diag( dt, 1, . . . , d t,d k ). Since At =
+
+20 STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization 
+
+(I − βtktk⊤ 
+
+> t
+
+)Dt, the coordinate read sensitivity is 
+
+gt,i = ( A⊤ 
+
+> t
+
+qt)i = dt,i 
+
+qt,i − βtkt,i (k⊤ 
+
+> t
+
+qt) , ωKDA  
+
+> i
+
+= Ecal [g2
+
+> t,i
+
+]. (20) We normalize this profile in the same way as for Qwen: 
+
+wi = (ωKDA  
+
+> i
+
+)γ/ 2
+
+GM j
+
+ (ωKDA  
+
+> j
+
+)γ/ 2 , γ = 0 .25 . (21) The resulting factors enter the same row-scale rule ri = m1/2 
+
+> i
+
+w−1/2 
+
+> i
+
+and weighted column fit used for Qwen. The column-fitting objective weights squared reconstruction errors by w2 
+
+> i
+
+. KDA’s post-convolution keys, queries, and gates are measured in native coordinates. 
+
+Code normalization and shared fitting. For KDA, Cb = {28−bq : q ∈ Z, |q| ≤ 2b−1 − 1}.Only the b-bit integer qij is stored; reconstruction and fitting use zij = 28−bi qij . Qwen’s 4/6/8-bit codebooks use the same integer bounds without this fixed normalization. Let I de-note the non-pivot integer rows in a head. Writing vij = rizij , the fixed-code update is cj =P 
+
+> i∈I
+
+w2 
+
+> i
+
+vij Xij / P 
+
+> i∈I
+
+w2 
+
+> i
+
+v2 
+
+> ij
+
+, with a positive numerical floor. A zero denominator retains the pre-vious scale. C.2 CALIBRATION DATA , P RECISION CANDIDATES , AND FP16 P IVOTS 
+
+Both models, at both precision budgets and with both weight formats, use 32 WikiText-2 training segments of 2,048 tokens each. Table C1: Model-specific STEPQuant configuration. FP16 pivot and scale-metadata costs are accounted for separately from the nominal bit budget.                                 
+
+> Property Qwen3.8-27B Kimi-Linear-48B-A3B Recurrent layers 48 20 State heads per recurrent layer 48 32 Allocation unit entire head key row Number of allocation units 2,304 81,920 Integer candidates (@4 / @6) {2,4,6,8}/{4,6,8}{2,4,6,8}/{4,6,8}
+> Optimizer multiple-choice DP Lagrangian allocation FP16 pivots 32 heads 512 key rows Pivot ranking residual allocation risk distortion-reduction risk
+
+Qwen calibration. The row-impact-weighted MSE in Equation 17 supplies the head-level distor-tion term for Lifetime-aware Bit Allocation. The spatial component fits and writes the serving state in native coordinates. 
+
+KDA calibration. KDA combines gate-derived lifetime with the per-row candidate-format MSE in Equation 18. Its calibrated row-impact scores supply the spatial component’s preconditioning factors. Pivot selection scores the lifetime-weighted reduction from integer reconstruction error to FP16 reconstruction error. With pivots fixed, candidate distortions are calibrated excluding those rows from the shared integer column fit, and remaining rows are allocated under the integer budget. Candidate distortions are frozen for discrete allocation. Online Key-Row-Aware Dual-axis Fitting subsequently refits the shared scales to each updated state. 
+
+Allocation optimizers. Qwen uses a multiple-choice dynamic program over candidate precisions and remaining budget. KDA minimizes the Lagrangian per unit for a shared budget multiplier, then repairs the discrete assignment to meet the integer budget. The precision menu and budget change between four-bit and six-bit settings, while the lifetime-weighted objective remains the same. C.3 RECURRENT UPDATE AND QUANTIZED WRITEBACK 
+
+The codebooks and fixed-code column-scale update are specified in Appendix C.1. The steps below combine this fitting with the recurrent update and packed-state storage. 21 STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization Table C2: One persistent STEPQuant decode step. The same logical workflow supports four-bit and six-bit budgets. 
+
+Inputs: compressed state. qt, k t, v t, D t, β t. Frozen precision map, pivot mask, and row-impact scores. 1. Reconstruct the previous state from integer codes and scales, or from FP16 values for pivot units. 2. Compute X = Dt bSt−1 + βtkt(v⊤ 
+
+> t
+
+− k⊤ 
+
+> t
+
+Dt bSt−1).3. Emit byt = X⊤qt before requantization and continue subsequent model computation. 4. Derive row factors using Key-Row-Aware Dual-axis Fitting (Section 4.3). Qwen’s two-bit path shares row factors within value groups. 5. For KDA, jointly fit one shared column-scale vector with squared row-impact factors over all non-pivot integer rows within each head. Qwen fits each head at its assigned precision. Its two-bit path uses signed magnitude levels. 6. Pack integer codes and scales. Store pivot values in FP16. Keep the old representation valid until its readers finish. 7. Complete writeback before the next recurrent step uses the new page. 
+
+Persistent output: updated packed codes, scales, and FP16 pivots. 
+
+## D STORAGE COST OF CODES , S CALES , AND FP16 P IVOTS 
+
+Let N = Lhnhdkdv denote all recurrent-state elements of one request. Qwen has N = 48 · 48 ·
+
+128 2 = 37 , 748 , 736 . KDA has N = 20 · 32 · 128 2 = 10 , 485 , 760 . The FP32 recurrent-state representation is 4N bytes. Full-attention KV caches, convolution state, model weights, shared metadata, temporary workspaces, and allocator overhead are separate from this representation. 
+
+Compact dual-axis representation. For a head storing one FP16 row vector and one FP16 column vector, these two vectors contribute 
+
+16( dk + dv )
+
+dkdv
+
+= 0 .25 bits per element , dk = dv = 128 .
+
+In Qwen’s six-bit configuration, 32 pivots replace eight-bit heads with FP16. Including two scale vectors for every head gives 
+
+bQwen = 6 + 16 128 + 16 128 + 32 2304 (16 − 8) = 6 .3611 . (22) This analytical count reserves two scale slots for every head, including pivots; the packed serving layout omits pivot scale slots. For the Qwen four-bit configuration, the evaluated shared-scale recurrent-state representation con-tains 21,804,032 bytes per request, including FP16 scales and 32 FP16 pivot heads. Its compact cost is 4.6209 bits/value, giving a 150 , 994 , 944 /21 , 804 , 032 = 6 .9251 recurrent-state representation ratio relative to FP32. Figure 1 rounds this ratio to 6.93 ×. Compact counts exclude tensor-parallel padding and allocator overhead. KDA uses row-level allocation with one shared FP16 column-scale vector per head at both budgets. Codebook normalization is fixed by precision and consumes no metadata. Thus one row vector and one column vector cost 16 /128 + 16 /128 = 0 .25 bits/value, independent of the number of active precisions (three at six bits, up to four at four bits). For reporting, we use the nominal pre-pivot code budget ¯b and count 512 FP16 pivot rows as replacements for eight-bit rows at both budgets. Thus the residual integer budget is ¯bN − 8Npiv , where Npiv = 512 dv . Under this accounting convention, the compact count is 
+
+bKDA (¯b) = ¯b + 16 128 + 16 128 + 512 81920 (16 − 8) = ¯b + 0 .30 . (23) This gives 4.30 and 6.30 bits/value at the four- and six-bit budgets, respectively, for both weight formats. The corresponding per-request sizes are 5.375 and 7.875 MiB, versus 40 MiB for FP32, giving 7.44 × and 5.08 × compression. These are analytical compact-format counts at the nominal budget, rather than measured allocation sizes. Tensor-parallel page padding and allocator overhead are excluded. 22 STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization Table D3: Compact recurrent-state representation (bits/value). Integer codes, FP16 scales, and pivot replacement are included. Qwen@4 uses the packed byte count above; the other entries follow Equations 22 and 23.                
+
+> Model Weights STEPQuant@6bit STEPQuant@4bit Qwen BF16 6.361 4.621 Qwen W4A16 6.361 4.621 KDA BF16 6.300 4.300 KDA W4A16 6.300 4.300
+
+## E PER -T ASK ACCURACY AND GENERATION LENGTH 
+
+E.1 SCORING GENERATED ANSWERS ON SHORT TASKS 
+
+The six short tasks use greedy generation and score the answer extracted from the generated re-sponse, rather than ranking candidate likelihoods. A response that does not provide an extractable answer is counted as incorrect. WinoGrande has two choices, yet uniform INT4 scores 46.57% on Qwen and 17.36% on KDA (Table 2). At this precision, some generations lose the requested answer format and do not supply a valid choice. Thus accuracy can fall below 50% even on a binary task: the score also captures the model’s ability to follow the instruction and produce an answer during decode. E.2 GENERATION LENGTH WITH BF16 WEIGHTS 
+
+Table E4 reports the task-level generation lengths underlying Figure 3a–b. Each entry averages all evaluated outputs for that task, including thinking, incorrect answers, and capped outputs. The final column averages the seven task means before rounding. Table E4: Mean generated tokens with BF16 weights (thousands).                                                                                                         
+
+> State LCB v6 EvalPlus AIME 26 MATH-500 HMMT GPQA-D IFBench Avg.
+> Qwen3.8-27B
+> FP32 5.64 0.62 9.73 1.67 18.15 5.10 4.71 6.52 INT8 9.74 0.87 15.44 2.32 29.95 6.04 9.02 10.48 INT6 19.63 1.43 25.62 5.68 33.24 11.31 16.72 16.23 INT4 29.51 2.17 53.28 36.30 50.74 48.62 53.53 39.16 STEPQuant@6bit 4.44 0.64 8.51 1.62 20.11 5.12 5.89 6.62
+> STEPQuant@4bit 7.46 0.69 13.01 1.65 20.55 4.95 7.39 7.96
+> Kimi-Linear-48B-A3B-Instruct
+> FP32 9.47 1.10 18.89 4.17 33.64 9.15 6.70 11.87 INT8 12.86 1.94 27.55 4.20 38.86 12.41 6.10 14.84 INT6 13.75 3.35 29.29 7.47 40.39 17.36 10.45 17.44 INT4 22.32 15.86 63.40 37.73 64.22 57.12 26.84 41.07 STEPQuant@6bit 9.95 1.25 20.11 3.92 31.73 8.64 6.25 11.70
+> STEPQuant@4bit 9.80 1.27 21.34 3.14 32.32 7.31 5.61 11.54
+
+E.3 GENERATION LENGTH WITH W4A16 WEIGHTS 
+
+At the four-bit budget with W4A16 weights, Qwen’s mean accuracy is 0.34 percentage points be-low FP32, while mean generation length rises from 7.22K to 9.50K tokens (approximately 31.6%). KDA’s mean accuracy falls by 2.29 points, with mean length increasing from 12.70K to 13.26K (approximately 4.4%). 23 STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization Table E5: Mean generated tokens with W4A16 weights. Values are thousands of output tokens over all evaluated samples, with the same definition and task ordering as Table E4. 
+
+State LCB v6 EvalPlus AIME 26 MATH-500 HMMT GPQA-D IFBench Avg. 
+
+Qwen3.8-27B 
+
+FP32 8.99 0.91 10.87 1.66 18.00 4.97 5.11 7.22 STEPQuant@6bit 8.77 0.89 11.03 1.67 21.37 5.02 5.19 7.70 
+
+STEPQuant@4bit 10.29 0.95 13.56 1.80 23.88 5.25 10.80 9.50 
+
+Kimi-Linear-48B-A3B-Instruct 
+
+FP32 9.27 1.35 24.62 4.07 34.20 8.92 6.49 12.70 STEPQuant@6bit 9.36 1.38 23.58 4.00 34.65 8.99 6.40 12.62 
+
+STEPQuant@4bit 10.30 1.41 25.67 4.37 35.80 9.11 6.19 13.26 
+
+E.4 ADDITIONAL COMPONENT ABLATION 
+
+As a supplement to the component ablation in Sec. 5.4, Table E6 reports the corresponding results on Kimi under nominal 4- and 6-bit budgets. Consistent with Qwen, spatial fitting outperforms DSQ, sparse FP16 pivots improve the temporal component, and combining both components achieves further accuracy gains. Table E6: Component ablation on Kimi-Linear-48B-A3B-Instruct. Accuracy (%) with BF16 weights. Avg. denotes the average across three long-generation benchmarks.                                                                 
+
+> Nominal 6-bit budget
+> Variant AIME GPQA LCB Avg. FP32 68.33 69.70 54.52 64.18 INT6 22.71 57.83 42.37 40.97 Q-Mamba@6bit 38.54 57.07 44.55 46.72 Spatial only 63.54 66.67 52.80 61.00 Temporal w/o pivots 41.46 59.85 48.87 50.06 Temporal only 61.67 66.16 48.91 58.91 STEPQuant@6bit 67.71 68.43 54.86 63.67 Nominal 4-bit budget
+> Variant AIME GPQA LCB Avg. FP32 68.33 69.70 54.52 64.18 INT4 0.00 14.58 28.82 14.47 Q-Mamba@4bit 0.00 10.10 28.91 13.00 Spatial only 26.67 50.51 39.51 38.89 Temporal w/o pivots 4.58 35.35 33.74 24.56 Temporal only 8.33 40.91 38.01 29.08 STEPQuant@4bit 59.17 64.14 53.29 58.87
+
+## F SGL ANG INTEGRATION , D ECODE THROUGHPUT , AND STATE -P OOL 
+
+## MEMORY 
+
+F.1 PACKED -S TATE INTEGRATION IN SGL ANG 
+
+We implement the compressed-state path in SGLang (Zheng et al., 2024), pinned to version 0.5.12, with checkpoint-specific precision maps, pivot identities, preconditioners, and packed-state kernels. The adapter maps request slots and tensor-parallel shards onto the shared recurrent-state represen-tation. Prefill unpacks active states, runs the native chunk kernel, and packs the resulting boundary states. Decode updates integer pages directly using floating-point tiles, with no persistent full-matrix FP32 shadow in the serving path. Slot initialization and reuse follow SGLang’s request lifecycle. As described in Section 4.4, reconstruction, the Delta update, and the current readout are fused. After the readout, scale fitting and packed writeback run on a separate CUDA stream while later layers process the token. Writeback completes before the next recurrent step reads the state. Benchmark evaluations use the SGLang serving path. For Qwen STEPQuant@6bit, the packed recurrent-state pages occupy 29,999,104 bytes (28.609 MiB) per request, including integer codes, FP16 scales, and FP16 pivots, compared with 150,994,944 bytes (144 MiB) for FP32. This gives a 5.03 × storage reduction (80.13%). F.2 DECODE TIMING PROTOCOL AND THROUGHPUT RESULTS 
+
+We measure decode throughput from consecutive CUDA start events on each TP rank, including gaps between decode steps. For each run, elapsed decode time is the sum of those intervals on the slowest rank. Dividing the number of request-token transitions by this time gives tokens/s. Prefill, 24 STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization startup, warmup, and final output delivery lie outside this interval. Each configuration has three runs after one warmup run. We report the median throughput. All batches use four A800 GPUs with TP4 and the same 128-token prompt for every request, with 1,024 generated tokens. Decoding is greedy. Every recorded decode step retains its stated batch size. FP32 state and STEPQuant@6bit share server settings within each pair. The compressed path includes fitting, FP16 pivots, and writeback. F.3 MEMORY RESERVED FOR CONCURRENT REQUESTS 
+
+Let B denote supported concurrent requests, L context length, W shared text weights, S one aggre-gate persistent-state slot, and K attention KV per token. With reservation ratio r and one additional sentinel slot, 
+
+M (B, L ) = W + ( rB + 1) S + BLK. (24) For Qwen, an FP32 slot contains 150,994,944 bytes (144 MiB) of recurrent matrices and 2,949,120 bytes (2.8125 MiB) of convolution state, so S = 146 .8125 MiB. Across 16 full-attention layers, 
+
+K = 65 , 536 bytes (64 KiB) per context token. For the radix-caching configuration considered here, SGLang reserves three slots per supported request. Overlap tracking adds two, plus one global sentinel slot (Zheng et al., 2024). Figure 1a uses this five-slot configuration, (5 B + 1) S, before and after compression. Under this five-slot reservation, the state term is independent of context length. Weights are counted from the local checkpoints’ safetensors payloads, including integer codes, scales, zero points, and retained BF16 text weights in the W4A16 model. Vision, MTP draft, and shape metadata are excluded. The exact text-weight payloads are 53,791,996,928 bytes (BF16) and 17,776,688,128 bytes (W4A16). All counts are summed across tensor-parallel ranks for one model replica. The analytical capacity curve reserves 30,015,488 bytes of compact recurrent-state representation, including pivot scale slots, plus the unchanged 2,949,120-byte convolution state, to-taling 31.4375 MiB. Applying this format uniformly to the reserved slots gives 9.85 GiB of reserved persistent-state pool capacity at B = 64 , compared with 46.02 GiB in FP32. Weights and attention KV are excluded from the state curves. Horizontal lines show the two weight payloads. F.4 ADDITIONAL RESULTS ON KDA Section 5.6 presents the serving-level and state-level efficiency results on Qwen. Here, we provide the corresponding results on KDA under the same evaluation settings. 32 64 128 256 512 Batch size 030 60 90 120 150 180 Total memory (GiB)   
+
+> 149.70 GiB 69.36 GiB
+> −53.7%
+> (a) Serving memory with W4
+> FP32 state STEPQuant@6 State memory State time
+> Batch size = 512, slot = 5 020 40 60 80 100 Normalized to FP32 state (%)
+> 100.04 GiB 8.48 ms 19.70 GiB 4.76 ms −80.3% −43.9%
+> (b) Memory & Time of State Updating
+> FP32 state STEPQuant@6
+> KDA
+
+Figure F4: Serving memory and state-update time of STEPQuant on KDA. As shown in Fig. F4, STEPQuant@6bit reduces total serving memory from 149.70 to 69.36 GiB (53.7%) at a batch size of 512. At the state level, memory consumption decreases from 100.04 to 19.70 GiB (80.3%, 5.08 × compression), while state-update time decreases from 8.48 to 4.76 ms (43.9%, 1.78 × faster). These results further demonstrate the memory and computational benefits of STEPQuant on KDA. 25 STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization F.5 DECODE THROUGHPUT 
+
+We evaluate full-model decode throughput with BF16 weights on four NVIDIA A800 GPUs us-ing tensor parallelism of four (TP4). We test batch sizes B ∈ { 32 , 64 , 128 , 256 , 512 }, with 128 input tokens and 1,024 generated tokens per request. The measurements include inter-step gaps, quantization fitting, and compressed-state writeback. Table F7: Decode throughput. Units are tokens/s. Gains use the unrounded throughputs. 
+
+Model Batch FP32 STEPQuant@6bit Gain Qwen 32 1,656 1,727 +4.32% Qwen 64 2,980 3,122 +4.77% Qwen 128 4,157 4,485 +7.87% Qwen 256 5,655 6,360 +12.47% Qwen 512 6,040 7,280 +20.53% KDA 32 5,248 5,356 +2.06% KDA 64 8,284 8,523 +2.89% KDA 128 13,284 13,936 +4.90% KDA 256 16,979 18,505 +8.99% KDA 512 21,241 23,748 +11.80% 32 64 128 256 512 Batch size 02468Throughput (K tokens/s)     
+
+> +4.32% +4.77% +7.87% +12.47% +20.53%
+> (a) Qwen: throughput
+> FP32 state STEPQuant@6
+> 32 64 128 256 512 Batch size 0510 15 20 25 Throughput (K tokens/s)
+> +2.06% +2.89% +4.90% +8.99% +11.80%
+> (b) KDA: throughput
+> FP32 state STEPQuant@6
+
+Figure F5: Full-model decode throughput. As shown in Fig. F5, STEPQuant@6bit consistently improves decode throughput on both models, with larger gains at higher batch sizes. At B = 512 , throughput increases by 20.53% on Qwen (from 6,040 to 7,280 tokens/s) and 11.80% on KDA (from 21,241 to 23,748 tokens/s). Detailed results are reported in Table F7. 
+
+## G COMPARISON WITH DAMP 
+
+The concurrent work DAMP (Zhang et al., 2026b) uses reconstruction error and decay-based per-sistence to select FP16 key channels, while quantizing the remaining channels to INT8 with a Hadamard transform. In contrast, STEPQuant combines lifetime-aware mixed-precision allocation with key-row-aware dual-axis fitting, accounting for both error persistence and readout impact. This enables STEPQuant to achieve near-FP32 accuracy at substantially lower effective precision in our evaluations. Since DAMP’s implementation was unavailable for reproduction and the two studies use different generation settings, we compare relative FP32 accuracy on three shared KDA benchmarks. We directly extract DAMP and its INT8, INT4, and NVFP4 baseline results from the original paper and normalize each method’s three-task average by its corresponding FP32 baseline. 26 STEPQuant: When and Where Errors Matter in Delta-Rule Recurrent State Quantization Table G8: Accuracy retention on three shared KDA benchmarks: AIME 2026, HMMT Feb 2026, and LiveCodeBench v6. Retention is normalized to each study’s FP32 baseline. Method Avg. bits Retention (%) DAMP 9.9 100.99 STEPQuant@6bit 6.3 100.51 STEPQuant@4bit 4.3 92.91 INT8 † 9.0 83.54 INT4 † 5.0 6.66 NVFP4 † 4.5 6.74  
+
+> †Baseline results reported by DAMP.
+
+As shown in Table G8, DAMP retains 100.99% of FP32 accuracy at 9.9 effective bits per state value, while STEPQuant achieves 100.51% at 6.30 bits and 92.91% at 4.30 bits. In contrast, the INT8, INT4, and NVFP4 baselines reported by DAMP retain 83.54%, 6.66%, and 6.74%, respectively. These results demonstrate STEPQuant’s ability to preserve near-FP32 accuracy at low precision (6.30 vs. 9.9 bits), although differences in evaluation settings preclude a strictly controlled cross-study comparison. 
+
+## H LIMITATIONS 
+
+STEPQuant’s lifetime weight approximates error persistence through gate decay without fully mod-eling the time-varying, key-dependent state transition, and therefore does not fully capture the long-term effects of quantization error. With BF16 weights at four bits, KDA loses accuracy on long-generation tasks, while Qwen generates longer outputs despite retaining near-FP32 average accu-racy. Our evaluation covers two GDN/KDA models under fixed hardware and workload settings; accuracy and systems gains on other architectures and under dynamic serving workloads remain to be verified. 27
