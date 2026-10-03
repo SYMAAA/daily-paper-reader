@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-02</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-03</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 11 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>7</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-02 22:56:38 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-03 22:30:24 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日筛出17篇，精读6篇、速读11篇，焦点集中在LLM量化与高效多模态/视频推理。</p>
-<p>最值得看两篇9分精读：TORQUE优化旋转前后“量化什么/不量化什么”，ThinQuant做权重与激活量化的可扩展旋转学习。</p>
-<p>普通读者可先读这两篇精读，再按部署或多模态需求扫速读中的量化、视觉token剪枝与视频token选择。</p>
+<p>今日扫读11篇AI论文（精读4篇、速读7篇），重点聚焦LLM量化与高效多模态部署。</p>
+<p>最值得看的是9.0分的《The Devil Is in the Reconstruction Loss Scale》重新审视量化优化，以及8.0分的《ShamAN-Q》探索亚1比特权重，速读中QATFactory和OmniRoute也值得关注。</p>
+<p>普通读者可优先从量化训练与重建损失入手，再结合QATFactory了解部署对齐的实用流程。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">4 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="TORQUE: Optimizing What (not) to Quantize Before and After Rotation">TORQUE: Optimizing What (not) to Quantize Before and After Rotation</span></li><li><span class="dpr-home-dashboard-paper-title" title="ThinQuant: Scalable Rotation Learning for Weight and Activation Quantization of LLMs">ThinQuant: Scalable Rotation Learning for Weight and Activation Quantization of LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="TReVS: Integrating Textual Relevance and Visual Saliency for Efficient Vision-Language Model Token Pruning">TReVS: Integrating Textual Relevance and Visual Saliency for Efficient Vision-Language Model Token Pruning</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="The Devil Is in the Reconstruction Loss Scale: Rethinking Optimization in LLM Quantization">The Devil Is in the Reconstruction Loss Scale: Rethinking Optimization in LLM Quantization</span></li><li><span class="dpr-home-dashboard-paper-title" title="ShamAN-Q: Shampoo Augmented NanoQuant for Sub-1-bit LLM Weights">ShamAN-Q: Shampoo Augmented NanoQuant for Sub-1-bit LLM Weights</span></li><li><span class="dpr-home-dashboard-paper-title" title="JARQ: Joint Alternating Refinement for Quantization">JARQ: Joint Alternating Refinement for Quantization</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>6</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>4</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">11 篇</strong>
+    <strong class="dpr-home-dashboard-count">7 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Calibrate the Decisions That Change the Future: On-Policy Post-Training Quantization for Multimodal Large Language Models">Calibrate the Decisions That Change the Future: On-Policy Post-Training Quantization for Multimodal Large Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="Representation Dynamics Reveal Semantic Saliency and Similarity for Visual Token Pruning in MLLMs">Representation Dynamics Reveal Semantic Saliency and Similarity for Visual Token Pruning in MLLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="GleanVID: Complementary Token Selection for Efficient Video Large Language Models">GleanVID: Complementary Token Selection for Efficient Video Large Language Models</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="OmniRoute: Mapping Temporal Semantic Evidence to Audio-Visual Token Budgets for Efficient Omnimodal Large Language Models">OmniRoute: Mapping Temporal Semantic Evidence to Audio-Visual Token Budgets for Efficient Omnimodal Large Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="Feature-Aware Token Attack for Compression-Triggered Stealthy Failures in Large Vision-Language Models">Feature-Aware Token Attack for Compression-Triggered Stealthy Failures in Large Vision-Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="QATFactory: A Versatile, Deployment-Aligned Framework for Quantization-aware Training and Distillation of LLMs">QATFactory: A Versatile, Deployment-Aligned Framework for Quantization-aware Training and Distillation of LLMs</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>11</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>7</strong></span></div>
 </section>
 </div>
 

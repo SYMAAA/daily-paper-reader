@@ -1,0 +1,1744 @@
+Title: Q-MINO: A Minimal-Norm Method for Quantization-Aware Training
+
+URL Source: https://arxiv.org/pdf/2610.00738v1
+
+Published Time: Fri, 02 Oct 2026 00:48:59 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+# Q-MINO: A Minimal-Norm Method for Quantization-Aware Training 
+
+Don Li don@pdx.edu Department of Mathematics & Statistics Portland State University 
+
+## Abstract 
+
+The Straight-Through Estimator (STE) is a widely used heuristic for Quantization-Aware Training (QAT), but its surrogate gradients can exhibit substantial mismatch with the underlying quantized objective, leading to noisy updates and parameter oscillations, partic-ularly in ultra-low-bit regimes. We propose the Quantization-Aware Minimal-Norm Opti-mizer (Q-MINO), a temporal bundle method that combines gradient consensus, state-drift regularization, and an alignment constraint to construct stabilized, minimum-norm update directions from recent optimization states. Q-MINO solves the resulting constrained sub-problem using a warm-started Frank–Wolfe procedure with a feasible fallback initialization. Theoretically, via a stochastic Lyapunov Kurdyka–Łojasiewicz (KL) framework, we show that Q-MINO achieves asymptotic neighborhood convergence. Moreover, we detail numeri-cal experiments with Q-MINO at various quantizations. 
+
+## 1 Introduction 
+
+Modern deep learning has undergone a remarkable expansion in model capacity scaling, with large vision architectures and multi-billion-parameter language models achieving state-of-the-art (SOTA) capabilities across diverse domains [Brown et al. (2020); Kaplan et al. (2020)]. However, the deployment of such models is constrained by severe computational and infrastructure bottlenecks – memory footprint and memory bandwidth constraints [Dao et al. (2022); Pope et al. (2023)], as well as energy consumption [Strubell et al. (2019)], scale rapidly with parameter count. This entails a gap between high-capacity neural networks and resource-constrained deployment targets such as edge devices, consumer hardware, and low-latency inference servers [Banbury et al. (2021)]. Quantization is widely-used as a compression method to address this gap with respect to (large-scale) deep learning models [Gholami et al. (2021)]. Quantization maps high-precision floating-point parameters (e.g., FP32) to low-bit fixed-point representations (e.g., INT8, INT4, or INT2), directly reducing model memory footprint and unlocking accelerated integer arithmetic hardware units. Quantization approaches generally fall into two categories: Post-Training Quantization (PTQ) , which operates directly on pre-trained floating-point weights without full retraining, offering a lightweight and low-compute compression route, and Quantization-Aware Training (QAT) , which simulates low-bit discrete constraints during the training loop, allowing model parameters to adapt to quantization errors. PTQ has the benefits of training speed and efficiency by virtue of eliminating the need for retraining, but often entails decreased accuracy [Hasan (2024)] and is typically unsuitable for lower-bit quantization [Lee et al. (2025)]. Thus, QAT is the alternative to preserve predictive performance in more agressive quantization regimes, with the straight-through estimator (STE) being a critical mechanism for QAT. 
+
+1.1 The Straight-Through Estimator (STE) 
+
+To integrate discrete quantization operations into first-order optimization, Bengio et al. (2013) introduced STE. To illustrate the fundamental optimization dilemma, consider a deterministic, element-wise quanti-zation function Q : R → S , where S denotes a discrete set of allowable quantization levels. For example, 1arXiv:2610.00738v1 [math.OC] 30 Sep 2026 consider a binary or sign activation function given as 
+
+Q(x) = sign( x) = 
+
+{
+
++1 if x ≥ 0,
+
+−1 if x < 0. (1) Traditional first-order optimization fails under this formulation because the derivative vanishes almost every-where, i.e., ∂Q (x) 
+
+> ∂x
+
+= 0 for all x̸ = 0, and is non-differentiable at the origin. Consequently, applying standard backpropagation yields zero gradients, completely halting parameter updates. To circumvent this vanishing gradient bottleneck, the STE defines a heuristic surrogate gradient/operator for the backward pass. For an identity-STE, the non-differentiable quantization derivative is replaced by the identity mapping 
+
+∂Q (x)
+
+∂x ≈ 1, (2) or bounded within a specific clipping window (e.g., I[|x| ≤ 1]). While this heuristic successfully propagates gradients backward through the network to update latent continuous weights, it creates a fundamental structural flaw of a persistent gradient mismatch between the true objective function being evaluated on the forward pass and the surrogate objective being optimized on the backward pass. In ultra-low-bit regimes (e.g., INT4 or INT2), this gradient mismatch can be particularly pathological. Because the true landscape is a discontinuous step function (cf. (Nagel et al., 2021)), the continuous surrogate updates frequently drive latent weights across quantization thresholds without a corresponding smooth change in loss. This misalignment leads to noisy stochastic updates, severe parameter oscillations across decision boundaries, and a significant degradation in optimization stability [Nagel et al. (2022); Malinovskii et al. (2024)], which underlies the need for optimization methods capable of accounting for these trajectory drifts. This is the primary motivation of our proposed method, the quantization-aware minimal-norm optimizer (Q-MINO). 
+
+1.2 Outline & Summary of Contributions 
+
+To address the trajectory drifts and optimization instabilities observed with STE-based QAT, we introduce Q-MINO. Q-MINO stabilizes low-bit optimization by maintaining a temporal bundle of recent surrogate gradients and quantized states, solving a drift-regularized minimal-norm subproblem to compute reliable parameter search directions. The remainder of this paper is organized as follows. In Section 2, we introduce the Q-MINO algorithmic framework, detailing its temporal bundle management, state-drift penalty formulation, and the warm-started Frank–Wolfe inner solver with its guaranteed fallback mechanism. In Section 3, we analyze Q-MINO the-oretically within a stochastic Lyapunov Kurdyka–Łojasiewicz (KL) framework. In Section 4, we evaluate Q-MINO via a suite of numerical experiments. We summarize our contributions as follows: • Novel QAT Optimization Framework: We propose Q-MINO, a temporal bundle method tai-lored for quantization-aware training that unifies gradient consensus, quantized state-drift regu-larization, and current-gradient alignment constraints to mitigate parameter oscillations in low-bit regimes. • Efficient Inner Solver with Feasibility Guarantees: We design a lightweight, warm-started Frank–Wolfe procedure to solve the inner minimal-norm subproblem, equipped with a provably fea-sible fallback initialization ( eM ) that ensures solver stability without heavy computational overhead. • Theoretical Convergence Analysis: Under a stochastic Lyapunov KL framework, we prove that Q-MINO achieves asymptotic convergence and neighborhood attainment under the KL property. • Numerical Experiments: We demonstrate Q-MINO’s performance empirically through numerical experiments on quantized Rosenbrock and Rastrigin functions, vision tasks (CIFAR-10 on a CNN), and ablation studies regarding Q-MINO hyperparameters. 22 Quantization-Aware Minimal-Norm Optimizer (Q-MINO) 
+
+We present the formal setup and algorithmic components of Q-MINO. Consider the minimization problem with composite objective min 
+
+> x∈Rd
+
+Φ( x) = f (Q(x)) + r(x), (3) where x ∈ Rd denotes the continuous high-precision (FP32) latent parameters, Q : Rd → S d is an element-wise or block-wise quantization operator mapping parameters to a discrete grid S, f (·) represents a stochastic loss function evaluated on the quantized parameters z = Q(x), and r(x) is a convex proximal regularizer (e.g., ℓ1). 
+
+2.1 Temporal Bundle Maintenance & EMA Stabilization 
+
+To mitigate the high variance and gradient mismatch characteristic of STE, Q-MINO maintains a sliding temporal bundle of recent optimization states and filtered gradients. At step k, given a mini-batch ξk, we compute the quantized deployment state zk = Q(xk) and evaluate the stochastic quantization-aware gradient ˆgk = STEGrad( xk, ξ k) ≈ ∇ xf (Q(xk); ξk). (4) To prevent abrupt oscillations across mini-batches, ˆ gk is stabilized using an Exponential Moving Average (EMA) ¯gk = β¯gk−1 + (1 − β)ˆ gk, ¯g−1 = 0 , (5) where β ∈ [0 , 1) is the EMA decay hyperparameter. The active pair (¯ gk, z k) is then appended to a temporal bundle Bk. If |B k| > m (where m ≥ 1 denotes maximum bundle capacity), then the oldest element is evicted. The active bundle indices are denoted by Ik = {j1, . . . , j M }, where M = |B k| ≤ m and jM = k. We assemble the active gradient matrix and quantized state matrix as 
+
+Gk = [¯ gj1 , . . . , ¯gjM ] ∈ Rd×M , Zk = [ zj1 , . . . , z jM ] ∈ Rd×M . (6) 
+
+2.2 Quantized-State Drift & Constrained Alignment Subproblem 
+
+Standard bundle methods minimize gradient norms without accounting for QAT grid shift. However, in QAT, continuous parameter updates that induce large displacements in Q(x) force the network across decision boundaries into adjacent discrete basins, causing training instability. To penalize state drift, we compute a normalized relative distance vector ϵk = [ δj1,k , . . . , δ jM ,k ]⊤ ∈ RM , where 
+
+δj,k = ∥zj − zk∥22
+
+∥zk∥22 + ϵz
+
+, ∀j ∈ I k, (7) with ϵz > 0 guaranteeing numerical stability. Let Hk = G⊤ 
+
+> k
+
+Gk ∈ RM ×M denote the gradient Gram matrix. We define the drift-regularized objective over the M -dimensional simplex weight vector α ∈ RM
+
+ϕk(α) := 12 α⊤Hkα + λϵ ⊤ 
+
+> k
+
+α, (8) where λ ≥ 0 is the state-drift regularization hyperparameter. To ensure the composite direction dk = Gkα
+
+remains aligned with the current gradient ¯ gk, we constrain α to the feasible domain 
+
+Dk = {α ∈ RM : α ≥ 0, 1⊤α = 1 , α T GTk ¯gk ≥ ρ∥¯gk∥2} , (9) where ρ ∈ [0 , 1] governs the minimal allowable alignment fraction. 32.3 Warm-Started Frank–Wolfe Subproblem Solver 
+
+Finding α⋆k = arg min α∈D k ϕk(α) requires solving a small M × M constrained quadratic program at each iteration. Since M ≤ m ≪ d (typically m ≤ 16), this can be solved efficiently via the Frank–Wolfe algorithm [Frank & Wolfe (1956)]. To accelerate convergence, we construct a warm-start iterate α(0) from the previous cached solution αprev . If an element was evicted from the bundle, we drop its corresponding weight, renormalize αprev ← αprev /∥αprev ∥1, and pad a zero for the incoming k-th coordinate. If αprev = ∅ or the padded vector violates alignment ( α(0) /∈ D k), we fall back to the unit basis vector α(0) = eM = [0 , . . . , 0, 1] ⊤.Because GkeM = ¯ gk, we have e⊤ 
+
+> M
+
+Gk ¯gk = ∥¯gk∥22 ≥ ρ∥¯gk∥22 for any ρ ∈ [0 , 1], ensuring eM is strictly feasible. For t = 0 , . . . , T FW −1, the Linear Minimization Oracle (LMO) step solves s(t) = arg min s∈D k ⟨Hkα(t)+λϵ k, s ⟩,followed by the convex update α(t+1) = (1 − γt)α(t) + γts(t) with γt = 2 
+
+> t+2
+
+. After TFW iterations, we obtain 
+
+α⋆k = α(TFW ), generate the update direction dk = Gkα⋆k, and execute the proximal step 
+
+xk+1 = prox ηk r (xk − ηkdk) . (10) Q-MINO is implemented as follows: 
+
+Algorithm 1: Quantization-Aware Minimal-Norm Method (Q-MINO) 
+
+Require: Quantizer Q(·), STE/surrogate gradient rule, step sizes {ηk}, bundle capacity m, EMA coefficient 
+
+β ∈ [0 , 1), drift coefficient λ ≥ 0, alignment hyperparameter ρ ∈ [0 , 1], Frank–Wolfe iterations TFW ,
+
+ϵz > 0, proximal regularizer r(·) 
+
+> 1:
+
+Initialize FP32 parameters x0, bundle B0 ← ∅, EMA state ¯ g−1 ← 0, and αprev ← ∅ 
+
+> 2:
+
+for k = 0 , 1, . . . , K − 1 do  
+
+> 3:
+
+zk ← Q(xk) 
+
+> 4:
+
+Sample mini-batch ξk 
+
+> 5:
+
+ˆgk ← STEGrad( xk, ξ k) 
+
+> 6:
+
+¯gk ← β¯gk−1 + (1 − β)ˆ gk 
+
+> 7:
+
+Append (¯ gk, z k) to Bk 
+
+> 8:
+
+if |B k| > m then  
+
+> 9:
+
+Evict oldest bundle element  
+
+> 10:
+
+end if  
+
+> 11:
+
+Let Ik = ( j1, . . . , j M ), M ≤ m, with jM = k 
+
+> 12:
+
+Construct Gk = [¯ gj1 , . . . , ¯gjM ] 
+
+> 13:
+
+For each j ∈ I k, compute δj,k = ∥zj −zk ∥22  
+
+> ∥zk∥22+ϵz
+> 14:
+
+ϵk ← [δj1,k , . . . , δ jM ,k ]⊤ 
+
+> 15:
+
+Hk ← G⊤ 
+
+> k
+
+Gk 
+
+> 16:
+
+Define ϕk(α) = 12 α⊤Hkα + λϵ ⊤ 
+
+> k
+
+α 
+
+> 17:
+
+Define Dk = {α ≥ 0 : 1⊤α = 1 , α T GTk ¯gk ≥ ρ∥¯gk∥2} 
+
+> 18:
+
+Initialize warm-start α(0) by dropping evicted coordinates from αprev , renormalizing over remaining elements, and padding zero for the new coordinate jM 
+
+> 19:
+
+if αprev = ∅ or α(0) /∈ D k then  
+
+> 20:
+
+α(0) ← eM ▷ Fallback to standard unit basis vector [0 , . . . , 0, 1] ⊤ 
+
+> 21:
+
+end if  
+
+> 22:
+
+for t = 0 , . . . , T FW − 1 do  
+
+> 23:
+
+∇ϕk(α(t)) ← Hkα(t) + λϵ k 
+
+> 24:
+
+s(t) ← arg min s∈D k ⟨∇ ϕk(α(t)), s ⟩ 
+
+> 25:
+
+Choose step size γt = 2 
+
+> t+2
+> 26:
+
+α(t+1) ← (1 − γt)α(t) + γts(t) 
+
+> 27:
+
+end for  
+
+> 28:
+
+α⋆k ← α(TFW ) 
+
+> 29:
+
+Cache αprev ← α⋆k with active bundle indices  
+
+> 30:
+
+dk ← Gkα⋆k 
+
+> 31:
+
+xk+1 ← prox ηk r (xk − ηkdk)432: end for  
+
+> 33:
+
+return xK and zK = Q(xK )
+
+## 3 Theoretical Analysis 
+
+We analyze the theoretical convergence of Q-MINO. Because the true quantized objective f (Q(x)) is non-smooth and discontinuous due to discrete state jumps, first-order methods relying on surrogate STE gra-dients do not optimize f (Q(x)) directly. Instead, we analyze the surrogate objective landscape under mild non-convex smoothness assumptions, modeling the discrepancy between surrogate and true gradients as a bounded approximation error inside a stochastic Lyapunov framework. 
+
+3.1 Assumptions & Mathematical Preliminaries 
+
+We evaluate the parameter sequence {xk}k≥0 generated by Q-MINO on the composite surrogate objective function Φ( x) = f (x) + r(x), where f : Rd → R represents the continuously differentiable loss function whose gradient is approximated via EMA surrogate updates ¯ gk(xk), and r : Rd → R ∪ { +∞} is a proper, lower semicontinuous, and convex regularizer. Because the quantization operator Q(·) is a non-differentiable step function, f (Q(x)) lacks global gradient information. To analyze the local parameter dynamics under proximal updates, we establish the following assumptions: • Lipschitz Continuity: The objective function f : Rd → R is continuously differentiable and 
+
+L-smooth on Rd, i.e., there exists L > 0 such that for all x, y ∈ Rd:
+
+∥∇ f (x) − ∇ f (y)∥ ≤ L∥x − y∥. (11) • Surrogate Gradient Mismatch & STE Variance: The gradient of f (Q(x)) with respect to x is approximated via the Straight-Through Estimator (STE) dynamic. The stochastic EMA surrogate gradient ¯ gk(xk) satisfies bounded mismatch bias , i.e., 
+
+E[¯ gk(xk) | xk] = ∇f (xk) + ek(xk), (12) where ek(xk) denotes the quantization-induced approximation error bounded by ∥ek(xk)∥ ≤ δ for 
+
+δ ≥ 0, and bounded stochastic variance , i.e., 
+
+E [∥¯gk(xk) − E[¯ gk(xk)] ∥2 | xk
+
+] ≤ σ2, for σ > 0. (13) • Convexity of the Regularizer: The regularizer r(x) is proper, lower semicontinuous, and con-vex, ensuring that its proximal operator prox ηr (v) ≜ arg min x
+
+{
+
+r(x) + 12η ∥x − v∥22
+
+}
+
+is well-defined, single-valued, and non-expansive for any learning rate η > 0 (by Moreau-Yoshida). • Lower Boundedness: The objective function Φ( x) is bounded from below over Rd, i.e., there exists a constant Φ ∗ > −∞ such that Φ( x) ≥ Φ∗ for all x ∈ Rd.Due to the non-convex and non-smooth nature of Φ( x), convergence to global optimality cannot be guaran-teed in general. Instead, we evaluate stationarity using the expected norm of the proximal gradient mapping 
+
+Gη (x): 
+
+Gη (x) ≜ 1
+
+η
+
+(x − prox ηr (x − η∇f (x)) ) . (14) A point x∗ is defined as an ( ϵ, δ )-stationary point if E[∥Gη (x∗)∥2] ≤ ϵ + O(δ2), where δ represents the persistent residual error floor imposed by the quantization discretization step. 
+
+Definition 1 (Kurdyka–Łojasiewicz (KL) Property) . A proper, lower semicontinuous function Φ : Rd →
+
+R ∪ { +∞} is said to have the Kurdyka–Łojasiewicz (KL) property at a point x∗ ∈ dom ∂Φ if there exists a neighborhood U of x∗, a constant η ∈ [0 , +∞), and a continuous concave function φ : [0 , η ) → R+ such that: 
+
+51. φ(0) = 0 , φ is continuously differentiable on (0 , η ) with φ′(s) > 0 for all s ∈ (0 , η ),2. For all x ∈ U ∩ { x | Φ( x∗) < Φ( x) < Φ( x∗) + η}, the KL inequality holds: 
+
+φ′(Φ( x) − Φ( x∗)) · dist(0 , ∂ Φ( x)) ≥ 1, (15) 
+
+where ∂Φ( x) denotes the limiting subdifferential of Φ, and dist(0 , ∂ Φ( x)) ≜ inf {∥ v∥ : v ∈ ∂Φ( x)}.
+
+3.2 Theoretical/Convergence Results 
+
+With the mathematical preliminaries established, we present the key theoretical properties of Q-MINO. Proofs of all results are provided in Appendix A. 
+
+Lemma 2 (Subgradient Tracking & Quantized Drift Bound) . Let {xk}k≥0 be the parameter sequence gen-erated by Q-MINO, and let zk = Q(xk) denote the quantized state at iteration k. Under our assumptions (cf. §3.1), the bundle drift matrix entry ϵk,j ≜ ∥zj − zk∥2/(∥zk∥2 + ϵz ) and the EMA surrogate gradient error satisfy: 
+
+E [∥¯gk − ∇ f (xk)∥2] ≤ (1 − β)σ2 + 2 δ2 + O
+
+L2 ∑
+
+> j∈B k
+
+∥xk − xj ∥2
+
+ , (16) 
+
+where Bk represents the set of bundle indices maintained at step k, β ∈ (0 , 1) is the EMA momentum coefficient, δ is the STE mismatch floor, and L is the Lipschitz constant. 
+
+Lemma 3 (Inner Loop Feasibility) . For any iteration k ≥ 1 and target alignment parameter ρ ∈ (0 , 1] ,the inner Frank-Wolfe subproblem search space Dk ≜ {α ∈ ∆M −1 | α⊤HkeM ≥ ρ∥¯gk∥2} is non-empty. Specifically, the fallback unit basis vector eM = (0 , . . . , 0, 1) ⊤ ∈ RM satisfies e⊤ 
+
+> M
+
+HkeM = ∥¯gk∥2 ≥ ρ∥¯gk∥2,guaranteeing that the Frank-Wolfe sub-routine is strictly feasible at every step k.
+
+Lemma 4 (Sufficient Decrease / Descent Lemma) . Let ηk ≤ ρ 
+
+> 2L
+
+. Under our assumptions (cf. §3.1) and the inner loop feasibility lemma, the minimal-norm search direction dk = Gkα∗ 
+
+> k
+
+constructed by Q-MINO with generalized composite update step ∆k ≜ 1 
+
+> ηk
+
+(xk − xk+1 ) = dk + sk+1 yields the sufficient decrease condition: 
+
+E[Φ( xk+1 ) | xk] ≤ Φ( xk)− ηk
+
+4 E [∥∆k∥2 | xk
+
+]+ηk∥¯gk −dk∥2 +ηk(1 −β)σ2 +2 ηkδ2 +O
+
+(
+
+ηkL2 ∑
+
+> i∈B k
+
+∥xk − xi∥2
+
+)
+
+.
+
+(17) 
+
+Theorem 5 (Asymptotic Convergence and Neighborhood Attainment under KL Property) . Let Φ( x) = 
+
+f (x)+ r(x) be a proper, lower semicontinuous function, and let Lk denote the augmented stochastic Lyapunov functional. Suppose the learning rate sequence satisfies ∑∞ 
+
+> k=0
+
+ηk = ∞ and ∑∞ 
+
+> k=0
+
+η2 
+
+> k
+
+< ∞. Then, under the assumptions of §3.1, the sequence {xk}k≥0 generated by Q-MINO satisfies: 1. Bounded Trajectory Variance: The expected total variation of the continuous parameter sequence is bounded up to the persistent STE distortion floor, i.e., 
+
+> ∞
+
+∑
+
+> k=0
+
+E [∥xk+1 − xk∥2] < ∞. (18) 
+
+2. Asymptotic Neighborhood Convergence: The sequence of iterates {xk}k≥0 converges in expec-tation to a compact error neighborhood Uδ around the stationary set of Φ, where the radius of Uδ is explicitly scaled by the STE mismatch floor δ, i.e., 
+
+lim  
+
+> k→∞
+
+E [dist( xk, Uδ )] = 0 . (19) 
+
+## 4 Numerical Experiments 
+
+By virtue of compute limitations, we detail CPU-accessible numerical experiments. Nonetheless, we detail numerical experiments across synthetic non-convex landscapes and computer vision tasks. Moreover, we also detail ablation studies with respect to hyperparameter sensitivities of Q-MINO. 64.1 Benchmarks & Architectures 
+
+We evaluate performance across two distinct optimization regimes: 1. Synthetic Non-Convex Optimization: To isolate the interaction between non-convex geometry and quantization noise, we evaluate on d-dimensional ( d = 10) ill-conditioned Rosenbrock functions and highly multi-modal Rastrigin functions. Stochastic gradients are simulated by injecting zero-mean Gaussian noise ξk ∼ N (0 , σ 2I) prior to applying uniform b-bit stochastic quantization. 2. Computer Vision Tasks: We train a CNN on the CIFAR-10 dataset. This is a good benchmark for any QAT optimizer since convolutions are highly sensitive to gradient approximation errors during QAT. 
+
+4.2 Synthetic Non-Convex Optimization 
+
+To isolate the algorithmic mechanics of Q-MINO from the engineering overhead and architectural idiosyn-crasies of deep neural networks, we first evaluate its performance on a synthetic optimization test suite. The 10-dimensional Rosenbrock function takes the form 
+
+f (x) = 
+
+> 9
+
+∑
+
+> i=1
+
+[100( xi+1 − x2 
+
+> i
+
+)2 + (1 − xi)2] . (20) The 10-dimensional Rastrigin function takes the form 
+
+f (x) = 100 + 
+
+> 10
+
+∑
+
+> i=1
+
+[x2 
+
+> i
+
+− 10 cos(2 πx i)] . (21) To faithfully simulate the stochastic environment of Quantization-Aware Training (QAT), analytical gradi-ents are corrupted with zero-mean Gaussian noise ( ξk ∼ N (0 , 0.52I)) prior to applying a dynamic asymmetric uniform quantization operator Q(·) mapped into signed integer grids. We evaluate three distinct precision thresholds spanning standard edge deployment to extreme low-bit constraints: INT8 (8-bit, grid [ −128 , 127]), 
+
+INT4 (4-bit, grid [ −8, 7]), and INT2 (2-bit, grid [ −2, 1]). Q-MINO ( m = 5, β = 0 .9, λ = 0 .1, ρ = 0 .1, 
+
+TFW = 5) is benchmarked directly against standard Straight-Through Estimation baselines: SGD+STE and 
+
+Adam+STE (Kingma & Ba, 2015). All configurations are initialized from uniform high-energy coordinate states ( x0 = −1.2 · 1 for Rosenbrock; x0 = 4 .0 · 1 for Rastrigin) and optimized over 250 discrete steps. 
+
+74.3 Computer Vision Tasks 
+
+To evaluate Q-MINO under practical deep learning conditions, we transfer our benchmark suite to a CNN architecture on the CIFAR-10 dataset. In QAT regimes, reliance on depth-wise separable convolutions creates low parameter redundancy and narrow feature bottlenecks, leaving it highly susceptible to the catastrophic gradient approximation errors and gradient mismatch noise typically injected by standard STE. We evaluate top-1 accuracy across INT8 , INT4 , and INT2 quantizations. We compare Q-MINO directly against tuned 
+
+SGD+STE and Adam+STE (β = 0 .9) baselines. For Q-MINO, we use m = 4, drift coefficient λ = 0 .05, and alignment hyperparameter ρ = 0 .15. Table 1: Top-1 Accuracy, CNN on CIFAR-10 
+
+Optimization Algorithm INT8 INT4 INT2 
+
+SGD+STE 80.53% 80.49% 68.76% 
+
+Adam+STE 83.79% 83.32% 76.09% Q-MINO 76.63% 75.06% 74.55% Our baseline optimizers suffer severe accuracy degradation when transitioning from high-bit to extreme ultra-low bit regimes. SGD+STE and Adam+STE drop by 11.77% and 7.70% respectively from INT8 to INT2. In contrast, Q-MINO exhibits quantization resilience, experiencing only a 2.08% total performance drop. Under severe INT2 constraints, Q-MINO achieves 74.55% accuracy, effectively closing the gap with unconstrained heuristics while providing provable subgradient stability and bounded weight drift across non-smooth step boundaries. 
+
+4.4 Ablation Studies and Sensitivity Analysis 
+
+To systematically analyze the structural robustness and hyperparameter sensitivity of the proposed Q-MINO framework, we conduct a multi-dimensional grid search across Rosenbrock and Rastrigin benchmarks. We study Q-MINO hyperparameters governing structural memory capacity and step-size dynamics: bundle maximum size ( m ∈ { 4, 8, 16 , 32 }), Frank-Wolfe step-size decay window ( TF W ∈ { 3, 5, 8, 10 }), regulariza-tion penalty ( λ ∈ { 0.01 , 0.1, 0.5}), and alignment hyperparameter ( ρ ∈ { 0.1, 0.5, 0.9}). Performance is benchmarked using the mean final empirical loss value computed across 100 independent randomized initial trajectories. 
+
+85 Discussion 
+
+Here, we introduced Q-MINO, a temporal bundle method designed to stabilize Quantization-Aware Training (QAT) in lower-bit QAT regimes . By unifying gradient consensus, quantized state-drift regularization, and a warm-started Frank-Wolfe subproblem solver, Q-MINO effectively acts as a steering stabilizer that handles the parameter oscillations and gradient mismatch inherent to QAT optimizers with STE alone. 
+
+5.1 Practical Guidelines & Hyperparameter Sensitivity 
+
+Our empirical evaluations on synthetic optimization landscapes and vision tasks highlight key operational guidelines for deploying Q-MINO: • Bundle Horizon ( m): Setting the bundle history size to m ∈ [4 , 8] provides sufficient spatial-temporal coverage to smooth subgradient trajectories without incurring excessive matrix-vector multiplication overhead in the subproblem. • Drift Regularization ( λ): A mild penalty coefficient ( λ ≈ 0.05) effectively penalizes large param-eter jump discontinuities across quantization bin boundaries without restricting the latent weight updates required for escaping local minima. • Frank-Wolfe Computational Efficiency ( TFW ): Because the Frank-Wolfe sub-routine is warm-started using the fallback vertex eM , running as few as TFW = {3, 5} Frank-Wolfe iterations appears sufficient to reach a stable descent direction dk.
+
+5.2 Limitations & Algorithmic Overhead 
+
+It should be noted that Q-MINO introduces specific computational and memory trade-offs: • Memory Overhead: Storing Gk, z k ∈ Rd×M requires caching 2 M auxiliary (parameter) vectors, which is likely to be computationally expensive at large-scale, as this memory footprint grows linearly with parameter size (e.g., when scaled to billion-parameter models). • Per-Step Latency: Deploying the Frank-Wolfe sub-routine at every iteration introduces a small computational overhead per parameter update step not required in our baselines (e.g., SGD+STE ,
+
+Adam+STE ). 
+
+5.3 Future Work 
+
+Future directions include developing block-wise or layer-group bundle updates to lower the memory profile for ultra-large architectures (e.g., LLM fine-tuning), developing dynamical schedules for drift coefficient λk
+
+based on local subgradient variance across training epochs, and extending Q-MINO to extreme 1-bit/binary neural networks (BNNs). 
+
+AI Use Statement 
+
+In this work, we used generative AI tools for helping to formulate mathematical claims, assisting in the writing of proofs, and providing first drafts of code for numerical experiments. We have not used generative AI tools with respect to the any of the other listed required disclosures, some of which (e.g., generating synthetic data sets) are not applicable. Additionally, we used generative AI tools for brainstorming, sourcing/searching for information, identifying relevant literature, and formatting references. We have reviewed all AI-assisted work, i.e., all text and results are written by the authors, whereby AI tools were used in a supplementary fashion, with their outputs vetted by the authors. The authors take responsibility for all content contained here. 9References 
+
+Colby Banbury, Chuteng Zhou, Igor Fedorov, Ramon Matas, Urmish Thakker, Dibakar Gope, Vijay Janapa Reddi, Matthew Mattina, and Paul Whatmough. Micronets: Neural network architectures for deploying tinyml applications on commodity microcontrollers. In Proceedings of Machine Learning and Systems ,volume 3, 2021. Yoshua Bengio, Nicholas Leonard, and Aaron Courville. Estimating or propagating gradients through stochastic neurons for conditional computation. arXiv 1308.3432, 2013. Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal, Arvind Nee-lakantan, Pranav Shyam, Girish Sastry, Amanda Askell, Sandhini Agarwal, Ariel Herbert-Voss, Gretchen Krueger, Tom Henighan, Rewon Child, Aditya Ramesh, Daniel Ziegler, Jeffrey Wu, Clemens Winter, Chris Hesse, Mark Chen, Eric Sigler, Mateusz Litwin, Scott Gray, Benjamin Chess, Jack Clark, Christo-pher Berner, Sam McCandlish, Alec Radford, Ilya Sutskever, and Dario Amodei. Language models are few-shot learners. In Advances in Neural Information Processing Systems , volume 33, 2020. Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Re. Flashattention: Fast and memory-efficient exact attention with io-awareness. In Advances in Neural Information Processing Systems , volume 35, 2022. Marguerite Frank and Philip Wolfe. An algorithm for quadratic programming. Naval Research Logistics Quarterly , 3(1-2):95–110, 1956. Amir Gholami, Sehoon Kim, Zhen Dong, Zhewei Yao, Michael W. Mahoney, and Kurt Keutzer. A survey of quantization methods for efficient neural network inference. arXiv 2103.13630, 2021. Jahid Hasan. Optimizing large language models through quantization: A comparative analysis of ptq and qat techniques. arXiv 2411.06084, 2024. Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B. Brown, Benjamin Chess, Rewon Child, Scott Gray, Alec Radford, Jeffrey Wu, and Dario Amodei. Scaling laws for neural language models. arXiv 2001.08361, 2020. Diederik P. Kingma and Jimmy Ba. Adam: A method for stochastic optimization. In International Confer-ence on Learning Representations (ICLR) , 2015. Jung Hyun Lee, Seungjae Shin, Vinnam Kim, Jaeseong You, and An Chen. Unifying block-wise ptq and distillation-based qat for progressive quantization toward 2-bit instruction-tuned llms. arXiv 2506.09104, 2025. Vladimir Malinovskii, Denis Mazur, Ivan Ilin, Denis Kuznedelev, Konstantin Burlachenko, Kai Yi, Dan Al-istarh, and Peter Richtarik. Pv-tuning: Beyond straight-through estimation for extreme llm compression. arXiv 2405.14852, 2024. Markus Nagel, Marios Fournarakis, Rana Ali Amjad, Yelysei Bondarenko, Mart van Baalen, and Tijmen Blankevoort. A white paper on neural network quantization. arXiv 2106.08295, 2021. Markus Nagel, Marios Fournarakis, Yelysei Bondarenko, and Tijmen Blankevoort. Overcoming oscillations in quantization-aware training. arXiv 2203.11086, 2022. Reiner Pope, Sholto Douglas, Aakanksha Chowdhery, Jacob Devlin, James Bradbury, Jonathan Heek, Kefan Xiao, Shivani Agrawal, and Jeff Dean. Efficiently scaling transformer inference. In Proceedings of Machine Learning and Systems , volume 5, 2023. Emma Strubell, Ananya Ganesh, and Andrew McCallum. Energy and policy considerations for deep learning in nlp. arXiv 1906.02243, 2019. 10 A Proofs of Theoretical/Convergence Results 
+
+Proof. Lemma 2 (Subgradient Tracking & Quantized Drift Bound): Recall ¯ gk = β¯gk−1 + (1 − β)ˆ gk
+
+(step 6 in Algorithm 1) with EMA coefficient β ∈ (0 , 1). Likewise, ˆ gk = STEGrad( xk, ξ k) for the FP32 parameter iterate xk and mini-batch ξk (step 5 in Algorithm 1). Note the following decomposition of ˆ gk,ˆgk(xk) = ∇f (xk) + ek(xk) + ξk,
+
+where ∇f (xk) is the true smooth gradient, ek(xk) is the deterministic quantization mismatch/bias bounded by ∥ek(xk)∥ ≤ δ, and ξk is the zero-mean stochastic sampling noise satisfying E[ξk | xk] = 0 and E[∥ξk∥2 |
+
+xk] ≤ σ2.Unrolling ¯ gk over the optimization history yields the weighted linear combination: ¯gk = (1 − β)
+
+> k
+
+∑
+
+> i=0
+
+βk−i∇f (xi) + (1 − β)
+
+> k
+
+∑
+
+> i=0
+
+βk−iei(xi) + (1 − β)
+
+> k
+
+∑
+
+> i=0
+
+βk−iξi.
+
+With the geometric identity (1 −β) ∑ki=0 βk−i = 1 −βk+1 and assuming a steady-state regime where the initial transient bias vanishes for sufficiently large k (k → ∞ , hence βk+1 → 0), we have (1 − β) ∑ki=0 βk−i = 1. Subtracting ∇f (xk) from both sides isolates the tracking error into three explicit vectors: ¯gk − ∇ f (xk) = (1 − β)
+
+> k
+
+∑
+
+> i=0
+
+βk−i(∇f (xi) − ∇ f (xk))︸ ︷︷ ︸
+
+> Ak
+
++ (1 − β)
+
+> k
+
+∑
+
+> i=0
+
+βk−iei(xi)
+
+︸ ︷︷ ︸
+
+> Bk
+
++ (1 − β)
+
+> k
+
+∑
+
+> i=0
+
+βk−iξi
+
+︸ ︷︷ ︸
+
+> Ck
+
+.
+
+Thus, ∥¯gk − ∇ f (xk)∥ ≤ ∥ Ak∥ + ∥Bk∥ + ∥Ck∥. Taking the conditional expectation of the squared norm, the zero-mean property and conditional independence of the mini-batch sampling noise ( E[ξi | xi] = 0) ensure that all cross-terms between Ck and the deterministic historical paths Ak and Bk vanish identically in expectation ( E[⟨Ak, C k⟩] = 0 and E[⟨Bk, C k⟩] = 0). Thus, we obtain 
+
+E [∥¯gk − ∇ f (xk)∥2 | xk
+
+] = E [∥Ak + Bk∥2 | xk
+
+] + E [∥Ck∥2 | xk
+
+] .
+
+We evaluate each term individually. Expanding the expected squared norm of the linear combination of independent noise vectors and evaluating the geometric series: 
+
+E [∥Ck∥2 | xk
+
+] = (1 − β)2
+
+> k
+
+∑
+
+> i=0
+
+β2( k−i)E [∥ξi∥2 | xi
+
+] ≤ (1 − β)2
+
+( 1 − β2( k+1) 
+
+1 − β2
+
+)
+
+σ2 ≤ 1 − β
+
+1 + β σ2 ≤ (1 − β)σ2.
+
+Applying Young’s inequality ∥Ak + Bk∥2 ≤ 2∥Bk∥2 + 2 ∥Ak∥2 separates the quantization bias from the parameter drift. For the quantization bias Bk, setting wi = (1 − β)βk−i (where ∑ki=0 wi ≤ 1) and applying Jensen’s inequality for convex quadratic norms along with the uniform bound ∥ei(xi)∥ ≤ δ:
+
+∥Bk∥2 =
+
+∥∥∥∥∥
+
+> k
+
+∑
+
+> i=0
+
+wiei(xi)
+
+∥∥∥∥∥
+
+> 2
+
+≤
+
+( k∑
+
+> i=0
+
+wi
+
+) k∑
+
+> i=0
+
+wi∥ei(xi)∥2 ≤ δ2
+
+> k
+
+∑
+
+> i=0
+
+wi ≤ δ2.
+
+For the parameter trajectory drift Ak, applying Jensen’s inequality and the L-smoothness condition 
+
+∥∇ f (xi) − ∇ f (xk)∥ ≤ L∥xk − xi∥:
+
+∥Ak∥2 ≤ (1 − β)
+
+> k
+
+∑
+
+> i=0
+
+βk−i∥∇ f (xi) − ∇ f (xk)∥2 ≤ L2(1 − β)
+
+> k
+
+∑
+
+> i=0
+
+βk−i∥xk − xi∥2.
+
+Partitioning the historical sum into indices within the active memory window Bk (k − m ≤ i ≤ k) and the historical tail ( i < k − m), and assuming bounded iterate domain diameter sup k ∥xk∥ ≤ D:(1 − β) ∑
+
+> i<k −m
+
+βk−i∥xk − xi∥2 ≤ 4D2(1 − β) ∑
+
+> i<k −m
+
+βk−i = 4 D2βm+1 = O(βm).
+
+11 Combining the variance bound, the quantization bias floor, and the active bundle drift yields 
+
+E [∥¯gk − ∇ f (xk)∥2 | xk
+
+] ≤ (1 − β)σ2 + 2 δ2 + O
+
+(
+
+L2 ∑
+
+> i∈B k
+
+∥xk − xi∥2
+
+)
+
+.
+
+Proof. Lemma 3 (Inner Loop Feasibility): Q-MINO is constructed to ensure that eM is always strictly feasible in Dk whenever ρ ≤ 1, thus ensuring that Dk̸ = ∅ in the Frank-Wolfe sub-routine. Recall the definition of the inner loop search space at iteration k (step 17 in Algorithm 1), 
+
+Dk ≜ {α ∈ ∆M −1 ∣∣ α⊤Hkα ≥ ρ∥¯gk∥2} ,
+
+where ∆ M −1 =
+
+{
+
+α ∈ RM
+
+∣∣∣ ∑Mi=1 αi = 1 , α i ≥ 0
+
+}
+
+is the standard probability simplex, Hk = V ⊤ 
+
+> k
+
+Vk ∈ RM ×M
+
+is the Gram matrix of candidate direction vectors Vk = [ v1, . . . , v M ], and ρ ∈ (0 , 1] is the alignment parameter. To establish that Dk is non-empty, we construct an explicit feasible point α = eM = (0 , . . . , 0, 1) ⊤ ∈ RM .The vector eM has non-negative components ( eM )i = 0 ≥ 0 for i < M and ( eM )M = 1 ≥ 0, and satisfies 
+
+∑Mi=1 (eM )i = 1. Thus, eM ∈ ∆M −1 (i.e., eM is always a simplex element). Evaluating the linear alignment form at α = eM gives 
+
+e⊤ 
+
+> M
+
+HkeM = ( Hk)M M .
+
+By construction of Hk in Q-MINO, the M -th diagonal entry satisfies ( Hk)M M = ∥¯gk∥2 (since Hk is a Gram matrix). Since ρ ∈ (0 , 1] and ∥¯gk∥2 ≥ 0, we have 
+
+e⊤ 
+
+> M
+
+HkeM = ∥¯gk∥2 ≥ ρ∥¯gk∥2,
+
+so eM ∈ D k and Dk is non-empty ∀k ≥ 1. 
+
+Proof. Lemma 4 (Sufficient Decrease / Descent Lemma): Since f is L-smooth, the parameter update 
+
+xk+1 = xk − ηkdk satisfies 
+
+f (xk+1 ) ≤ f (xk) − ηk⟨∇ f (xk), d k⟩ + Lη 2
+
+> k
+
+2 ∥dk∥2.
+
+To relate the inner product ⟨∇ f (xk), d k⟩ to the EMA gradient estimator ¯ gk, we decompose the true gradient as ∇f (xk) = ¯ gk − etrack  
+
+> k
+
+, where etrack  
+
+> k
+
+≜ ¯gk − ∇ f (xk) is the tracking error: 
+
+⟨∇ f (xk), d k⟩ = ⟨¯gk, d k⟩ − ⟨ etrack  
+
+> k
+
+, d k⟩.
+
+By Lemma 3 and the construction of the Frank-Wolfe sub-routine, the optimal weight vector α∗ 
+
+> k
+
+∈ D k defines a direction dk = Gkα∗ 
+
+> k
+
+satisfying 
+
+⟨¯gk, d k⟩ ≥ ρ∥¯gk∥2,
+
+∥dk∥2 ≤ ∥ GkeM ∥2 = ∥¯gk∥2.
+
+Applying Cauchy–Schwarz and Young’s inequalities to the tracking error cross-term with (alignment) pa-rameter ρ > 0, we obtain 
+
+|⟨ etrack  
+
+> k
+
+, d k⟩| ≤ ∥ etrack  
+
+> k
+
+∥∥ dk∥ ≤ 12ρ ∥etrack  
+
+> k
+
+∥2 + ρ
+
+2 ∥dk∥2.
+
+Substituting the alignment bound and error bound into the inner product decomposition yields 
+
+⟨∇ f (xk), d k⟩ ≥ ρ∥¯gk∥2 − ρ
+
+2 ∥dk∥2 − 12ρ ∥¯gk − ∇ f (xk)∥2.
+
+12 Using the norm bound ∥dk∥2 ≤ ∥ ¯gk∥2, we simplify the first two terms: 
+
+ρ∥¯gk∥2 − ρ
+
+2 ∥dk∥2 ≥ ρ∥dk∥2 − ρ
+
+2 ∥dk∥2 = ρ
+
+2 ∥dk∥2.
+
+Inserting this bound back into the L-smoothness descent inequality gives: 
+
+f (xk+1 ) ≤ f (xk) − ηk
+
+( ρ
+
+2 ∥dk∥2 − 12ρ ∥¯gk − ∇ f (xk)∥2
+
+)
+
++ Lη 2
+
+> k
+
+2 ∥dk∥2.
+
+Regrouping terms by ∥dk∥2:
+
+f (xk+1 ) ≤ f (xk) − ηk
+
+( ρ
+
+2 − Lη k
+
+2
+
+)
+
+∥dk∥2 + ηk
+
+2ρ ∥¯gk − ∇ f (xk)∥2.
+
+We need ρ 
+
+> 2
+
+− Lη k 
+
+> 2
+
+> 0 for descent, which implies ηk ≤ ρL , but we choose ηk ≤ ρ 
+
+> 2L
+
+, which ensures ρ 
+
+> 2
+
+− Lη k 
+
+> 2
+
+≥ ρ 
+
+> 4
+
+.With ηk ≤ ρ 
+
+> 2L
+
+, we have 
+
+f (xk+1 ) ≤ f (xk) − ηkρ
+
+4 ∥dk∥2 + ηk
+
+2ρ ∥¯gk − ∇ f (xk)∥2.
+
+Taking expectation on xk yields 
+
+E[f (xk+1 ) | xk] ≤ f (xk) − ηkρ
+
+4 E[∥dk∥2 | xk] + ηk
+
+2ρ E [∥¯gk − ∇ f (xk)∥2 | xk
+
+] .
+
+But recall that we derived in Lemma 2 that 
+
+E [∥¯gk − ∇ f (xk)∥2 | xk
+
+] ≤ (1 − β)σ2 + 2 δ2 + O
+
+(
+
+L2 ∑
+
+> i∈B k
+
+∥xk − xi∥2
+
+)
+
+.
+
+Thus, 
+
+E[f (xk+1 ) | xk] ≤ f (xk) − ηkρ
+
+4 E[∥dk∥2 | xk] + ηk
+
+2ρ [(1 − β)σ2 + 2 δ2 + O
+
+(
+
+L2 ∑
+
+> i∈B k
+
+∥xk − xi∥2
+
+)
+
+].
+
+We wish to find a descent lemma for the composite surrogate objective function Φ( x) = f (x) + r(x). By optimality of the proximal sub-problem, there exists a subgradient sk+1 ∈ ∂r (xk+1 ) such that 
+
+sk+1 = 1
+
+ηk
+
+(xk − ηkdk − xk+1 ) = ⇒ xk − xk+1 = ηk(dk + sk+1 ).
+
+Since r(x) is a convex regularizer, we have 
+
+r(xk+1 ) ≤ r(xk) − ⟨ sk+1 , x k − xk+1 ⟩,
+
+which implies r(xk+1 ) − r(xk) ≤ −⟨ sk+1 , x k − xk+1 ⟩. Define the generalized composite update step ∆ k ≜ 
+
+> 1
+> ηk
+
+(xk − xk+1 ) = dk + sk+1 . By decomposition of the composite objective, Φ( xk+1 ) − Φ( xk) = [ f (xk+1 ) − f (xk)] + [ r(xk+1 ) − r(xk)] .
+
+We already derived f (xk+1 ) − f (xk) ≤ − ηk⟨∇ f (xk), ∆k⟩ + Lη 2 
+
+> k
+> 2
+
+∥∆k∥2, so we then have Φ( xk+1 ) − Φ( xk) ≤ − ηk⟨∇ f (xk) + sk+1 , ∆k⟩ + Lη 2
+
+> k
+
+2 ∥∆k∥2,
+
+Φ( xk+1 ) − Φ( xk) ≤ − ηk
+
+(
+
+1 − Lη k
+
+2
+
+)
+
+∥∆k∥2 − ηk⟨∇ f (xk) − dk, ∆k⟩.
+
+To incorporate the EMA gradient estimator ¯ gk, we decompose ∇f (xk) − dk = (¯ gk − dk) + ( ∇f (xk) − ¯gk): 
+
+⟨∇ f (xk) − dk, ∆k⟩ = ⟨¯gk − dk, ∆k⟩ − ⟨ ¯gk − ∇ f (xk), ∆k⟩.
+
+13 Applying Cauchy–Schwarz and Young’s inequalities ( ab ≤ a2 + 14 b2) to both cross-terms with parameter 14 :
+
+|⟨ ¯gk − dk, ∆k⟩| ≤ ∥ ¯gk − dk∥∥ ∆k∥ ≤ ∥ ¯gk − dk∥2 + 14 ∥∆k∥2,
+
+|⟨ ¯gk − ∇ f (xk), ∆k⟩| ≤ ∥ ¯gk − ∇ f (xk)∥∥ ∆k∥ ≤ ∥ ¯gk − ∇ f (xk)∥2 + 14 ∥∆k∥2.
+
+Substituting these bounds back into the composite decrease inequality gives: Φ( xk+1 ) − Φ( xk) ≤ − ηk
+
+(
+
+1 − Lη k
+
+2 − 12
+
+)
+
+∥∆k∥2 + ηk∥¯gk − dk∥2 + ηk∥¯gk − ∇ f (xk)∥2.
+
+Since ηk ≤ ρ 
+
+> 2L
+
+, we have Lη k 
+
+> 2
+
+≤ ρ 
+
+> 4
+
+. Thus, taking expectation yields 
+
+E[Φ( xk+1 ) | xk] ≤ Φ( xk) − ηkρ
+
+4 E [∥∆k∥2 | xk
+
+] + ηk∥¯gk − dk∥2 + ηkE [∥¯gk − ∇ f (xk)∥2 | xk
+
+] .
+
+But recall from Lemma 2 that we derived E [∥¯gk − ∇ f (xk)∥2 | xk
+
+] ≤ (1 − β)σ2 + 2δ2 +
+
+O (L2 ∑ 
+
+> i∈B k
+
+∥xk − xi∥2), which yields 
+
+E[Φ( xk+1 ) | xk] ≤ Φ( xk)− ηk
+
+4 E [∥∆k∥2 | xk
+
+]+ηk∥¯gk −dk∥2 +ηk(1 −β)σ2 +2 ηkδ2 +O
+
+(
+
+ηkL2 ∑
+
+> i∈B k
+
+∥xk − xi∥2
+
+)
+
+.
+
+Proof. Theorem 5 (Asymptotic Convergence and Neighborhood Attainment under KL Prop-erty): Define the candidate Lyapunov functional 
+
+Lk ≜ Φ( xk) + μkVk,
+
+where Vk ≜ ∥¯gk − dk∥2 + ∥¯gk − ∇ f (xk)∥2 represents the realized variance and search direction tracking residual at step k, and μk ≜ 2ηk 
+
+> β
+
+is the time-varying stabilization weight. By Lemma 4, for ηk ≤ ρ 
+
+> 2L
+
+, the composite expected step satisfies: 
+
+E[Φ( xk+1 ) | F k] ≤ Φ( xk) − ρ
+
+4ηk
+
+E [∥xk+1 − xk∥2 | F k
+
+] + ηkVk + ηkδ2.
+
+By the EMA error dynamics of Q-MINO, the variance tracking term obeys E[Vk+1 | F k] ≤ (1 − β)Vk + C1η2
+
+> k
+
+,where β ∈ [0 , 1). Taking conditional expectations of Lk+1 , since ηk+1 ≤ ηk, we obtain 
+
+E[Lk+1 | F k] ≤ Φ( xk) − ρ
+
+4ηk
+
+E [∥xk+1 − xk∥2 | F k
+
+] + ηkVk + ηkδ2 + μk(1 − β)Vk + C1μkη2
+
+> k
+
+.
+
+Selecting the Lyapunov tracking coefficient μk ≜ 2ηk 
+
+> β
+
+, the historical momentum residual terms expand algebraically via μk(1 − β)Vk − μkVk = −βμ kVk = −2ηkVk. Grouping and canceling like terms yields the Lyapunov descent inequality 
+
+E[Lk+1 | F k] ≤ L k − ρ
+
+4ηk
+
+E [∥xk+1 − xk∥2 | F k
+
+] − ηkVk + ηkδ2 + C2η3
+
+> k
+
+, (22) where C2 ≜ 2C1 
+
+> β
+
+. Then we can obtain 
+
+ρ
+
+4ηk
+
+E [∥xk+1 − xk∥2 | F k
+
+] ≤ L k − E[Lk+1 | F k] − ηkVk + ηkδ2 + C2η3
+
+> k
+
+,
+
+E [∥xk+1 − xk∥2 | F k
+
+] ≤ 4ηk
+
+ρ
+
+(
+
+Lk − E[Lk+1 | F k]
+
+)
+
++ 4η2
+
+> k
+
+δ2
+
+ρ + 4C2η4
+
+> k
+
+ρ .
+
+14 Since η0 ≥ ηk for all k, we obtain 
+
+E [∥xk+1 − xk∥2 | F k
+
+] ≤ 4η0
+
+ρ (Lk − E[Lk+1 | F k]
+
+)
+
++ 4δ2
+
+ρ η2 
+
+> k
+
++ 4C2
+
+ρ η4
+
+> k
+
+.
+
+Applying the law of total expectation ( E[E[· | F k]] = E[·]) and summing the inequality from k = 0 up to 
+
+k = K yields 
+
+> K
+
+∑
+
+> k=0
+
+E[∥xk+1 − xk∥2] ≤ 4η0
+
+ρ
+
+> K
+
+∑
+
+> k=0
+
+(Lk − E[Lk+1 |F k]) + 4δ2
+
+ρ
+
+> K
+
+∑
+
+> k=0
+
+η2 
+
+> k
+
++ 4C2
+
+ρ
+
+> K
+
+∑
+
+> k=0
+
+η4
+
+> k
+
+.
+
+Note that ∑Kk=0 (Lk − E[Lk+1 |F k]) = ∑Kk=0 (E[Lk] − E[Lk+1 ]) by applying the law of total expectation and therefore this is a telescoping series, which implies ∑Kk=0 (Lk − E[Lk+1 |F k]) = L0 − E[LK+1 ] ≤ L 0 − Φ∗.Thus, we have K∑
+
+> k=0
+
+E[∥xk+1 − xk∥2] ≤ 4η0(L0 − Φ∗)
+
+ρ + 4δ2
+
+ρ
+
+> K
+
+∑
+
+> k=0
+
+η2 
+
+> k
+
++ 4C2
+
+ρ
+
+> K
+
+∑
+
+> k=0
+
+η4
+
+> k
+
+.
+
+Taking lim K→∞ yields 
+
+> ∞
+
+∑
+
+> k=0
+
+E[∥xk+1 − xk∥2] ≤ 4η0(L0 − Φ∗)
+
+ρ + 4δ2
+
+ρ
+
+> ∞
+
+∑
+
+> k=0
+
+η2 
+
+> k
+
++ 4C2
+
+ρ
+
+> ∞
+
+∑
+
+> k=0
+
+η4
+
+> k
+
+.
+
+Since ∑∞ 
+
+> k=0
+
+η2 
+
+> k
+
+< ∞, and since ∑ η2 
+
+> k
+
+converges, ηk → 0, which structurally guarantees that the higher-order sequence ∑∞ 
+
+> k=0
+
+η4 
+
+> k
+
+must also converge. Because every individual component on the right-hand side is strictly bounded, the infinite sum converges to a finite real value, and therefore 
+
+> ∞
+
+∑
+
+> k=0
+
+E[∥xk+1 − xk∥2] < ∞.
+
+We last show asymptotic neighborhood convergence. By definition of the proximal update step xk+1 =prox ηk r (xk −ηkdk), the first-order optimality condition states that there exists a subgradient vk+1 ∈ ∂r (xk+1 )such that 0 = vk+1 + dk + 1
+
+ηk
+
+(xk+1 − xk).
+
+To bound the subdifferential of the full composite objective Φ( xk+1 ), define wk+1 ≜ ∇f (xk+1 ) + vk+1 ∈
+
+∂Φ( xk+1 ). Substituting vk+1 gives 
+
+wk+1 = ∇f (xk+1 ) − dk − 1
+
+ηk
+
+(xk+1 − xk),
+
+which implies 
+
+∥wk+1 ∥ ≤ ∥∇ f (xk+1 ) − dk∥ + 1
+
+ηk
+
+∥xk+1 − xk∥.
+
+Adding and subtracting ∇f (xk) and ¯ gk, along with taking norms and applying the triangle inequality together with L-smoothness of f yields 
+
+∥wk+1 ∥ ≤ 
+
+(
+
+L + 1
+
+ηk
+
+)
+
+∥xk+1 − xk∥ + ∥¯gk − ∇ f (xk)∥ + ∥¯gk − dk∥.
+
+Applying the Young-type inequality ( a + b + c)2 ≤ 3a2 + 3 b2 + 3 c2 yields 
+
+∥wk+1 ∥2 ≤ 3
+
+(
+
+L + 1
+
+ηk
+
+)2
+
+∥xk+1 − xk∥2 + 3 ∥¯gk − ∇ f (xk)∥2 + 3 ∥¯gk − dk∥2.
+
+15 But recall Vk ≜ ∥¯gk − dk∥2 + ∥¯gk − ∇ f (xk)∥2, so we can simplify to 
+
+∥wk+1 ∥2 ≤ 3
+
+(
+
+L + 1
+
+ηk
+
+)2
+
+∥xk+1 − xk∥2 + 3 Vk.
+
+Taking expectation on Fk yields 
+
+E [∥wk+1 ∥2 | F k
+
+] ≤ 3
+
+(
+
+L + 1
+
+ηk
+
+)2
+
+E [∥xk+1 − xk∥2 | F k
+
+] + 3 Vk.
+
+Note L + 1 
+
+> ηk
+
+= Lη k +1  
+
+> ηk
+
+≤ Lη 0+1  
+
+> ηk
+
+since ηk ≤ η0. Let CL ≜ Lη 0 + 1, so we obtain 
+
+E [∥wk+1 ∥2 | F k
+
+] ≤ 3C2
+
+> L
+
+η2
+
+> k
+
+E [∥xk+1 − xk∥2 | F k
+
+] + 3 Vk.
+
+But recall from our learning rate dependent bound that E [∥xk+1 − xk∥2 | F k
+
+] ≤ 4ηk 
+
+> ρ
+
+(Lk − E[Lk+1 | F k]
+
+)
+
++ 
+
+> 4δ2
+> ρ
+
+η2 
+
+> k
+
++ 4C2 
+
+> ρ
+
+η4
+
+> k
+
+. Substituting this directly yields 
+
+E [∥wk+1 ∥2 | F k
+
+] ≤ 12 C2
+
+> L
+
+ρη k
+
+(
+
+Lk − E[Lk+1 | F k]
+
+)
+
++ 12 C2
+
+> L
+
+δ2
+
+ρ + 12 C2
+
+> L
+
+C2η2
+
+> k
+
+ρ + 3 Vk,ηkE [∥wk+1 ∥2 | F k
+
+] ≤ 12 C2
+
+> L
+
+ρ
+
+(
+
+Lk − E[Lk+1 | F k]
+
+)
+
++ 12 C2
+
+> L
+
+δ2
+
+ρ ηk + 12 C2
+
+> L
+
+C2
+
+ρ η3 
+
+> k
+
++ 3 ηkVk.
+
+Taking unconditioned total expectations E[·] on both sides and via the law of total expectation we obtain 
+
+ηkE [∥wk+1 ∥2] ≤ 12 C2
+
+> L
+
+ρ (E[Lk] − E[Lk+1 ]) + 12 C2
+
+> L
+
+δ2
+
+ρ ηk + 12 C2
+
+> L
+
+C2
+
+ρ η3 
+
+> k
+
++ 3 ηkE[Vk].
+
+Taking summation from k = 0 to T − 1 and again leveraging that ∑T −1 
+
+> k=0
+
+(E[Lk] − E[Lk+1 ]) is a telescoping series, we get  
+
+> T−1
+
+∑
+
+> k=0
+
+ηkE [∥wk+1 ∥2] ≤ 12 C2
+
+> L
+
+ρ (E[L0] − E[LT ]) + 12 C2
+
+> L
+
+δ2
+
+ρ 
+
+> T−1
+
+∑
+
+> k=0
+
+ηk + 12 C2
+
+> L
+
+C2
+
+ρ 
+
+> T−1
+
+∑
+
+> k=0
+
+η3 
+
+> k
+
++ 3  
+
+> T−1
+
+∑
+
+> k=0
+
+ηkE[Vk].
+
+We already established E[LT ] ≥ Φ∗ > −∞ , so E[L0] − E[LT ] ≤ L 0 − Φ∗ < ∞. Moreover, we can use our Lyapunov descent inequality and the fact that ∑∞ 
+
+> k=0
+
+η2 
+
+> k
+
+< ∞ implies the cubic sum is finite, i.e., 
+
+∑∞ 
+
+> k=0
+
+η3 
+
+> k
+
+< ∞. Let M ≜ 12 C2 
+
+> L
+> ρ
+
+(L0 − Φ∗) + 12 C2
+
+> LC2
+> ρ
+
+∑∞ 
+
+> k=0
+
+η3 
+
+> k
+
++ 3 ∑∞ 
+
+> k=0
+
+ηkE[Vk] < ∞. Thus, we have  
+
+> T−1
+
+∑
+
+> k=0
+
+ηkE [∥wk+1 ∥2] ≤ M + 12 C2
+
+> L
+
+δ2
+
+ρ 
+
+> T−1
+
+∑
+
+> k=0
+
+ηk.
+
+Divide through by ST ≜ ∑T −1 
+
+> k=0
+
+ηk. Our learning rate condition requires ∑∞ 
+
+> k=0
+
+ηk = ∞, ST → ∞ as T → ∞ ,
+
+∑T −1 
+
+> k=0
+
+ηkE [∥wk+1 ∥2]∑T −1 
+
+> k=0
+
+ηk
+
+≤ MST
+
++ 12 C2
+
+> L
+
+δ2
+
+ρ .
+
+As T → ∞ , the term MST → 0, which yields lim sup  
+
+> T→∞
+
+∑T −1 
+
+> k=0
+
+ηkE [∥wk+1 ∥2]∑T −1 
+
+> k=0
+
+ηk
+
+≤ 12 C2
+
+> L
+
+δ2
+
+ρ .
+
+By properties of weighted averages, this directly implies lim inf  
+
+> k→∞
+
+E [dist(0 , ∂ Φ( xk)) 2] ≤ 12 C2
+
+> L
+
+δ2
+
+ρ
+
+16 We formalize our target stationary structural neighborhood as: 
+
+Uδ ≜ {x ∈ dom Φ | dist(0 , ∂ Φ( x)) ≤ Cδ δ} ,
+
+where Cδ ≜
+
+√ 12 C2 
+
+> L
+> ρ
+
+. Because Φ is proper, lower-semicontinuous, and bounded from below, the restriction of our iterates to the bounded sub-level set Ω ≜ {x ∈ Rd | L k ≤ L 0} ensures that Ω is a compact domain. By the KL property, there exists a concave, continuously differentiable desingularizing function ϕ(s) = c · s1−θ
+
+for an exponent θ ∈ [0 , 1) such that for all active parameter iterations remaining outside the neighborhood profile ( xk ∈ Ω \ U δ ), the local geometry satisfies the functional gradient bounding inequality 
+
+ϕ′(Φ( xk) − Φ∗) · dist(0 , ∂ Φ( xk)) ≥ 1.
+
+Equivalently, this relation states that the subdifferential magnitude outside our neighborhood is uniformly lower bounded by the inverse slope of the desingularizing metric dist(0 , ∂ Φ( xk)) ≥ 1
+
+ϕ′(Φ( xk) − Φ∗) .
+
+Since Lk is a non-negative quasi-supermartingale (up to the summable noise η2
+
+> k
+
+δ2 + C2η3
+
+> k
+
+), application of the Robbins–Siegmund theorem guarantees that the sequence {xk} remains within the compact sub-level set Ω almost surely, and the functional sequence Lk converges to a finite random variable. Recall that the total kinetic energy of the optimizer is bounded, i.e., ∑∞ 
+
+> k=0
+
+E[∥xk+1 − xk∥2] < ∞, which strictly dictates that lim k→∞ E[∥xk+1 − xk∥2] = 0. Because the distance function dist( ·, Uδ ) is 1-Lipschitz continuous, the step-to-step distance variation satisfies 
+
+|dist( xk+1 , Uδ ) − dist( xk, Uδ )| ≤ ∥ xk+1 − xk∥.
+
+Taking expectations reveals that the variation between consecutive distance profiles vanishes asymptotically (lim k→∞ E[| dist( xk+1 , Uδ ) − dist( xk, Uδ )|] = 0). Combining this vanishing variation property with our core subsequence tracking condition, lim inf k→∞ E [dist(0 , ∂ Φ( xk)) 2] ≤ C2 
+
+> δ
+
+δ2,lim  
+
+> k→∞
+
+E [dist( xk, Uδ )] = 0 .
+
+17

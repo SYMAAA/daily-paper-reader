@@ -1,0 +1,454 @@
+Title: Precision As You Need: Stochastic Computing Is a Dense Adaptive Quantizer
+
+URL Source: https://arxiv.org/pdf/2609.32922v1
+
+Published Time: Tue, 29 Sep 2026 01:27:04 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+# Precision As You Need: Stochastic Computing Is a Dense Adaptive Quantizer 
+
+Haoran Jin *, †, Kangqi Zhang *, Jirong Yang , Barry Lyu , Qiuyi Ding , Ruijie Gao ,
+
+Nathan Bleier 
+
+Department of Electrical Engineering and Computer Science, University of Michigan 
+
+{allenjin, zhkangqi, yjrcs, barrylyu, dingqy, ruijieg, nbleier}@umich.edu 
+
+## Abstract 
+
+Matrix multiplications dominate the inference cost of modern transformer-based vision models, yet existing efficiency techniques such as post-training quantization and mixed-precision inference are largely limited to the small set of fixed-width formats—INT4, INT8, BF16, and FP16—supported by conventional accelerators. We revisit stochastic computing (SC) as a way to lift this constraint: viewed as a 
+
+dense adaptive quantizer , SC controls precision by bit-stream length L rather than a fixed datapath, while each multiplication reduces to a single AND/XNOR gate. We build a GPU library that emulates SC matrix multiplication at scale, exposes stream lengths as first-class kernel arguments, and evaluates SC end-to-end on image classification, object detection and instance segmentation, class-conditional image generation, and visual world-model planning. On top of this substrate, we develop a dynamic per-row mixed-precision policy that assigns stream length per token or group at matched average budget, requires no retraining, and uses the same SC hardware across schedules. Across tasks, SC remains competitive with fixed-format INT quantization at matched bit budgets, while per-row mixed precision helps maintain accuracy at lower average stream lengths. These results provide software-level feasibility evidence that SC can serve as a dense-precision substrate for fine-grained mixed-precision inference on modern vision transformers. 
+
+## 1 Introduction 
+
+The computational footprint of modern neural networks has grown faster than the efficiency gains provided by conventional hardware scaling. Across vision, language, generation, and world-modeling workloads [Dosovitskiy et al., 2020, Brown et al., 2020, Touvron et al., 2023, Peebles and Xie, 2023, Ha and Schmidhuber, 2018, Hafner et al., 2023], matrix multiplications dominate inference cost, complicating deployment in latency- and energy-constrained settings, including edge devices, real-time control systems, and power-limited datacenters. The dominant response has been low-bit arithmetic that trades efficiency at the cost of accuracy. Post-training quantization (PTQ) maps weights and activations to INT8, INT4, or lower precision, exploiting the empirically observed robustness of trained networks to numerical perturbations [Nagel et al., 2021, Dettmers et al., 2022, Frantar et al., 2023, Xiao et al., 2023]. Mixed-precision methods extend this idea by assigning different bit-widths to different operators, layers, or tensors, thereby recovering accuracy in cases where a uniform low-precision format is too restrictive [Wang et al., 2019, Dong et al., 2019, Rouhani et al., 2023, Chen et al., 2025b]. Conventional mixed precision, however, is constrained by hardware: each supported precision typically requires a distinct datapath or mode, so deployed accelerators expose only a small set of 
+
+> *Equal contribution.
+> †Corresponding author: Haoran Jin ( allenjin@umich.edu ). Preprint. arXiv:2609.32922v1 [cs.AI] 26 Sep 2026
+
+formats, such as INT4, INT8, BF16, and FP16. This sparse, hardware-defined precision ladder limits the granularity of precision, thereby constraining the effectiveness of mixed-precision inference. Stochastic computing (SC) provides a fundamentally different precision substrate: precision is determined by execution time rather than by a fixed hardware format. In SC, a real value is represented by the ratio of 1s in a stochastic bit stream [Gaines, 1969, Alaghi and Hayes, 2013]. Multiplication of two such streams reduces to a single bitwise AND gate in the unipolar case or XNOR gate in the bipolar case. SC has three properties well-suited to neural-network inference: (i) Area and energy efficiency. Amulti-bit multiplier is replaced by a single logic gate, enabling substantial reductions in area and energy relative to integer or floating-point MACs [Alaghi and Hayes, 2013, Sim et al., 2017, Wu and San Miguel, 2022a, Guo et al., 2023a, Zhong et al., 2022, Weller et al., 2021] (ii) Dense, hardware-shared precision. SC precision is governed by the bit-stream length L, which can be any positive integer rather than only a conventional word size. The same hardware can compute at different precisions by terminating streams at different lengths, allowing a single accelerator to support a dense set of precision choices and fine-grained mixed-precision schedules. (iii) Inherent error tolerance. 
+
+A bit flip in an SC stream perturbs the decoded value by only 1/L , whereas an error in a high-order bit of an integer or floating-point word can induce a much larger deviation [Alaghi et al., 2018, Qian et al., 2011]. This property is particularly relevant for unreliable computing environments, including space computing. Despite these advantages, prior work on SC for deep learning has remained limited in scope. Most studies evaluate small CNNs or simplified transformer models [Ren et al., 2017, Sim et al., 2017, Wu and San Miguel, 2022a, Guo et al., 2023a]. To our knowledge, no prior work has performed an end-to-end evaluation of SC across modern transformer-based AI workloads or quantitatively demonstrated how its dense precision substrate can be used for fine-grained mixed-precision inference. This work addresses that gap by treating SC as a dense adaptive quantizer . We show that this perspective enables competitive accuracy with substantially reduced compute across four families of modern models. Our contributions are: (i) A scalable GPU library for SC simulation. We present, to our knowledge, the first GPU implementation that can effectively emulate SC matrix multiplication at scale. The library implements bit-stream generation, AND/XNOR-based multiplication, and counter-based decoding as fused Triton kernels, and exposes per-row and per-group bit-stream lengths for algorithmic exploration. (ii) An end-to-end evaluation across vision-centric transformer workloads. We evaluate SC inference on standard vision tasks—classification, detection, and instance segmentation—as well as diffusion-based image generation and learned world-model rollouts. To our knowledge, this is the first end-to-end study showing that an SC-based compute pipeline can preserve task-level performance across various transformer-based vision workloads. (iii) A fine-grained mixed-precision algorithm. We introduce a runtime mixed-precision scheme that assigns a separate bit-stream length to each row (token or group) in every matrix multiplication, guided by lightweight operator-specific saliency metrics. The GPU kernel is available at https://github.com/CrucibleComputingGroup/scmp_ kernels .
+
+## 2 Related Works 
+
+2.1 Stochastic Computing 
+
+Stochastic computing (SC) [Gaines, 1969] encodes real values as the density of 1s in probabilistic bit streams, reducing multi-bit multiplication to a single AND/XNOR gate and realizing addition, division, and common activations with small finite-state machines; classical applications include LDPC decoding and image processing [Alaghi and Hayes, 2013]. For neural networks [Liu et al., 2021], SC-DCNN [Ren et al., 2017] and the SC multiplier of Sim and Lee [Sim et al., 2017] scale SC to medium-sized CNNs while preserving accuracy, and recent hardware substrates such as uSystolic [Wu and San Miguel, 2022a] and Cambricon-U [Guo et al., 2023a] push SC closer to modern accelerator scale. 22.2 Post-training Quantization and Mixed Precision 
+
+Post-training quantization (PTQ) compresses pretrained networks by mapping weights and activations to low-bit formats without retraining [Nagel et al., 2021]. For LLMs, OPTQ [Frantar et al., 2023], LLM.int8() [Dettmers et al., 2022], SmoothQuant [Xiao et al., 2023], and AWQ [Lin et al., 2024] enable low-bit transformer inference by addressing weight quantization and activation outliers. For vision and generative transformers, PTQ4ViT [Yuan et al., 2022], Q-Diffusion [Li et al., 2023a], and Q-DiT [Chen et al., 2025a] adapt PTQ to ViTs, diffusion models, and Diffusion Transformers. Mixed-precision methods further assign different precisions to different layers, operators, or tensors. HAQ [Wang et al., 2019], HAWQ-V3 [Yao et al., 2021], and BRECQ [Li et al., 2021] search for sensitivity-aware bit-width assignments, while MX formats [Rouhani et al., 2023], MPQ-DM [Feng et al., 2025], and MixDiT [Kim et al., 2025a] specialize mixed precision for modern accelerators and generative workloads. 
+
+## 3 Preliminaries and Problem Formulations 
+
+3.1 Stochastic Computing Basics Encoding. Stochastic computing (SC) represents a real value by the probability that each bit of a single-bit binary sequence is 1 [Gaines, 1969, Alaghi and Hayes, 2013]. A unipolar stream encodes 
+
+v ∈ [0 , 1] by a length-L sequence Z = ( z1, . . . , z L) ∈ { 0, 1}L in which each bit is 1 with probability 
+
+v. A bipolar stream encodes v ∈ [−1, 1] with Pr[ zℓ = 1] = ( v + 1) /2. Since neural-network activations and weights are signed, we use bipolar encoding throughout. 
+
+Bitstream generation. Stochastic number generation (SNG) is implemented in hardware as an integer comparator. At each cycle ℓ, a pseudo-random number generator (RNG) draws a uniform integer rℓ from the same b-bit range as the input, and the comparator emits zℓ = 1 if rℓ is below the input value, else zℓ = 0 (Figure 1(a)). For a signed integer ˆx ∈ [−qmax , q max ] with qmax = 2 b−1 − 1
+
+encoding the bipolar value v = ˆ x/q max ∈ [−1, 1] , the input is first offset onto the unsigned RNG range as ˆx + qmax ∈ [0 , 2qmax ] before comparison, which gives Pr[ zℓ = 1] = ( v + 1) /2 as required by the bipolar encoding above. Decoding inverts the encoding: from the count c = P 
+
+> ℓ
+
+zℓ, the unbiased estimate of v is ˜v = (2 c − L)/L .The choice of RNG drives both the convergence of ˜v → v at finite L and the cross-correlation between any two streams produced for the same matrix multiplication; the latter is the principal source of SC error and is addressed by the C-BSG construction we adopt (Appendix A.1).   
+
+> (a) Bitstream generation (b) Bitstream multiplication (c) C-BSG multiplier
+
+Figure 1: Circuit primitives of stochastic computing. (a) A SNG implemented as an integer com-parator: at each cycle the source value is compared against an RNG draw, emitting a single bit. (b) 
+
+Stochastic multiplication via a bitwise gate: the unipolar product is realized by an AND gate whose output bit-probability factors as the product of the input marginals. The red circle denotes early termination. (c) Conditional bitstream generation (C-BSG): the second RNG is gated by the first stream so the conditional distribution of zB matches its marginal, enforcing SCC = 0 and making the bipolar XNOR multiplier exact at finite L.
+
+SC matrix multiplication. SC enters the inference pipeline only at the integer matrix-multiply step. We assume the inputs to a matrix multiplication C = AB ⊤ with A ∈ RN ×D and B ∈ RM ×D
+
+have already been quantized by a standard PTQ pipeline [Nagel et al., 2021, Frantar et al., 2023, Chen et al., 2025a]: per-row symmetric scales sAi = max d |Aid |/q max and sBj = max d |Bjd |/q max 
+
+produce b-bit signed integer matrices ˆA, ˆB with ˆAid , ˆBjd ∈ [−qmax , q max ] such that Aid ≈ sAi ˆAid 
+
+3and Bjd ≈ sBj ˆBjd . In the subsequent integer matrix multiplication, an SC primitive replaces the multi-bit integer multiplier at each inner-dimension position. Let D denote the inner dimension shared by ˆA and ˆB and let d ∈ { 1, . . . , D } index it. Map each integer to a normalized bipolar value uAid = ˆAid /q max ∈ [−1, 1] , uBjd = ˆBjd /q max ∈ [−1, 1] , and encode each as a bipolar stream of length L. For two such streams the bipolar product is captured by the bitwise XNOR gate: in expectation, the rescaled XNOR count over L cycles equals uAid uBjd [Alaghi and Hayes, 2013] (the analogous unipolar AND construction is illustrated in Figure 1(b)). Summing over the inner dimension d and rescaling by the per-row scales then gives the SC dot-product estimator 
+
+bCij = sAi sBj q2max 
+
+"
+
+2
+
+L
+
+> L
+
+X
+
+> ℓ=1
+> D
+
+X
+
+> d=1
+
+XNOR  zAid,ℓ , z Bjd,ℓ 
+
+ − D
+
+#
+
+, XNOR( a, b ) ≡ 1 − (a ⊕ b),
+
+(1) which is unbiased: E[ bCij ] = Cij . Throughout this paper, we generate the paired streams using the state-of-the-art conditional bitstream generation (C-BSG) construction [Wu et al., 2020, Wu and San Miguel, 2022a], which enforces pairwise independence by construction so that (1) is bias-free at finite L rather than stochastic; we defer the full derivation, including the formal stochastic cross-correlation definition, to Appendix A.1. 
+
+Precision and early termination. The stream length L is the precision knob. Under the pairwise-independence assumption—enforced by C-BSG (Appendix A.1)—the per-pair XNOR estimator has variance (1 − (uAid uBjd )2)/L ≤ 1/L [Alaghi and Hayes, 2013], so the matmul estimator has worst-case standard deviation Θ sAi sBj q2max 
+
+pD/L . Crucially, L can be any positive integer, not only a power of two, so the same datapath exposes a dense, hardware-shared precision ladder; a scheduler can terminate early for less salient outputs by stopping at L′ < L , trading quality for proportional time and energy savings. As a concrete example, an INT8 operand ( b = 8 ) recovers its full representable precision at L = 2 b = 256 cycles; truncating to L′ = 192 leaves log 2 L′ ≈ 7.58 
+
+effective bits—a precision unreachable from a conventional integer datapath. 
+
+3.2 Error Tolerance in Neural Networks 
+
+Neural networks routinely tolerate bounded numerical error from quantization, pruning, low-rank approximation, and noisy hardware, so their workloads are natural candidates for SC. To quantify the relevant tolerance, we replace each exact output cell Yij = ⟨Ai, :, B j, :⟩ with a Gaussian-perturbed surrogate bYij = Yij (1+ αZ ij ), Zij 
+
+> i.i.d.
+
+∼ N (0 , 1) , with α calibrated as a function of stream length L to match measured SC error on representative tensors. We apply this surrogate to all DiT-XL/2 [Peebles and Xie, 2023] matmuls. stream length 
+
+L (sc_len) equiv. INT bits 
+
+log 2 L noise α latent MSE image MSE image PSNR (dB) 
+
+32 5.00 0.0726 3.2×10 −2 4.8×10 −3 23 .264 6.00 0.0363 8.1×10 −3 1.3×10 −3 29 .0128 7.00 0.0182 3.8×10 −3 6.4×10 −4 32 .0192 7.58 0.0121 9.7×10 −4 2.0×10 −4 37 .0256 8.00 0.0091 7.9×10 −4 1.6×10 −4 37 .9
+
+The sweep confirms that the neural workload has a usable fluctuation margin for SC: L = 256 gives 
+
+37 .9 dB PSNR, L = 192 gives 37 .0 dB, and L = 128 /96 remain near the quality range used in prior quantized diffusion evaluations [Chen et al., 2025a, Li et al., 2023a]; quality drops at L = 64 
+
+and degrades substantially for L ≤ 32 . This tolerance is the key hardware opportunity. Since SC exposes precision as the runtime stream length L, including non-power-of-two operating points such as L = 96 and L = 192 without changing the circuit, we can spend longer streams only where the model is sensitive. 4Four-Axis SC Quantization Granularity SC Adaptive Scheduling Computation Reduction Denoising Step (t) Transformer Block (b) × × ×Linear Kernel (o) QK T 1T-1 0... ... ... AV WQKV WO FC 2 Row Index (i) Pretrained DiT Quantize to INT8 Per-row Saliency Scoring FC 1 t2bBTimestep/Block /Operator Bucket Precision Alloc. w/ Compute Budget Chosen Threshold Saliency Score (per row) Clock Cycles 32 =24 =48 =128 64 128 0Saliency Metric τ1 τ2 τ3Low Saliency Row 1 Med Saliency Row 2 Compute Reduced High Saliency Row 3 Hardware Fully Utilized In Every Precision Maximize Precision w/ Compute Threshold Figure 2: Overview of our adaptive fine-grained quantization and scheduling flow. 
+
+## 4 Methodology 
+
+4.1 Hardware Model 
+
+SC replaces a multi-bit multiplier with a one-bit gate (AND for unipolar, XNOR for bipolar) and pays precision temporally: a length-L stream runs the same datapath for L cycles. 
+
+Gate-level advantage. We synthesize four multipliers (SC vs. binary, signed vs. unsigned) in FreePDK45 [Henson et al., 2007] at 400 MHz; Table 1 reports area, power, and the per-operation energy reduction at L = 2 k. The unipolar AND is 268 × smaller and 453 × lower-power than an unsigned INT8 multiplier, and the bipolar XNOR is 156 × smaller and 399 × lower-power than its signed counterpart. After the L-cycle penalty, SC is still 1.6–1.8× lower-energy at k=8 and 6–7× at 
+
+k=6 . The area gap also buys throughput: the 156 ×-smaller XNOR can support ∼128 × more lanes at iso-area, offsetting the L× latency factor. Table 1: SC vs. binary multiplier comparison at 400 MHz. 
+
+SC gate INT8 mult. Energy/Op Reduction Pair Area Power Area Power k = 8 k = 7 k = 6 k = 5 
+
+(μm2) (μW) (μm2) (μW) AND /UM UL 1.06 0.37 285.4 168.7 1.77 × 3.54 × 7.08 × 14 .2×
+
+XNOR /M UL 1.60 0.63 249.2 249.7 1.56 × 3.13 × 6.25 × 12 .5×
+
+Full-accelerator evidence. The gate-level gap survives bit-stream generation, accumulation, con-trol, and data movement at chip scale: Cambricon-U reports 2.1× lower energy and 2.2× smaller area than an INT8 baseline on MLPerf-Tiny, and 1.22 –1.47 × energy-efficiency gains across MLPerf-Tiny and four ImageNet-scale CNNs without accuracy loss; uGEMM saves 72% of cycles via early termination at higher MLP accuracy than prior unary designs. 
+
+From compute cycles to energy and latency. For matmul m with per-row stream length ℓ(m) 
+
+> i
+
+, we take SC compute cost as CSC ∝ P
+
+> m
+
+P 
+
+> i
+
+ℓ(m) 
+
+> i
+
+. Because every stream cycle drives the same gate, energy is linear in CSC , and latency is linear at fixed lane count. Two schedules with matched P ℓi
+
+therefore have matched energy and latency, and reducing the average stream length from L to ¯ℓ yields 
+
+L/ ¯ℓ savings on both axes (e.g., ¯ℓ=128 or 64 at L=256 gives 2× or 4×). Section 4.4 spends this budget by shortening streams on less sensitive rows. 
+
+4.2 GPU Kernel for SC Matrix Multiplication GPU execution path. Existing CPU SC simulators are too slow to insert into every transformer matmul, while the C-BSG datapath is a regular tiled AND-and-popcount computation that fits GPU execution. We implement the uSystolic-style C-BSG temporal-unary multiplier from Section 3.1 as fused Triton kernels Tillet et al. [2019]; in our benchmark, this path is about 95 ,000 × faster than direct CPU SC simulation. The kernel treats stream length as data, so per-row length vectors can be changed at runtime without recompilation. 5Datapath: cumulative-indicator C-BSG. Each matmul begins with fused quantization: operands are mapped to the int8 grid ( qmax = 127 ), converted to one of V = 257 comparison boundaries, and emitted with row scale and sign in one pass. The C-BSG stream is represented by a precomputed cumulative-indicator table K[b, ℓ ] = 1[rℓ ≤ b] over Sobol-8 values [Sobol’, 1967, Joe and Kuo, 2008, Li et al., 2024]; the compact kernel indexes K by the weight and activation boundary tensors and accumulates the bipolar SC estimator as tiled AND-and-popcounts over D×L binary comparisons. The table is built once per layer at Lmax = 2 8, cached on device, and reused by taking prefixes for shorter streams. This same launch receives a row-length vector ℓ ∈ ZN
+
+> ≥0
+
+, so row i stops at ℓi and different rows can run at different effective precisions for Section 4.4. 
+
+4.3 Sensitivity Analysis Probing where SC error matters. SC trades a multi-bit multiplier for one-bit logic, but its arithmetic is only statistically correct: the C-BSG kernel of Section 4.2 is unbiased, yet matching a fixed-point multiplier’s variance can require stream lengths in the hundreds or thousands [Wu and San Miguel, 2022b, Guo et al., 2023b]. Paying this cost uniformly is wasteful—prior mixed-precision work shows numerical sensitivity is highly concentrated, with a small subset of layers and matmul classes dominating the error budget [Zhao et al., 2024, Kim et al., 2025b]. We therefore probe where 
+
+SC precision must be spent. For each operator class o ∈ O = {qk , av , qkv_proj , out_proj , fc1 , fc2 }
+
+and block b ∈ { 0, . . . , B − 1}, we route only that matmul through C-BSG at stream length L, leaving all others in full precision, and measure 
+
+S( o, b, L ) = Ex∈D h⋆(x) − bh(o,b,L )(x) 2, (2) where h⋆ and bh(o,b,L ) are the full-precision and single-SC backbone feature tensors on a small calibration set D.04812 16 20       
+
+> block index WO
+> Q K
+> A V WQKV
+> FC1 FC2
+> Length = 64
+> 04812 16 20
+> block index WO
+> Q K
+> A V WQKV
+> FC1 FC2
+> Length = 128
+> 04812 16 20
+> block index WO
+> Q K
+> A V WQKV
+> FC1 FC2
+> Length = 256
+> 010 20 30 40 50 60 70
+> backbone-feature L2 distance vs FP
+
+Figure 3: SC sensitivity is highly non-uniform across operator class, block depth, and stream length: replacing a single (o, b ) matmul with SC perturbs the final ViT-L/14 feature far more for late FC2 blocks than for any other tile, motivating the mixed-precision policy of Section 4.4. 
+
+Case study on ViT-L/14 + ImageNet. We instantiate the probe on a pretrained DINOv2 ViT-L/14 backbone ( B = 24 , |O| = 6 ) with |D| = 100 ImageNet images at three stream lengths 
+
+L ∈ { 64 , 128 , 256 }, yielding the sweep in Figure 3. The results reveal two patterns. First, FC2 dominates the high-sensitivity region across stream lengths, indicating SC error is far from uniform across operator classes. Second, within FC2 sensitivity concentrates in later blocks: at L = 64 ,late-FC2 accounts for 19 of the top-20 most sensitive (o, b ) tiles. These motivate reserving binary fallback for the most sensitive tiles and using the mixed-precision policy of Section 4.4 to allocate longer SC streams to sensitive operators and shorter streams to less sensitive ones. 
+
+4.4 Per-Row Mixed-Precision SC Calibration mode. Section 4.2 exposes stream length as a per-row runtime argument, so mixed precision reduces to choosing the stream length assigned to each output row of each SC matmul. We make this choice through an offline calibration mode : for each target average stream length ¯L, the calibrator runs a small set of FP-teacher trajectories, replays each selected matmul with uniform SC at several candidate stream lengths, and records the row-wise deviation. The result is a JSON table of 6metric thresholds. Inference only evaluates the same lightweight row metrics, looks up the calibrated thresholds, and passes the resulting row-length vector to the SC kernel. 
+
+Row metrics. For each calibrated operator, the row metric is chosen from tensors already present in the forward pass. Following AWQ [Lin et al., 2024] and SmoothQuant [Xiao et al., 2023], for QK 
+
+we use the row-wise query magnitude, gQK  
+
+> i
+
+= ∥Qi∥∞. For AV , we use the peak attention probability, 
+
+gAV  
+
+> i
+
+= max j Aij . For INPUT _PROJ , PROJ , MLP _FC 1, and MLP _FC 2, we use the row-wise activation magnitude, gi = ∥Xi∥∞. We use the maximum magnitude amax rather than an average because the per-row SC quantizer is scaled by the row range: the largest entry sets the comparison boundary scale and also bounds the largest contribution any coordinate can make to the dot-product error. Thus amax 
+
+is a cheap upper-envelope proxy for row dynamic range, and it is already available from the fused per-row scale extraction. Within each operator call, metrics are normalized to [0 , 1] as 
+
+˜gi = gi − min j gj
+
+max j gj − min j gj
+
+.
+
+Rows with larger ˜gi are treated as more precision-sensitive and therefore receive longer streams after thresholding. 
+
+Threshold fitting. Let L1 > L 2 > · · · > L K be the stream-length ladder supplied to the calibrator. For each operator, timestep bucket, and layer-depth bucket, the calibrator measures row-wise cosine error against the FP teacher at every Lk and solves a budgeted Lagrangian assignment: 
+
+ki(λ) = arg min 
+
+> k
+
+ eik + λL k
+
+,
+
+where eik is the measured FP-vs-uniform-SC error. Binary search on λ matches the target budget, and the resulting level counts are converted into non-uniform thresholds 
+
+1 ≥ τ1 ≥ τ2 ≥ · · · ≥ τK−1 ≥ 0.
+
+At inference, row i receives the first level whose threshold it exceeds, k⋆(i) = min {k : ˜ gi ≥ τk},or the shortest stream if it falls below all thresholds; the kernel then uses ℓi = Lk⋆(i). The JSON table is keyed by operator, timestep bucket, and layer bucket, with operator-level fallback for sparse buckets. 
+
+## 5 Experiments 
+
+5.1 Classification Setup. We evaluate DINOv2 ViT-L/14 [Oquab et al., 2023] on full ImageNet-1k val ( N =50 ,000 ), comparing SC—with and without our residual compensation (Appendix A.2)—against the QwT [Fu et al., 2025] baseline (INT quantization [Li et al., 2023b] with closed-form residual compensation). For SC we further compare uniform-L against the per-row mixed-precision policy ( MP ) of Section 4.4 at matched bit budget P 
+
+> i
+
+ℓi; all SC runs keep the 30 most-sensitive (op, block) cells from the Section 4.3 profile in FP. Bit budgets follow the W/A convention of Chen et al. [2025a]. 
+
+Results. SC + compensation tracks QwT at every matched bit budget in Table 2. MP beats uniform-
+
+L at matched average budget by recovering the asymmetry Section 4.3 flagged—raising MLP _FC 2 to 
+
+L=192 in every active block at ¯L=128 (L=256 in 40% of blocks at ¯L=192 ) and letting the cheap projections absorb L∈{ 64 , 96 } in ∼36% of blocks. Compensation lifts SC by +0 .13 pt at L=256 up to +3 .93 pt at L=128 ; the closed-form fit of Fu et al. [2025] only needs errors deterministic in (w, x ),which holds for SC because our seed-fixed Sobol streams fix the per-element error at calibration time, exactly as it holds for INT under deterministic rounding (Appendix A.2). 
+
+5.2 Object Detection and Instance Segmentation Setup. We evaluate EVA-01 ViT-g + cascade Mask R-CNN [Fang et al., 2023, Li et al., 2022, He et al., 2017] on COCO val ( N =5000 , square-padded to 1024 2, soft-NMS, BEIT pos. interp.). SC rows skip the 30 most-sensitive of 240 (op, block) tiles to FP (Section 4.3); MP allocates within the active set per Section 4.4. We compare SC (uniform-L, MP, ± compensation) against QwT-INT [Fu et al., 2025] at matched W =A.7Table 2: ImageNet-1k classification (full val, N =50 ,000 ). W/A is weight/activation bits: the underlying INT setting for QwT; for SC, W =A= log 2 ¯L with ¯L the average per-row stream length.                                                              
+
+> Method W/A top-1 (%) top-5 (%) ∆vs FP FP (DINOv2 ViT-L/14) 16 /16 86.40 97.65 0.00
+> QwT 8/884.57 96.56 −1.83
+> SC uniform 8/885.57 97.40 −0.83
+> SC uniform + compensation 8/885.70 97.47 −0.70
+> SC uniform log 2192 /log 2192 84.67 97.11 −1.73
+> SC uniform + compensation log 2192 /log 2192 85.42 97.43 −0.98
+> SC MP log 2192 /log 2192 85.07 97.23 −1.33
+> SC MP + compensation log 2192 /log 2192 85.47 97.40 −0.93
+> QwT 4/883.48 96.37 −2.92
+> SC uniform 7/778.94 94.61 −7.46
+> SC uniform + compensation 7/782.87 96.46 −3.53
+> SC MP 7/779.84 94.90 −6.56
+> SC MP + compensation 7/783.26 96.45 −3.14
+
+Table 3: COCO val object detection & instance segmentation, EVA-01 ViT-g + cascade Mask R-CNN ( N =5000 , 1024 2). W/A as in Table 2.                                                            
+
+> Method W/A AP bAP m∆b/∆m
+> FP (EVA-01 ViT-g) 16 /16 62.06 52.39 0.00 /0.00
+> QwT 8/861.20 51.59 −0.86 /−0.80
+> SC uniform 8/861.98 52.18 −0.08 /−0.21
+> SC uniform log 2192 /log 2192 61.69 51.85 −0.37 /−0.54
+> SC uniform + compensation log 2192 /log 2192 61.82 52.06 −0.24 /−0.33
+> QwT 7/761.13 51.51 −0.93 /−0.88
+> SC uniform 7/758.84 48.68 −3.22 /−3.71
+> SC uniform + compensation 7/759.72 49.81 −2.34 /−2.58
+> SC MP 7/760.45 50.76 −1.61 /−1.63
+
+Results. SC uniform at 8/8 is essentially FP-equivalent on boxes ( 61 .98 vs. 62 .06 AP b) and clearly outperforms QwT 8/8 (61 .20 ). At the log 2192 tier, compensation gives a small but consistent gain over raw uniform SC ( 61 .82 /52 .06 vs. 61 .69 /51 .85 AP b/AP m). The harder regime is 7/7:uniform SC drops to 58 .84 /48 .68 , while compensation recovers +0 .88 / + 1 .13 AP and MP recovers 
+
++1 .61 / + 2 .08 AP, making MP the stronger lever at this budget. 
+
+5.3 Image Generation Setup. We evaluate SC on class-conditional ImageNet generation with DiT-XL/2 at 256 ×256 
+
+resolution [Peebles and Xie, 2023]. All attention and MLP matrix multiplications are routed through the GPU C-BSG kernel of Section 4.2; the quantization and stream-length schedules follow the same bit-budget convention used in Sections 5.1 and 4.4. All rows use the same sampler with 50 
+
+denoising timesteps and classifier-free guidance scale CFG=4 .0. We generate 10 ,000 images in total, with 10 samples for each of the 1000 ImageNet classes. We report IS, sFID, KID, and FID against the ImageNet validation reference set, and include the realized average stream length to make the compute budget explicit. 
+
+Result. Table 4 summarizes the image-generation results. The comparison is intended to test whether the SC schedules that preserve recognition accuracy also maintain generative sample quality at matched average stream length. SC matching or slightly improving over FP on FID is reasonable in this setting: diffusion sampling is explicitly noise-driven, and the iterative denoising process is robust to small arithmetic perturbations, so moderate SC noise need not translate into worse sample-level statistics. Qualitative samples are shown in Appendix A.3, Figure 4. 8Table 4: ImageNet class-conditional generation with DiT-XL/2, 256 ×256 . All rows use the same sampler, 50 denoising timesteps, CFG=4 .0, and 10 ,000 generated images ( 10 per ImageNet class). Schedule records the SC length setting, ¯L is the realized average stream length over SC-executed matmuls, and KID is reported as 10 3×KID .Method ¯L IS ↑ sFID ↓ KID ×10 3 ↓ FID ↓
+
+FP – 285 .95 24 .75 13 .47 ±1.24 24 .81 
+
+SC MP 64 279 .76 19 .93 9.7717 ±1.0457 17 .33 
+
+SC uniform 96 284 .62 20 .91 11 .1134 ±1.1318 18 .47 
+
+5.4 Visual World-Model Planning Setup. We test SC’s feasibility in a closed-loop visual planner, where backbone errors compound through a learned dynamics model over long rollouts. We SC-quantize the full Dino-WM [Zhou et al., 2024] stack on wall_single (2D goal-reaching): a pretrained DINOv2 ViT-S/14 encoder and a 6-block latent predictor. We keep the 12 /60 most-sensitive encoder tiles and 7/36 predictor tiles in FP and SC-quantize the rest. Planning uses CEM-MPC with the same budget for all rows of Table 5 (nevals =30 episodes, max _iter=20 , 900 samples, seed-fixed); SR resolution is 1/30 ≈ 0.033 .Table 5: Visual planning success rate on Dino-WM wall_single , matched CEM budget. SR is the fraction of 30 episodes solved within 20 MPC steps; bit budget follows Table 2.                                
+
+> Method W/A SR Plateau iter ∆vs FP FP (Dino-WM, ViT-S/14 enc. + 6-block pred.) 16 /16 0.833 50.000
+> SC uniform 8/80.833 30.000
+> SC uniform log 2192 /log 2192 0.833 30.000
+> SC MP log 2192 /log 2192 0.933 16 +0 .100
+> SC uniform 7/70.800 16 −0.033
+> SC MP 7/70.833 13 0.000
+
+SC matches FP across both budgets, while MP provides low-precision headroom. At the ∼8-bit tier, all SC configurations reach FP’s 0.833 SR plateau, and both uniform variants reach their plateau two CEM iterations earlier than FP. SC MP at log 2192 reaches 0.933 , solving two additional episodes within the 20-iteration horizon. We do not over-interpret this gain ( ±2 episodes per seed at 1/30 SR resolution from sampling alone), but it is consistent with a small structured effect of MP’s per-row stream-length perturbations on CEM elite selection. At the 7-bit tier, uniform SC falls one episode short ( 0.800 ), while SC MP at the same average budget recovers FP-equivalent SR ( 0.833 ). This mirrors Table 2: per-row MP recovers the headroom that uniform SC loses below the safe precision regime, now in a closed-loop planning task rather than only in a static classifier readout. 
+
+## 6 Discussion 
+
+Limitations. Our evaluation covers only a limited set of configurations: for each task we use representative backbones and a small number of precision budgets, rather than an exhaustive sweep over models, seeds, and more aggressive low-bit settings. Thus, our results establish SC’s feasibility in the evaluated regimes, but do not yet show how robust the conclusions are across a broader configuration space. In addition, the hardware benefits are estimated from analytical and gate-level models rather than measured end-to-end silicon. 
+
+Broader impacts. This work supports broader exploration of SC for modern AI inference. Since specialized hardware requires substantial design effort, software-level feasibility evidence is important for deciding which arithmetic paradigms are worth pursuing in silicon. Our results suggest that dense, temporally controlled SC precision is a promising direction for future accelerator design. 97 Conclusion 
+
+This paper argues that stochastic computing is best viewed as a dense adaptive quantizer for modern transformer inference: precision is controlled by stream length rather than constrained to a small set of fixed word sizes. Empirically, we show that SC retains near-lossless accuracy on transformer-based vision tasks—image classification, object detection and instance segmentation, class-conditional image generation, and visual world-model planning. To make this concrete at scale, we contribute a fused GPU library for SC matrix multiplication on modern vision transformers and a per-row mixed-precision algorithm that turns row-level sensitivity into a calibrated stream-length budget without retraining. Together, these results position SC as a viable substrate for future adaptive-precision accelerators, where a simple shared datapath can expose a much denser precision space than conventional fixed-format arithmetic. 
+
+## References 
+
+Armin Alaghi and John P. Hayes. Survey of stochastic computing. ACM Transactions on Embedded Computing Systems , 12(2s):92:1–92:19, May 2013. doi: 10.1145/2465787.2465794. Armin Alaghi, Weikang Qian, and John P. Hayes. The promise and challenge of stochastic computing. 
+
+IEEE Transactions on Computer-Aided Design of Integrated Circuits and Systems , 37(8):1515– 1531, 2018. doi: 10.1109/TCAD.2017.2778107. Tom B. Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D. Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, Sandhini Agar-wal, Ariel Herbert-Voss, Gretchen Krueger, Tom Henighan, Rewon Child, Aditya Ramesh, Daniel M. Ziegler, Jeffrey Wu, Clemens Winter, Christopher Hesse, Mark Chen, Eric Sigler, Mateusz Litwin, Scott Gray, Benjamin Chess, Jack Clark, Christopher Berner, Sam McCan-dlish, Alec Radford, Ilya Sutskever, and Dario Amodei. Language models are few-shot learners. In Advances in Neural Information Processing Systems , volume 33, pages 1877– 1901, 2020. URL https://proceedings.neurips.cc/paper_files/paper/2020/file/ 1457c0d6bfcb4967418bfb8ac142f64a-Paper.pdf .Lei Chen, Yuan Meng, Chen Tang, Xinzhu Ma, Jingyan Jiang, Xin Wang, Zhi Wang, and Wenwu Zhu. Q-DiT: Accurate post-training quantization for diffusion transformers. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , pages 28306–28315, June 2025a. Yuzong Chen, Ahmed F. AbouElhamayed, Xilai Dai, Yang Wang, Marta Andronic, George A. Con-stantinides, and Mohamed S. Abdelfattah. Bitmod: Bit-serial mixture-of-datatype llm acceleration, 2025b. URL https://arxiv.org/abs/2411.11745 .Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. LLM.int8(): 8-bit matrix multiplication for transformers at scale. In Advances in Neural Informa-tion Processing Systems , volume 35, pages 30318–30332, 2022. doi: 10.48550/arXiv. 2208.07339. URL https://proceedings.neurips.cc/paper_files/paper/2022/hash/ c3ba4962c05c49636d4c6206a97e9c8a-Abstract-Conference.html .Zhen Dong, Zhewei Yao, Amir Gholami, Michael W. Mahoney, and Kurt Keutzer. HAWQ: Hessian aware quantization of neural networks with mixed-precision. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) , pages 293–302, October 2019. doi: 10. 1109/ICCV.2019.00038. Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, et al. An image is worth 16x16 words: Transformers for image recognition at scale. arXiv preprint arXiv:2010.11929 , 2020. Yuxin Fang, Wen Wang, Binhui Xie, Quan Sun, Ledell Wu, Xinggang Wang, Tiejun Huang, Xinlong Wang, and Yue Cao. Eva: Exploring the limits of masked visual representation learning at scale. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition , pages 19358–19369, 2023. 10 Weilun Feng, Haotong Qin, Chuanguang Yang, Zhulin An, Libo Huang, Boyu Diao, Fei Wang, Renshuai Tao, Yongjun Xu, and Michele Magno. MPQ-DM: Mixed precision quantization for extremely low bit diffusion models. In Proceedings of the AAAI Conference on Artificial Intelligence , volume 39, pages 16595–16603, 2025. doi: 10.1609/aaai.v39i16.33823. Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. OPTQ: Accurate quantization for generative pre-trained transformers. In The Eleventh International Conference on Learning Representations , 2023. URL https://openreview.net/forum?id=tcbBPnfwxS .Minghao Fu, Hao Yu, Jie Shao, Junjie Zhou, Ke Zhu, and Jianxin Wu. Quantization without tears. In 
+
+Proceedings of the Computer Vision and Pattern Recognition Conference , pages 4462–4472, 2025. B. R. Gaines. Stochastic computing systems. In Julius T. Tou, editor, Advances in Information Systems Science , volume 2, pages 37–172. Springer, Boston, MA, 1969. doi: 10.1007/978-1-4899-5841-9_ 2. Hongrui Guo, Yongwei Zhao, Zhangmai Li, Yifan Hao, Chang Liu, Xinkai Song, Xiaqing Li, Zidong Du, Rui Zhang, Qi Guo, Tianshi Chen, and Zhiwei Xu. Cambricon-U: A systolic random increment memory architecture for unary computing. In Proceedings of the 56th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO) , pages 424–437, Toronto, ON, Canada, 2023a. Association for Computing Machinery. doi: 10.1145/3613424.3614286. Hongrui Guo, Yongwei Zhao, Zhangmai Li, Yifan Hao, Chang Liu, Xinkai Song, Xiaqing Li, Zidong Du, Rui Zhang, Qi Guo, et al. Cambricon-u: A systolic random increment memory architecture for unary computing. In Proceedings of the 56th Annual IEEE/ACM International Symposium on Microarchitecture , pages 424–437, 2023b. David Ha and Jürgen Schmidhuber. World models, 2018. Danijar Hafner, Jurgis Pasukonis, Jimmy Ba, and Timothy Lillicrap. Mastering diverse domains through world models, 2023. Kaiming He, Georgia Gkioxari, Piotr Dollár, and Ross Girshick. Mask r-cnn. In Proceedings of the IEEE international conference on computer vision , pages 2961–2969, 2017. Jeff Henson, Ivan Castellanos, Paul D. Franzon, Michael Wood, Ravi Jenkal, W. Rhett Davis, Julie Oh, Sunil Basavarajaiah, Michael Bucher, James E. Stine, and Fred Love. FreePDK: An Open-Source Variation-Aware Design Kit . In 2007 IEEE Conference on Microelectronic Systems Education ,pages 173–174, Los Alamitos, CA, USA, June 2007. IEEE Computer Society. doi: 10.1109/MSE. 2007.44. URL https://doi.ieeecomputersociety.org/10.1109/MSE.2007.44 .Stephen Joe and Frances Y. Kuo. Constructing sobol sequences with better two-dimensional projec-tions. SIAM Journal on Scientific Computing , 30(5):2635–2654, 2008. doi: 10.1137/070709359. Daeun Kim, Jinwoo Hwang, Changhun Oh, and Jongse Park. MixDiT: Accelerating image diffusion transformer inference with mixed-precision MX quantization. IEEE Computer Architecture Letters ,24(1):141–144, 2025a. doi: 10.1109/LCA.2025.3560786. Daeun Kim, Jinwoo Hwang, Changhun Oh, and Jongse Park. Mixdit: Accelerating image diffusion transformer inference with mixed-precision mx quantization. IEEE Computer Architecture Letters ,2025b. Xiuyu Li, Yijiang Liu, Long Lian, Huanrui Yang, Zhen Dong, Daniel Kang, Shanghang Zhang, and Kurt Keutzer. Q-Diffusion: Quantizing diffusion models. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) , pages 17535–17545, October 2023a. Yanghao Li, Hanzi Mao, Ross Girshick, and Kaiming He. Exploring plain vision transformer backbones for object detection. In European conference on computer vision , pages 280–296. Springer, 2022. Yuhang Li, Ruihao Gong, Xu Tan, Yang Yang, Peng Hu, Qi Zhang, Fengwei Yu, Wei Wang, and Shi Gu. BRECQ: Pushing the limit of post-training quantization by block reconstruction. In 
+
+International Conference on Learning Representations , 2021. URL https://openreview.net/ forum?id=POWv6hDd9XH .11 Zexi Li, Haoran Jin, Kuncai Zhong, Guojie Luo, Runsheng Wang, and Weikang Qian. Scgen: A versatile generator framework for agile design of stochastic circuits. In 2024 Design, Automation & Test in Europe Conference & Exhibition (DATE) , pages 1–6, 2024. doi: 10.23919/DATE58400. 2024.10546649. Zhikai Li, Junrui Xiao, Lianwei Yang, and Qingyi Gu. Repq-vit: Scale reparameterization for post-training quantization of vision transformers. In Proceedings of the IEEE/CVF International Conference on Computer Vision , pages 17227–17236, 2023b. Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. AWQ: Activation-aware weight quantization for on-device llm compression and acceleration. In Proceedings of Machine Learning and Sys-tems , volume 6, 2024. URL https://proceedings.mlsys.org/paper_files/paper/2024/ hash/42a452cbafa9dd64e9ba4aa95cc1ef21-Abstract-Conference.html .Yidong Liu, Siting Liu, Yanzhi Wang, Fabrizio Lombardi, and Jie Han. A survey of stochastic com-puting neural networks for machine learning applications. IEEE Transactions on Neural Networks and Learning Systems , 32(7):2809–2824, July 2021. doi: 10.1109/TNNLS.2020.3009047. Markus Nagel, Marios Fournarakis, Rana Ali Amjad, Yelysei Bondarenko, Mart van Baalen, and Tijmen Blankevoort. A white paper on neural network quantization, 2021. Harald Niederreiter. Random Number Generation and Quasi-Monte Carlo Methods , volume 63 of 
+
+CBMS-NSF Regional Conference Series in Applied Mathematics . Society for Industrial and Applied Mathematics, Philadelphia, PA, 1992. ISBN 9780898712957. doi: 10.1137/1.9781611970081. Maxime Oquab, Timothée Darcet, Théo Moutakanni, Huy Vo, Marc Szafraniec, Vasil Khalidov, Pierre Fernandez, Daniel Haziza, Francisco Massa, Alaaeldin El-Nouby, et al. Dinov2: Learning robust visual features without supervision. arXiv preprint arXiv:2304.07193 , 2023. William Peebles and Saining Xie. Scalable diffusion models with transformers. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) , pages 4195–4205, October 2023. Weikang Qian, Xin Li, Marc D. Riedel, Kia Bazargan, and David J. Lilja. An architecture for fault-tolerant computation with stochastic logic. IEEE Transactions on Computers , 60(1):93–105, 2011. doi: 10.1109/TC.2010.202. Ao Ren, Zhe Li, Caiwen Ding, Qinru Qiu, Yanzhi Wang, Ji Li, Xuehai Qian, and Bo Yuan. Sc-dcnn: Highly-scalable deep convolutional neural network using stochastic computing. In Proceedings of the Twenty-Second International Conference on Architectural Support for Programming Languages and Operating Systems , ASPLOS ’17, page 405–418, New York, NY, USA, 2017. Association for Computing Machinery. ISBN 9781450344654. doi: 10.1145/3037697.3037746. URL 
+
+https://doi.org/10.1145/3037697.3037746 .Bita Darvish Rouhani, Ritchie Zhao, Ankit More, Mathew Hall, Alireza Khodamoradi, Summer Deng, Dhruv Choudhary, Marius Cornea, Eric Dellinger, Kristof Denolf, Stosic Dusan, Venmugil Elango, Maximilian Golub, Alexander Heinecke, Phil James-Roxby, Dharmesh Jani, Gaurav Kolhe, Martin Langhammer, Ada Li, Levi Melnick, Maral Mesmakhosroshahi, Andres Rodriguez, Michael Schulte, Rasoul Shafipour, Lei Shao, Michael Siu, Pradeep Dubey, Paulius Micikevicius, Maxim Naumov, Colin Verrilli, Ralph Wittig, Doug Burger, and Eric Chung. Microscaling data formats for deep learning, 2023. Hyeonuk Sim, Dong Nguyen, Jongeun Lee, and Kiyoung Choi. Scalable stochastic-computing accelerator for convolutional neural networks. In Proceedings of the 22nd Asia and South Pacific Design Automation Conference (ASP-DAC) , pages 696–701, Chiba, Japan, 2017. doi: 10.1109/ ASPDAC.2017.7858405. I. M. Sobol’. On the distribution of points in a cube and the approximate evaluation of integrals. 
+
+USSR Computational Mathematics and Mathematical Physics , 7(4):86–112, January 1967. doi: 10.1016/0041-5553(67)90144-9. 12 Philippe Tillet, H. T. Kung, and David Cox. Triton: an intermediate language and compiler for tiled neural network computations. In Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages , MAPL 2019, page 10–19, New York, NY, USA, 2019. Association for Computing Machinery. ISBN 9781450367196. doi: 10.1145/3315508.3329973. URL https://doi.org/10.1145/3315508.3329973 .Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timothée Lacroix, Baptiste Rozière, Naman Goyal, Eric Hambro, Faisal Azhar, Aurelien Rodriguez, Armand Joulin, Edouard Grave, and Guillaume Lample. LLaMA: Open and efficient foundation language models, 2023. Kuan Wang, Zhijian Liu, Yujun Lin, Ji Lin, and Song Han. HAQ: Hardware-aware automated quantization with mixed precision. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , pages 8612–8620, June 2019. doi: 10.1109/CVPR.2019. 00881. Dennis D. Weller, Nathaniel Bleier, Michael Hefenbrock, Jasmin Aghassi-Hagmann, Michael Beigl, Rakesh Kumar, and Mehdi B. Tahoori. Printed stochastic computing neural networks. In 2021 Design, Automation & Test in Europe Conference & Exhibition (DATE) , pages 914–919, 2021. doi: 10.23919/DATE51398.2021.9474254. Di Wu and Joshua San Miguel. uSystolic: Byte-crawling unary systolic array. In 2022 IEEE International Symposium on High-Performance Computer Architecture (HPCA) , pages 12–24, April 2022a. doi: 10.1109/HPCA53966.2022.00010. Di Wu and Joshua San Miguel. usystolic: Byte-crawling unary systolic array. In 2022 IEEE International Symposium on High-Performance Computer Architecture (HPCA) , pages 12–24. IEEE, 2022b. Di Wu, Jingjie Li, Ruokai Yin, Hsuan Hsiao, Younghyun Kim, and Joshua San Miguel. Ugemm: Unary computing architecture for gemm applications. In 2020 ACM/IEEE 47th Annual Inter-national Symposium on Computer Architecture (ISCA) , pages 377–390, 2020. doi: 10.1109/ ISCA45697.2020.00040. Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. SmoothQuant: Accurate and efficient post-training quantization for large language models. In Andreas Krause, Emma Brunskill, Kyunghyun Cho, Barbara Engelhardt, Sivan Sabato, and Jonathan Scarlett, editors, Proceedings of the 40th International Conference on Machine Learning , volume 202 of 
+
+Proceedings of Machine Learning Research , pages 38087–38099. PMLR, 23–29 Jul 2023. URL 
+
+https://proceedings.mlr.press/v202/xiao23c.html .Zhewei Yao, Zhen Dong, Zhangcheng Zheng, Amir Gholami, Jiali Yu, Eric Tan, Leyuan Wang, Qijing Huang, Yida Wang, Michael Mahoney, and Kurt Keutzer. HAWQ-V3: Dyadic neural network quantization. In Marina Meila and Tong Zhang, editors, Proceedings of the 38th International Conference on Machine Learning , volume 139 of Proceedings of Machine Learning Research ,pages 11875–11886. PMLR, 18–24 Jul 2021. URL https://proceedings.mlr.press/v139/ yao21a.html .Zhihang Yuan, Chenhao Xue, Yiqi Chen, Qiang Wu, and Guangyu Sun. PTQ4ViT: Post-training quantization for vision transformers with twin uniform quantization. In Computer Vision – ECCV 2022 , volume 13672 of Lecture Notes in Computer Science , pages 191–207. Springer, 2022. doi: 10.1007/978-3-031-19775-8_12. Tianchen Zhao, Xuefei Ning, Tongcheng Fang, Enshu Liu, Guyue Huang, Zinan Lin, Shengen Yan, Guohao Dai, and Yu Wang. Mixdq: Memory-efficient few-step text-to-image diffusion models with metric-decoupled mixed precision quantization. In European Conference on Computer Vision ,pages 285–302. Springer, 2024. Kuncai Zhong, Zexi Li, Haoran Jin, and Weikang Qian. Exploiting uniform spatial distribution to design efficient random number source for stochastic computing. In Proceedings of the 41st IEEE/ACM International Conference on Computer-Aided Design , ICCAD ’22, New York, NY, USA, 2022. Association for Computing Machinery. ISBN 9781450392174. doi: 10.1145/3508352. 3549396. URL https://doi.org/10.1145/3508352.3549396 .13 Gaoyue Zhou, Hengkai Pan, Yann LeCun, and Lerrel Pinto. Dino-wm: World models on pre-trained visual features enable zero-shot planning. arXiv preprint arXiv:2411.04983 , 2024. 
+
+## A Supplementary Material 
+
+A.1 Correlation and the C-BSG Construction 
+
+This appendix expands the brief reference to conditional bitstream generation (C-BSG) in Section 3.1: it gives the formal definition of stochastic cross-correlation, motivates why a non-zero correlation biases the SC estimator in (1), and presents the UGEMM/C-BSG construction that we use throughout this paper to enforce zero correlation by construction. The independence assumption behind (1) is the principal source of SC error in practice. Follow-ing Alaghi and Hayes [2013], Wu et al. [2020], let a, b, c, d count the cycles at which the bit pair 
+
+(zAℓ , z Bℓ ) equals (1 , 1) , (1 , 0) , (0 , 1) , (0 , 0) respectively (with a + b + c + d = L); the stochastic cross-correlation SCC( ZA, Z B ) ∈ [−1, +1] is a normalized form of ad − bc that vanishes exactly when the two streams are pairwise independent, with full piecewise definition 
+
+SCC( ZA, Z B ) = ad − bc D , D =
+
+(L min( a + b, a + c) − (a + b)( a + c), if ad > bc, 
+
+(a + b)( a + c) − L max( a − d, 0) , otherwise .
+
+(3) The two-case denominator normalizes ad − bc by its maximum attainable absolute value subject to the marginals (a + b) and (a + c), so that SCC = ±1 is reached exactly when ZA and ZB are perfectly correlated or anti-correlated. Pseudo-random number generators such as LFSRs attain the standard O(L−1/2) decoding rate but offer no cross-correlation guarantees at finite L. We instead use scrambled Sobol low-discrepancy sequences [Sobol’, 1967, Joe and Kuo, 2008]: deterministic sequences in [0 , 1) d constructed by XOR-ing bit-indexed direction numbers, with L∞-discrepancy O(L−1 log d L) that is asymptotically tighter than the O(L−1/2) rate of i.i.d. samples [Niederreiter, 1992]. Even so, Sobol RNGs reduce 
+
+|SCC | but do not eliminate it at finite L, and the residual non-zero correlation biases the estimator of (1). We address this gap with the UGEMM [Wu et al., 2020, Wu and San Miguel, 2022a] construction. For two bipolar streams zA, z B encoding uA, u B ∈ [−1, 1] , the output bit value zout = XNOR( zA, z B )
+
+that decodes to uAuB requires the output probability to satisfy [Wu et al., 2020] 
+
+Pr[ zout = 1] = Pr[ zA = 1] Pr[ zB = 1] + Pr[ zA = 0] Pr[ zB = 0] , (4) i.e., a function of the input marginals . A bitwise XNOR over two streams, however, fires whenever the two bits agree, so its output probability is the joint probability of agreement, which factors via the chain rule as [Wu et al., 2020] 
+
+Pr[ zout = 1] = Pr[ zA = 1 , z B = 1] + Pr[ zA = 0 , z B = 0] = Pr[ zA = 1] Pr[ zB = 1 | zA = 1] + Pr[ zA = 0] Pr[ zB = 0 | zA = 0] , (5) which matches (4) only when both conditional probabilities equal the corresponding marginal: 
+
+Pr[ zB = 1 | zA = 1] = Pr[ zB = 1] , Pr[ zB = 0 | zA = 0] = Pr[ zB = 0] . (6) 
+
+Conditional bitstream generation (C-BSG) [Wu et al., 2020, Wu and San Miguel, 2022a] enforces (6) by construction (Figure 1(c)): rather than generating ZA and ZB from two independent RNGs, the second stream is produced by an RNG whose update is gated by the first stream, so that the conditional distribution of zB given the value of zA is forced to equal its marginal. Substituting (6) into the bit-pair counts above yields ad − bc = 0 and hence SCC = 0 , so the XNOR-based bipolar multiplier becomes bias-free at finite L rather than stochastic. 
+
+A.2 Residual Compensation in the SC Datapath The QwT recipe we adapt. QwT [Fu et al., 2025] attaches one lightweight residual compensation 
+
+module to each transformer block of an already-quantized network. For block b with quantized output 14 yZb (x) = lZb (x) and full-precision teacher output yb(x) = lb(x), the module 
+
+byb(x) = yZb (x) + Wb x + bb (7) adds an affine correction trained to minimize the per-block residual P 
+
+> x∈C
+
+∥ yb(x) − yZb (x) − Wbx −
+
+bb ∥22 on a small calibration set C of ∼512 ImageNet training images. The minimizer is the ordinary least-squares solution Wb = ( Yb − Y Zb ) X⊤ 
+
+> b
+
+(XbX⊤ 
+
+> b
+
+)−1, with the bias absorbed by augmenting 
+
+Xb with a row of ones, so calibration is one closed-form solve per block and runs in minutes. By construction Wb=0 recovers the uncompensated network, which makes QwT safe to attach unconditionally on the INT side; Fu et al. [2025] report up to +8 pt at W4A4 RepQ-ViT and small but consistent gains at higher bit-widths. 
+
+Our SC-side compensation recipe. We adopt the same per-block, residual structure as (7), with three modifications motivated by the SC residual being stochastic-but-deterministic (next paragraph) rather than a per-tensor integer round. First, we use |C| =1024 ImageNet train images and a ridge-regularized solve Wb = ( Yb−Y Zb ) X⊤ 
+
+> b
+
+(XbX⊤ 
+
+> b
+
++ λI )−1 with λ=10 −4, which we found necessary to keep Wb well-conditioned in low-L blocks where XZb has reduced effective rank. Second, we fit and store Wb per head (16 heads × dhead =64 ) rather than as a single d×d matrix, which reduces parameter count and lets the compensator follow the head-aligned SC kernels of Section 4.2. Third, we gate admission of Wb into the inference path by a disjoint cross-seed cosine test : we fit two independent solutions W (A) 
+
+> b
+
+, W (B) 
+
+> b
+
+on disjoint 512 -image calibration halves and admit Wb = 12 (W (A) 
+
+> b
+
++ W (B) 
+
+> b
+
+)
+
+only when cos  W (A) 
+
+> b
+
+, W (B)
+
+> b
+
+ > τ (τ =0 .5 for blocks 0−22 , τ =0 .8 for the final block). Failed gates leave the block uncompensated. The gate exists because the SC residual fluctuates at finite calibration size, and an admitted Wb that happens to fit calibration noise can degrade rather than improve held-out accuracy; the cross-seed test rejects exactly those overfit fits. Empirically the gate admits 22 /24 
+
+blocks at ¯L≥128 on ViT-L/14 (Section 5.1, Table 2). 
+
+The compensator is itself an SC matmul. A subtle but essential property of our pipeline is that the residual matmul Wbx in (7) is not an FP linear layer; it is a second SC dot-product evaluated on the C-BSG kernel of Section 4.2 at uniform stream length Lcomp =256 (p=8 , bipolar polarity). Calibration solves for the FP-valued Wb in the closed form above, then materializes Wb as the weight tensor of an SC linear layer that consumes the block input x via the same fused per-row quantization kernel and the same cumulative-indicator K-table cache that the block’s main matmuls use. The whole inference path therefore stays inside the SC datapath: there is no point at which the network reintroduces an FP multiplier to “rescue” the quantized output, and the cost of a compensated block is one main-path SC matmul plus one auxiliary d×d SC matmul at fixed Lcomp =256 . This is the property that lets the discussion of Section 5.1 treat compensation as a pure precision/accuracy lever rather than as a hybrid INT–FP correction. 
+
+Deterministic SC noise lets Wb absorb a fixed realization. The C-BSG kernel of Section 4.2 is stochastic in name only: its randomness is a length-Lmax Sobol low-discrepancy sequence [Sobol’, 1967, Joe and Kuo, 2008] indexed by a configuration (dim, seed, polarity) that is fixed at model load and reused on every forward pass. Consequently the per-element SC error \⟨w, x ⟩ − ⟨ w, x ⟩ is a deterministic function of (w, x ) for a given configuration—it is “shot noise” only across hypothetical Sobol seeds, not across forward passes. We exploit this by using the same Sobol configuration during compensation calibration and during inference, so the residual Yb − Y Zb that Wb is fit against is exactly the residual that Wb encounters at test time. In effect, Wb does not need to “average out” SC noise; it absorbs a fixed deterministic perturbation, and any structure in that perturbation that is approximately linear in x is fully captured by the closed-form fit. This mirrors the interpretation Fu et al. [2025] give for INT-side QwT: where the INT residual is a deterministic, scale-induced rounding map, the SC residual is a deterministic, Sobol-induced kernel-evaluation map, and OLS is well-posed against either. 
+
+Scope: feasibility, not formal analysis. We frame this section strictly as a feasibility demonstration: a closed-form fit, a cross-seed admission gate, and an SC-realized compensator together form a plausible recipe, and the empirical results of Section 5.1 (within 1 pt of FP at ¯L≥192 , within 3.2 pt at ¯L=128 ) suggest the recipe is sound at the budgets we evaluate. We do not establish here (i) that the deterministic-Sobol fixed-point characterization of Wb is unique or stable across changes of 15 Sobol configuration, (ii) conditions under which the cross-seed cosine gate is the optimal admission criterion versus, e.g., a residual-norm threshold, or (iii) the regime in which an SC-realized Wb at 
+
+Lcomp <256 remains accurate enough to keep the cumulative compensation profitable. The breakdown we observe at ¯L=96 (Section 5.1, “Open questions”) is consistent with the SC residual exiting the linear-compensation regime, but a formal characterization of where and why is left to future work. 16 A.3 Image Generation Samples 
+
+Figure 4 shows qualitative samples for the image-generation setting in Section 5.3.              
+
+> Full precision SC, L= 32
+> SC, L= 48 SC, L= 64
+> SC, L= 96 SC, L= 128
+
+Figure 4: Sample images generated by full precision and SC with uniform stream lengths L ∈{32 , 48 , 64 , 96 , 128 }. The eight prompts are: “golden retriever”, “otter”, “lesser panda”, “geyser”, “macaw”, “valley”, “balloon”, and “arctic fox”. 17
