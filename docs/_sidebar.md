@@ -1,6 +1,9 @@
 * <a class="dpr-sidebar-root-link" href="#/">首页</a>
 * <a class="dpr-sidebar-root-link dpr-sidebar-noactive-link" href="javascript:void(0)" data-dpr-hash="#/tutorial/README">使用教程</a>
 * Daily Papers
+  * 2026-10-04 <!--dpr-date:20261004-->
+    * 速读区
+      * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202610/04/2610.01537v1-fedfit-federated-fine-tuning-of-llms-via-vector-bank-parameterization-and-quantization" data-sidebar-item="{&quot;title&quot;: &quot;FedFit: Federated Fine-Tuning of LLMs via Vector-Bank Parameterization and Quantization&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2610.01537v1-fedfit-federated-fine-tuning-of-llms-via-vector-bank-parameterization-and-quantization&quot;, &quot;score&quot;: &quot;6.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;el&quot;}], &quot;evidence&quot;: &quot;结合向量库参数化与量化的联邦LoRA微调&quot;}">FedFit: Federated Fine-Tuning of LLMs via Vector-Bank Parameterization and Quantization</a>
   * 2026-10-03 <!--dpr-date:20261003-->
     * 精读区
       * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202610/03/2610.00983v1-the-devil-is-in-the-reconstruction-loss-scale-rethinking-optimization-in-llm-quantization" data-sidebar-item="{&quot;title&quot;: &quot;The Devil Is in the Reconstruction Loss Scale: Rethinking Optimization in LLM Quantization&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2610.00983v1-the-devil-is-in-the-reconstruction-loss-scale-rethinking-optimization-in-llm-quantization&quot;, &quot;score&quot;: &quot;9.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;el&quot;}], &quot;evidence&quot;: &quot;LLM量化中重构损失尺度与旋转矩阵的优化分析&quot;}">The Devil Is in the Reconstruction Loss Scale: Rethinking Optimization in LLM Quantization</a>
