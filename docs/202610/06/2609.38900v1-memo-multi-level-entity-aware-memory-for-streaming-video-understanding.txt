@@ -1,0 +1,1718 @@
+MEMO: Multi-Level Entity-Aware Memory for
+Streaming Video Understanding
+Yinying Li1,∗
+Yuqian Fu2,∗
+Yulin Dai1,∗
+Jingyu Gong1
+Tianwen Qian1,†
+Xiaoling Wang1,†
+1East China Normal University
+2King Abdullah University of Science and Technology
+Abstract
+Streaming video understanding requires models to process un-
+bounded visual streams while preserving rich visual semantics
+across vast temporal horizons, posing a fundamental challenge
+for memory modeling. Existing approaches primarily focus on in-
+creasing memory capacity, either by compressing historical in-
+formation into fixed-size representations or by extending storage
+beyond GPU memory. However, these methods largely rely on
+global or coarse-grained representations, inevitably losing fine-
+grained visual information. In this work, we argue that streaming
+video memory should explicitly encode structured and semantically
+meaningful representations, particularly at the entity level. To this
+end, we propose MEMO, a novel framework that models stream-
+ing video through multi-level, entity-aware structured memory.
+MEMO performs multi-level perception to jointly capture global
+semantics, entity dynamics, and spatial structures, partitioning
+streaming video into semantically coherent chunks. Each chunk
+is organized into a structured memory, where lightweight global
+and entity-level representations serve as retrieval indices, while
+the corresponding high-resolution visual content is retained sepa-
+rately for on-demand access. At inference time, MEMO performs
+query-specific retrieval over the structured memory and selectively
+recalls relevant visual evidence for downstream reasoning. Notably,
+MEMO is training-free and plug-and-play with existing multimodal
+large language models. Extensive experiments on StreamingBench
+and OVO-Bench demonstrate that MEMO consistently improves
+multiple base models and achieves state-of-the-art performance.
+1
+Introduction
+The rapid advancement of Multimodal Large Language Models
+(MLLMs) [2, 3, 17, 41, 42] has significantly improved video under-
+standing. However, most existing methods [16, 37] rely on an unre-
+alistic assumption that the entire video is pre-recorded and fully
+accessible at the onset of inference. In real-world scenarios such as
+embodied navigation [19, 56], autonomous driving [5, 7], live broad-
+casting [48], and egocentric vision [20, 32, 52, 57], video arrives as
+a continuous and unbounded stream. This fundamental mismatch
+motivates the need for streaming video understanding [6].
+A few recent works have begun to explore streaming video under-
+standing from the perspective of memory modeling. As illustrated
+in Figure 1, early approaches primarily rely on internal memory
+mechanisms, where historical visual information is compressed
+into GPU-resident representations such as tokens or key-value
+caches [47, 49]. While such a design enables efficient and low-
+latency processing, the limited capacity of GPU memory necessi-
+tates aggressive compression, which inevitably leads to information
+loss. To alleviate memory constraints, subsequent methods extend
+memory beyond the GPU by leveraging additional storage resources
+(a) Internal Memory Compression
+(b) External Memory Extension
+(c) Structured Entity-Aware Memory (MEMO)
+GPU
+CPU
+MLLM 
++ Efficient retrieval
++ High-fidelity reasoning
+MLLM 
+MLLM 
+(2) Online Temporal Chunking
+(1) Multi-Level Perception
+GPU
+GPU-resident tokens /
+ KVcaches
+visual features /cached representations
+GPU
+Offload 
+CPU/Disk
+Lightweight Retrieval Indices
+Streaming video
++ Efficient
+- Loss of fine details
++ Rich evidence
+- High latency
+High-Res Visual Evidence
+(3) Structured Memory 
+Figure 1: Comparison of memory paradigms for streaming
+video understanding. (a) Internal memory compression is
+efficient but loses fine-grained details. (b) External memory
+extension retains longer history but relies on coarse-grained
+evidence. (c) MEMO decouples lightweight structured indices
+from high-resolution visual evidence.
+such as CPU or disk. Representative examples include ReKV [9]
+and LiveVLM [28], which retain more historical information by
+offloading visual features or cached representations. However, de-
+spite improving storage capacity, these approaches largely focus
+on preserving global or coarse-grained visual information, without
+explicitly modeling finer-grained semantic structures.
+We argue that effective streaming video understanding requires
+more than simply increasing memory capacity. To support accu-
+rate reasoning over evolving streams, the memory must preserve
+structured and semantically meaningful representations rather than
+coarse, weakly organized historical traces. A key step in this direc-
+tion is to explicitly model entity-level information, since objects
+constitute the primary carriers of scene semantics and their dynam-
+ics provide strong cues for boundaries in event evolution.
+Building on this insight, we propose MEMO, a novel frame-
+work that organizes streaming video into multi-level, entity-aware
+structured memory. Rather than relying on coarse or heavily com-
+pressed representations, MEMO performs multi-level perception
+that jointly models global semantics, entity dynamics, and spatial
+structures. These cues enable robust estimation of temporal conti-
+nuity, allowing unbounded streams to be dynamically segmented
+into semantically coherent chunks. Each chunk is represented by
+global summaries and fine-grained entity features, forming a struc-
+tured memory that preserves scene context and detailed object-
+level information. To further support efficient and scalable storage,
+arXiv:2609.38900v1  [cs.CV]  30 Sep 2026
+
+
+Yinying Li et al.
+MEMO adopts a decoupled memory design, where lightweight rep-
+resentations serve as retrieval indices, while high-resolution visual
+evidence is stored separately for on-demand access. At inference
+time, MEMO performs query-specific retrieval over the structured
+memory to identify relevant chunks and selectively recalls their
+associated visual evidence for reasoning. Importantly, MEMO is
+training-free and plug-and-play, enabling seamless integration with
+any MLLM without additional training or optimization.
+Extensive experiments demonstrate that MEMO consistently
+improves performance across multiple base models (e.g., LLaVA-
+OV-series [17], Qwen-VL-series [2, 3]) and benchmarks (OVO-
+Bench [29], StreamingBench [21]). Notably, MEMO not only en-
+hances open-source base models but also achieves competitive or
+even superior performance compared to strong training-based and
+proprietary systems. For example, when applied to Qwen3-VL-8B,
+MEMO improves the baseline by 10.5% and surpasses Gemini 1.5
+Pro and GPT-based systems by 8.00% and 10.41%, respectively.
+In summary, our main contributions are three-fold:
+• We propose MEMO, a novel framework that models stream-
+ing video through multi-level, entity-aware structured mem-
+ory, addressing the limitations of existing memory repre-
+sentations for unbounded visual streams.
+• We propose a multi-level perception and structuring mech-
+anism that models global semantics, entity dynamics, and
+spatial structures, enabling robust temporal segmentation
+into coherent, entity-aware chunks.
+• Extensive experiments on StreamingBench and OVO-Bench
+demonstrate that MEMO consistently outperforms existing
+methods and achieves state-of-the-art performance.
+2
+Related Work
+MLLMs for Video Understanding. Recent multimodal large lan-
+guage models (MLLMs) have achieved remarkable progress in
+visual understanding by integrating visual perception with lan-
+guage reasoning, demonstrating strong generalization across a wide
+range of multimodal applications, including visual question answer-
+ing [4, 18, 23], image captioning [3], and visual grounding tasks
+such as detection and segmentation [12, 30, 31, 36]. Flagship ones
+include LLaVA-OneVision-1.5 [1], Qwen3-VL [2], InternVL3.5 [42],
+VideoLLaMA3 [51]. Building upon this success, many MLLMs natu-
+rally extend to the video domain, e.g., Video-ChatGPT [27], LLaVA-
+NeXT [22], by processing sampled frames or short clips as sequen-
+tial visual inputs, enabling joint reasoning over temporal visual
+tokens. In addition, several recent works [39] are specifically de-
+signed for video understanding, incorporating temporal modeling
+or long-context mechanisms to better capture dynamic visual con-
+tent. Despite these advances, most existing approaches still oper-
+ate under an offline paradigm, assuming that the entire video is
+pre-recorded and fully accessible during inference. This assump-
+tion fundamentally limits their applicability in streaming scenarios,
+where video arrives as a continuous and unbounded sequence and
+requires incremental, real-time processing.
+Streaming Video Understanding. Recent efforts have explored
+streaming video understanding to enable real-time processing over
+continuous visual streams [6, 10, 13, 24, 34, 43, 45]. A line of work
+adopts internal memory mechanisms, where historical visual in-
+formation is maintained in compressed GPU-resident representa-
+tions such as tokens or key-value caches. Methods such as Flash-
+VStream [53] and StreamMem [47] follow this design to support
+efficient sequential processing. To further mitigate computational
+overhead during real-time inference, TimeChat-Online [49] prunes
+visual redundancies via dynamic token dropping and hierarchical
+compression, similarly, FluxMem [44] introduces a training-free
+adaptive hierarchical memory to progressively reduce spatiotem-
+poral token redundancy based on intrinsic scene statistics, while
+StreamingVLM [46] stabilizes generation by maintaining a compact,
+asymmetric KV cache with attention sinks and sliding windows.
+Another line of work extends memory beyond the GPU by leverag-
+ing external storage (e.g., CPU or disk) to retain richer historical
+information and retrieve relevant context on demand. Represen-
+tative methods include ReKV [9], which retrieves historical KV
+caches from RAM/disk, LiveVLM [28], which further combines
+compressed KV memory with short- and long-term retrieval, and
+Vista [26], which organizes streaming history as scene-level mem-
+ory for selective recall. However, these methods mostly retrieve
+coarse-grained context units, with limited explicit modeling of fine-
+grained entity structures. Our method instead constructs a multi-
+level, entity-aware structured memory that explicitly encodes both
+global context and entity dynamics.
+3
+Methodology
+Problem Setup. We consider streaming video understanding under
+a strict online setting, where video frames arrive sequentially over
+time. At each time step 𝑡, the model receives the current frame 𝑥𝑡
+and performs reasoning based solely on 𝑥𝑡and past observations
+{𝑥1, . . . ,𝑥𝑡−1}, without access to future frames.
+Given a query 𝑄at time 𝑡, the goal of the MLLM 𝜙is to produce
+an answer 𝐴𝑡by leveraging both the current frame and relevant his-
+torical visual information. This requires the model to maintain and
+continuously update an internal representation of past observations
+as new frames arrive.
+Method Overview. We address streaming video understanding by
+constructing a multi-level, entity-aware structured memory that
+supports accurate reasoning over unbounded visual streams. As
+illustrated in Figure 2, our proposed MEMO framework consists
+of four key components: (1) Multi-Level Entity-Aware Perception,
+(2) Online Temporal Chunking, (3) Structured Memory Construction,
+and (4) Query-Specific Evidence Retrieval.
+Overall, given a video stream {𝑥1, . . . ,𝑥𝑡}, MEMO first performs
+multi-level entity-aware perception to extract complementary visual
+cues, including global semantic context, local entity features, and
+spatial structures. Based on these representations, MEMO computes
+a unified similarity score between the current frame 𝑥𝑡and its his-
+torical context, capturing semantic continuity from both global and
+fine-grained levels. This score guides online temporal chunking to
+partition the stream into semantically coherent chunks. The result-
+ing chunks are organized by the structured memory construction
+module into a structured memory, where lightweight multi-level
+representations serve as retrieval indices and high-resolution visual
+evidence is preserved separately for on-demand access. Given a
+query 𝑄, the query-specific evidence retrieval module selects the
+
+
+MEMO: Multi-Level Entity-Aware Memory for
+Streaming Video Understanding
+High-Res Pool
+CPU
+𝑆iou
+𝑡
+𝑆local
+𝑡
+Detected
+𝑂𝑡
+𝑂buf
+Segment
+𝑆spatial
+𝑡
+𝑆disp
+𝑡
+𝑆global
+𝑡
+𝐹global
+𝑡−1
+𝐹global
+𝑡
+CLIP
+CLIP
+𝑆iou
+𝑡
+𝑆total
+𝑡
+𝜆𝑠
+𝜆g
+𝜆𝑙
+(2) Online Temporal Chunking
+τ
+𝑆tOtal
+t
+𝐶𝑖
+CLIP Text
+Encoder
+Where was he trying to go on his bike?
+He was trying to get to the bus stop.
+(1) Multi-Level Entity-Aware Perception
+LLM 
+𝑇𝑞
+𝐶𝑖+1
+𝐶𝑖−1
+Long-term Memory
+Working Memory
+X𝑡
+X𝑡−1
+X𝑡−𝑛
+. . .
+GPU
+Lightweight Index
+𝑀𝑔𝑙𝑜𝑏𝑎𝑙
+𝑖
+𝑀𝑒𝑛𝑡𝑖𝑡𝑦
+𝑖
+(3) Structured Memory Construction
+Vision
+Encoder
+. . .
+Top-K
+𝐶𝑘1
+𝐶𝑘2
+𝐶𝑘𝐾
+𝑥𝑡−1
+𝑥𝑡
+𝑥𝑡
+Video stream
+(4) Query-Specific 
+Evidence Retrieval
+α
+1-α
+◄ (Match) ►
+ҧ𝑓𝑖−1
+𝑡
+𝑓𝑖
+𝑡
+EMA
+Figure 2: Overall architecture of MEMO. The streaming pipeline consists of four stages: (1) Multi-Level Entity-Aware Perception
+extracts global, entity-level, and spatial cues to model semantic continuity; (2) Online Temporal Chunking incrementally
+partitions the video stream into semantically coherent chunks based on similarity; (3) Structured Memory Construction
+organizes chunks into a structured memory with lightweight indices and high-resolution visual evidence; and (4) Query-Specific
+Evidence Retrieval retrieves the most relevant chunks and their associated visual evidence to support downstream reasoning.
+most relevant chunks and retrieves their associated visual evidence
+for downstream reasoning.
+3.1
+Multi-Level Entity-Aware Perception
+To handle continuous and unbounded visual streams, MEMO mod-
+els semantic continuity between the current frame and its recent
+context through multi-level, entity-aware visual representations.
+Specifically, we assess semantic consistency from three comple-
+mentary perspectives: global semantics, local object semantics, and
+spatial structure.
+Global semantic similarity. We first define the global semantic
+similarity 𝑆(𝑡)
+global to measure the semantic continuity between two
+adjacent frames at the whole-frame level. We use CLIP [35] to ex-
+tract global semantic features for each frame. Let 𝐹(𝑡−1)
+global, 𝐹(𝑡)
+global ∈
+R𝐷denote the global feature vectors of frames 𝑥𝑡−1 and 𝑥𝑡, respec-
+tively, where 𝐷is the feature dimension. After 𝐿2 normalization,
+we compute the cosine similarity as:
+𝑆(𝑡)
+global =
+1 + cos 𝐹(𝑡−1)
+global, 𝐹(𝑡)
+global
+
+2
+.
+(1)
+Although global frame-level features capture overall scene se-
+mantics, they are often insufficient to characterize changes in key
+semantic entities. Therefore, we further incorporate entity-level
+modeling to measure similarity from the perspective of tracked
+objects. We first employ Grounding DINO [25] for object detection
+and SAM [15] for segmentation, and then associate objects across
+frames to assign stable identities. Let O𝑡denote the set of objects
+in frame 𝑥𝑡. For each persistently tracked object, we maintain a
+historical semantic state in memory. On top of this memory, we
+define two object-level measures: local semantic continuity 𝑆(𝑡)
+local
+and spatial structural continuity 𝑆(𝑡)
+spatial.
+Local semantic continuity. The local semantic similarity 𝑆(𝑡)
+local
+measures the temporal consistency of object appearance. For each
+object 𝑖, we suppress the background using the segmentation mask
+generated by SAM and extract an object-level CLIP feature, denoted
+by 𝑓(𝑡)
+𝑖
+. To reduce semantic fluctuations caused by single-frame
+noise, we maintain a historical semantic state ¯𝑓(𝑡)
+𝑖
+for each object
+and update it with exponential moving average (EMA):
+¯𝑓(𝑡)
+𝑖
+= 𝜌𝑓(𝑡)
+𝑖
++ (1 −𝜌) ¯𝑓(𝑡−1)
+𝑖
+,
+(2)
+
+
+Yinying Li et al.
+where 𝜌is the EMA update coefficient. For objects that can be
+successfully matched with historical states, we compute the co-
+sine similarity between the current observation and its historical
+semantic state:
+𝑆(𝑡)
+local,𝑖= 1 + cos 𝑓(𝑡)
+𝑖
+, ¯𝑓(𝑡−1)
+𝑖
+
+2
+.
+(3)
+Considering that different objects may contribute unequally to
+scene semantics, we aggregate object-level scores using object
+weights 𝑤𝑖, which denote the pixel-area ratio of object 𝑖. Thus,
+𝑆(𝑡)
+local is defined as:
+𝑆(𝑡)
+local =
+Í
+𝑖∈O𝑡∩Obuf 𝑤𝑖𝑆(𝑡)
+local,𝑖
+Í
+𝑖∈O𝑡∩Obuf 𝑤𝑖
+−𝑃(𝑡)
+penalty,
+(4)
+where Obuf denotes the set of objects stored in the historical buffer,
+and O𝑡∩Obuf denotes the set of objects that are both currently vis-
+ible and successfully aligned with historical memory. The penalty
+term 𝑃(𝑡)
+penalty is introduced to account for object-set changes be-
+tween the current frame and the buffered history.
+We formulate a discontinuity penalty to account for both newly
+appeared objects, defined as Onew = O𝑡\ Obuf, and disappeared
+objects, defined as Odis = Obuf \ O𝑡. Intuitively, the emergence of
+new objects often indicates semantic shifts (e.g., shot transitions),
+whereas object disappearance is more commonly caused by tran-
+sient factors such as occlusions. To capture this asymmetry, we
+assign different penalty weights 𝛾new > 𝛾dis, imposing a stronger
+penalty on newly appeared objects.
+Specifically, the penalty for newly appeared objects is defined as
+the relative weight ratio of new objects in the current frame. In con-
+trast, temporarily disappeared objects are maintained in a hidden
+state with a dedicated counter 𝑐𝑘. To enhance robustness against
+occlusions and tracking jitter, we use a bounded quadratic function
+𝑔(𝑐𝑘) = (min(𝑐𝑘/𝐻hid, 1))2 to progressively increase the penalty
+with the hidden duration. The overall penalty term is defined as:
+𝑃(𝑡)
+penalty = 𝛾new
+ Í
+𝑖∈Onew 𝑤𝑖
+Í
+𝑗∈O𝑡𝑤𝑗
+
++ 𝛾dis
+∑︁
+𝑘∈Odis
+𝑤𝑘· 𝑔(𝑐𝑘).
+(5)
+where 𝑤𝑖, 𝑤𝑗, and 𝑤𝑘denote the respective target’s area proportion
+relative to the entire frame, and O𝑡represents the complete set
+of valid objects in the current frame. These two terms explicitly
+quantify the discontinuity induced by the emergence of new ob-
+jects and the prolonged absence of existing ones, respectively. As
+either term increases, the local semantic continuity score decreases
+accordingly.
+Spatial structural continuity. The spatial similarity 𝑆(𝑡)
+spatial fo-
+cuses on geometric continuity between matched objects across
+adjacent frames. For each successfully matched object, we describe
+its spatial consistency from two aspects. First, we compare the over-
+lap of its segmented regions in two adjacent frames and obtain
+the mask intersection-over-union score 𝑆(𝑡)
+iou. Second, we compare
+the displacement of the object bounding-box center between two
+frames and obtain the displacement consistency score 𝑆(𝑡)
+disp. The
+final spatial continuity is defined as:
+𝑆(𝑡)
+spatial = 𝛼𝑆(𝑡)
+iou + (1 −𝛼)𝑆(𝑡)
+disp,
+(6)
+where 𝛼balances mask overlap and displacement smoothness.
+Specifically, 𝑆(𝑡)
+iou is the average mask IoU over matched objects,
+while 𝑆(𝑡)
+disp averages their displacement consistency, computed from
+the normalized bounding-box center displacement. If no object
+is matched, both scores are set to zero. We set 𝛼= 0.6 and the
+maximum displacement tolerance to 𝑑max = 0.5.
+3.2
+Online Temporal Chunking
+After computing the three similarity components, we combine them
+into an overall similarity score:
+𝑆(𝑡)
+total = 𝜆𝑠𝑆(𝑡)
+spatial + 𝜆𝑙𝑆(𝑡)
+local + 𝜆𝑔𝑆(𝑡)
+global,
+(7)
+where 𝜆𝑠, 𝜆𝑙, and 𝜆𝑔are hyperparameters.
+When a new frame 𝑥𝑡arrives, we compute its corresponding
+𝑆(𝑡)
+total and incorporate it into the currently growing segment. To
+this end, we maintain an active segment buffer, which stores the
+continuous frame sequence of the current unfinished segment. The
+buffer grows as new frames arrive until the system determines that
+a semantic boundary has been reached. Meanwhile, we maintain a
+historical statistics window to record recent total similarity scores
+𝑆(𝑡−𝑛)
+total , . . . ,𝑆(𝑡)
+total, where 𝑛is the window size. Based on the mean
+𝜇(𝑡) and standard deviation 𝜎(𝑡) within this window, we estimate
+an adaptive threshold,
+𝜏(𝑡) = clip(𝜇(𝑡) −𝑚· 𝜎(𝑡),𝜏min,𝜏max),
+(8)
+where 𝑚controls the sensitivity to similarity drops, and clip(·)
+denotes a truncation function that restricts the threshold to lie
+within [𝜏min,𝜏max].
+Because motion blur, short-term occlusion, and local perception
+noise may cause transient fluctuations in the similarity score, a
+single low-similarity observation may not reliably indicate a se-
+mantic boundary. We therefore confirm a boundary only when
+𝑆(𝑡)
+total < 𝜏(𝑡) persists for 𝑁confirm consecutive frames. To further
+avoid over-segmentation and fragmented chunks, we impose a min-
+imum segment-length constraint. A cut is triggered only when both
+the low-similarity confirmation and the minimum-length require-
+ment are satisfied.
+3.3
+Structured Memory Construction
+For any segmented semantic chunk, we adopt a hierarchical storage
+strategy:
+High-resolution visual evidence. For each chunk 𝐶(𝑖), we store
+the original high-resolution visual tensor 𝑋(𝑖) ∈R𝑇𝑖×𝐻×𝑊×3 in
+CPU memory as visual evidence for downstream fine-grained rea-
+soning. The visual evidence is encoded on demand: only frames
+sampled from retrieved chunks are processed by the vision encoder
+of the MLLM 𝜙, rather than encoding the entire historical mem-
+ory. For multi-turn queries, MLLM-specific visual representations
+are cached after first use and reused when the same evidence is
+retrieved again.
+Lightweight structured memory. On the GPU side, we maintain
+only compact chunk-level memory: M (𝑖) = ⟨M (𝑖)
+global, M (𝑖)
+entity⟩,
+which serve as efficient indices for similarity-based retrieval.
+Specifically, M (𝑖)
+global denotes the global semantic representation of
+
+
+MEMO: Multi-Level Entity-Aware Memory for
+Streaming Video Understanding
+chunk 𝐶(𝑖), which is defined as:
+M (𝑖)
+global =
+Í𝑇𝑖
+𝑗=1 𝜔𝑗𝐹(𝑗)
+global
+Í𝑇𝑖
+𝑗=1 𝜔𝑗𝐹(𝑗)
+global
+
+2
+∈R𝐷,
+(9)
+where 𝐹(𝑗)
+global ∈R𝐷denotes the global feature of the 𝑗-th frame in the
+current chunk 𝐶(𝑖), and 𝜔𝑗∝max(𝑐, 1 −𝑆(𝑗−1)
+total ) is the aggregation
+weight with a constant 𝑐.
+For the first frame in each chunk, we set 𝜔1 = 1. Correspondingly,
+M (𝑖)
+entity denotes the entity-level representation of chunk𝐶(𝑖), which
+is defined as:
+M (𝑖)
+entity = [ ¯𝑓(𝑖)
+1
+, ¯𝑓(𝑖)
+2
+, . . . , ¯𝑓(𝑖)
+𝑁(𝑖)
+𝑂
+]⊤∈R𝑁(𝑖)
+𝑂×𝐷,
+(10)
+where ¯𝑓(𝑖)
+𝑛
+denotes the preserved EMA semantic state of the 𝑛-th
+core object at the end of chunk 𝐶(𝑖). In our implementation, only
+active entities are retained in M (𝑖)
+entity, i.e., entities whose hidden
+counts do not exceed half of the maximum hidden-frame budget.
+Notably, the memory footprint of M (𝑖) is bounded by O(𝐷+ 𝑁(𝑖)
+𝑂·
+𝐷), significantly reducing storage and computation costs during
+large-scale retrieval.
+Our default implementation adopts a hybrid storage backend,
+where lightweight chunk indices remain resident on GPU for effi-
+cient retrieval, while raw visual evidence is offloaded to CPU and
+encoded on demand. For analysis, we additionally consider two de-
+generate variants: a GPU-only backend that keeps both indices and
+visual evidence on GPU, and a CPU-only backend that stores both
+components off-GPU. For a fair comparison under bounded device
+memory, the GPU-only variant evicts the oldest visual evidence
+once the GPU memory budget is reached, whereas the CPU-only
+variant keeps the full history off-GPU but incurs additional transfer
+overhead.
+3.4
+Query-Specific Evidence Retrieval
+Given a natural-language query 𝑄, we use the CLIP text Encoder to
+extract the text feature vector 𝑇𝑄∈R𝐷. The system first performs
+parallel similarity computation over all lightweight chunk indices.
+For each candidate chunk 𝐶(𝑖), we compute the cosine similarity
+between 𝑇𝑄and its global summary M (𝑖)
+global, as well as the best
+local match between 𝑇𝑄and its entity memory set M (𝑖)
+entity:
+Sim(𝑖)
+global = cos 𝑇𝑄, M (𝑖)
+global
+,
+Sim(𝑖)
+local =
+max
+𝑒∈M (𝑖)
+entity
+cos 𝑇𝑄,𝑒. (11)
+The final retrieval score is obtained by linearly combining the
+two similarity terms:
+Score(𝑄,𝐶(𝑖)) = 𝜆globalSim(𝑖)
+global + 𝜆localSim(𝑖)
+local,
+(12)
+where 𝜆global and 𝜆local are weighting hyperparameters. Based on
+the retrieval scores, we select the Top-𝐾most relevant chunks:
+R𝐾(𝑄) = {𝐶(𝑖1), . . . ,𝐶(𝑖𝐾)}.
+Their associated visual evidence is denoted as:
+𝑋ret(𝑄) = {𝑋(𝑖) | 𝐶(𝑖) ∈R𝐾(𝑄)}.
+We further incorporate the pending frames from the current active
+segment, denoted as 𝑋cur. To accommodate the bounded visual
+context window of the MLLM, we uniformly sample at most 𝑁LLM
+frames from both 𝑋ret(𝑄) and 𝑋cur, yielding the sampled visual
+inputs ˜𝑋ret(𝑄) and ˜𝑋cur. Only these selected frames are processed
+by the MLLM vision encoder. For previously encoded evidence, the
+cached MLLM-specific visual representations are directly reused.
+Finally, the answer 𝐴𝑡is generated as:
+𝐴𝑡= 𝜙 𝑄, ˜𝑋ret(𝑄), ˜𝑋cur
+.
+(13)
+4
+Experiments
+4.1
+Experimental Setup
+Datasets. We evaluate MEMO on two online video understanding
+benchmarks: the real-time subset of StreamingBench [21] and OVO-
+Bench [29]. StreamingBench evaluates real-time comprehension
+over continuous video streams, whereas OVO-Bench focuses on
+timestamp-anchored tasks, including historical retrieval, real-time
+awareness, and proactive response.
+Baselines & Competitors. To verify that MEMO is training-free,
+plug-and-play, and compatible with diverse MLLM backbones, we
+evaluate it on four open-source models spanning different param-
+eter scales and architectures, including LLaVA-OV-0.5B/7B [17],
+Qwen2.5-VL-7B [3], and Qwen3-VL-8B [2]. For each backbone, we
+compare the vanilla model with its MEMO-enhanced version to
+isolate the performance gains brought by our framework. In addi-
+tion, we compare MEMO with other representative methods under
+the same evaluation protocol, grouped into four categories: (1) pro-
+prietary MLLMs, including Gemini 1.5 Pro [40] and GPT-4o [14]; (2)
+open-source offline video MLLMs, including LongVA [54], LongVU-
+7B [38], and LLaVA-Video [55]; (3) open-source online MLLMs with
+additional training, including VideoLLM-online-8B [6], Dispider-
+7B [33], Flash-VStream-7B [53], ViSpeak [11], TimeChat-Online-
+7B [49], and StreamForest-7B [50]; and (4) training-free online adap-
+tation methods, including ReKV [9], LiveVLM [28], StreamKV [8],
+Vista [26], and FluxMem [44].
+Implementation Details. As an independent pre-reasoning en-
+hancement module, MEMO requires no parameter updates for the
+backbone models. For the input configuration, the incoming video
+stream is uniformly sampled at 1 fps, and the retrieval module
+retrieves the top 𝐾= 3 chunks. For the core algorithmic hyper-
+parameters, we empirically set (𝜆𝑠, 𝜆𝑙, 𝜆𝑔) = (0.35, 0.45, 0.20) for
+online chunking and (𝜆global, 𝜆local) = (0.6, 0.4) for retrieval. We set
+the base frame budget 𝑁LLM = 8 for both the current active segment
+and the retrieved historical evidence, which strictly caps the total
+visual input at 16 frames. For entity perception, Grounding DINO
+uses bounding-box and text thresholds of 0.35 and 0.25, respectively,
+and cross-frame objects are associated using an IoU threshold of
+0.3. We set the EMA coefficient 𝜌= 0.3 and the spatial balance
+coefficient 𝛼= 0.6. For adaptive chunking, we use a sliding window
+of 𝑛= 30 with 𝑚= 1.3, and (𝜏min,𝜏max) = (0.1, 0.9). A boundary is
+confirmed after 𝑁confirm = 1 low-similarity frame, with a minimum
+chunk length of 𝐿min = 4. The hidden-frame budget is 𝐻hid = 5.
+We keep the original video resolution without manual resizing and
+
+
+Yinying Li et al.
+Table 1: Performance comparison on OVO-Bench and StreamingBench.
+Method
+Frames
+OVO-Bench real-time
+StreamingBench real-time
+OCR
+ACR
+ATR
+STU
+FPD
+OJR
+Avg.
+OP
+CR
+CS
+ATP
+EU
+TR
+PR
+SU
+ACP
+CT
+Avg.
+Proprietary Models
+Gemini 1.5 Pro [40]
+1 fps
+85.9
+67.0
+79.3
+58.4
+63.4
+62.0
+69.3
+79.0
+80.5
+83.5
+79.7
+80.0
+84.7
+77.8
+64.2
+72.0
+48.7
+75.7
+GPT-4o [14]
+64
+69.8
+64.2
+71.6
+51.1
+70.3
+59.8
+64.5
+77.1
+80.5
+83.9
+76.5
+70.2
+83.8
+66.7
+62.2
+69.1
+49.2
+73.3
+Open-source Offline MLLMs
+LongVA [54]
+128
+–
+–
+–
+–
+–
+–
+–
+70.0
+63.3
+61.2
+70.9
+62.7
+59.5
+61.1
+53.7
+54.7
+34.7
+60.0
+LongVU-7B [38]
+1 fps
+55.7
+49.5
+59.5
+48.3
+68.3
+63.0
+57.4
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+LLaVA-Video [55]
+64
+69.1
+58.7
+68.8
+49.4
+74.3
+59.8
+63.5
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+Open-source Online MLLMs (Training-Based)
+VideoLLM-online-8B [6]
+2 fps
+8.1
+23.9
+12.1
+14.0
+45.5
+21.2
+20.8
+39.1
+40.1
+34.5
+31.1
+46.0
+32.4
+31.5
+34.2
+42.5
+27.9
+36.0
+Dispider-7B [33]
+1 fps
+57.7
+49.5
+62.1
+44.9
+61.4
+51.6
+54.6
+74.9
+75.5
+74.1
+73.1
+74.4
+59.9
+76.1
+62.9
+62.2
+45.8
+67.6
+Flash-VStream-7B [53]
+1 fps
+25.5
+32.1
+29.3
+33.7
+29.7
+28.8
+29.9
+25.9
+43.6
+24.9
+23.9
+27.3
+13.1
+18.5
+25.2
+23.9
+48.7
+23.2
+ViSpeak [11]
+1 fps
+75.2
+58.7
+71.6
+51.1
+74.3
+66.9
+66.3
+79.8
+88.3
+83.3
+81.1
+76.4
+75.1
+70.4
+65.9
+77.3
+34.2
+74.4
+TimeChat-Online-7B [49]
+1 fps
+75.2
+46.8
+70.7
+47.8
+69.3
+61.4
+61.9
+80.8
+79.7
+80.8
+83.3
+74.8
+78.8
+78.7
+64.2
+68.8
+58.0
+75.3
+StreamForest-7B [50]
+1 fps
+68.5
+53.2
+71.6
+47.8
+65.4
+60.9
+61.2
+83.1
+82.8
+82.7
+84.3
+77.5
+78.2
+76.9
+69.1
+75.6
+54.4
+77.3
+Open-source Online MLLMs (Training-Free)
+LLaVA-OneVision-0.5B [17]
+32
+53.7
+53.2
+48.3
+33.7
+60.4
+48.9
+49.7
+71.4
+57.8
+65.9
+69.6
+69.2
+55.8
+57.4
+52.9
+62.0
+16.6
+59.6
++ReKV [9]
+0.5 fps
+41.6
+45.0
+50.0
+29.8
+60.4
+35.9
+43.8
+65.1
+60.2
+66.6
+66.0
+66.7
+53.0
+57.4
+48.4
+60.3
+18.1
+57.4
++MEMO
+1 fps
+50.3
+56.9
+50.9
+37.1
+54.5
+52.7
+50.4
+68.8
+62.5
+66.3
+71.2
+63.7
+56.4
+58.3
+52.0
+62.5
+15.4
+59.5
+LLaVA-OneVision-7B [17]
+32
+67.8
+55.1
+72.4
+48.3
+72.3
+62.5
+63.1
+80.4
+74.2
+76.0
+80.7
+72.7
+71.7
+67.6
+65.5
+65.7
+45.1
+71.1
++ReKV [9]
+0.5 fps
+52.4
+54.1
+69.8
+43.3
+67.3
+57.1
+57.3
+74.4
+78.9
+78.6
+77.1
+68.3
+67.9
+67.6
+62.6
+64.3
+44.6
+69.1
++LiveVLM [28]
+0.5 fps
+–
+–
+–
+–
+–
+–
+–
+81.5
+78.1
+83.3
+79.1
+69.6
+74.1
+75.0
+69.1
+67.7
+40.4
+72.9
++StreamKV [8]
+0.5 fps
+–
+–
+–
+–
+–
+–
+–
+73.8
+77.3
+85.9
+77.5
+73.3
+63.9
+69.4
+61.4
+63.2
+35.8
+68.8
++MEMO
+1 fps
+71.1
+64.2
+75.0
+48.3
+74.3
+66.9
+66.6
+77.7
+69.5
+89.7
+82.5
+71.3
+68.0
+68.6
+71.2
+64.5
+42.0
+73.2
+Qwen2.5-VL-7B [3]
+1 fps
+67.8
+55.1
+67.2
+42.1
+66.3
+60.9
+59.9
+77.9
+76.6
+78.6
+80.9
+76.7
+77.0
+80.6
+65.5
+65.7
+52.9
+73.3
++FluxMem [44]
+1 fps
+81.2
+59.6
+70.7
+53.4
+75.2
+63.0
+67.2
+80.2
+81.1
+81.4
+85.3
+78.0
+83.8
+80.6
+65.9
+69.6
+52.1
+76.4
++MEMO
+1 fps
+75.8
+61.5
+78.5
+53.4
+69.3
+63.0
+66.9
+81.0
+78.1
+83.9
+88.0
+75.8
+91.0
+86.1
+75.2
+70.7
+44.7
+78.5
+Qwen3-VL-8B [2]
+1 fps
+71.1
+65.1
+75.9
+64.6
+75.3
+70.7
+70.1
+76.8
+77.2
+77.3
+80.7
+70.4
+75.2
+80.6
+64.2
+65.8
+49.2
+73.2
++MEMO
+1 fps
+83.9
+74.3
+78.5
+67.4
+76.2
+75.5
+76.0
+89.7
+75.8
+90.9
+90.3
+79.6
+95.6
+83.3
+74.4
+82.4
+52.1
+83.7
+follow the native visual preprocessing of each backbone. Evalua-
+tions are conducted on a computing cluster equipped with NVIDIA
+A6000 GPUs.
+4.2
+Main Results
+From the results presented in Table 1, we draw the following obser-
+vations.
+Consistent Improvement over Base Models. As shown in Ta-
+ble 1, MEMO improves the three stronger backbones on both bench-
+marks without any parameter updates, while maintaining compa-
+rable performance on the lightweight LLaVA-OneVision-0.5B back-
+bone. In particular, when integrated with Qwen3-VL-8B, MEMO
+improves the OVO-Bench score from 70.1% to 76.0% and the Stream-
+ingBench score from 73.2% to 83.7%, corresponding to gains of 5.9 %
+and 10.5 %, respectively. The improvements across different model
+families and scales demonstrate the broad applicability of MEMO.
+On StreamingBench, the gains introduced by MEMO generally in-
+crease with backbone capability. For the LLaVA-OneVision family,
+MEMO slightly decreases the average accuracy of the 0.5B model by
+0.1 %, while improving that of the 7B model by 2.1 pts. Similarly, the
+improvements increase from 5.2 % with Qwen2.5-VL-7B to 10.5 %
+with Qwen3-VL-8B. These results suggest that stronger backbones
+can more effectively exploit the query-relevant evidence provided
+by MEMO.
+Significant Advantages over Existing Methods. With Qwen3-
+VL-8B as the backbone, MEMO achieves state-of-the-art perfor-
+mance on both benchmarks, surpassing all compared methods.
+MEMO shows clear advantages over existing training-free methods
+under the same base model, including ReKV and LiveVLM. For
+example, on LLaVA-OneVision-7B, MEMO exceeds ReKV by 9.3%
+on OVO-Bench and 4.1% on StreamingBench. In particular, it out-
+performs the previous training-based SOTA, StreamForest [50], by
+14.8% on OVO-Bench and 6.4% on StreamingBench. These results
+demonstrate that an effective memory and retrieval mechanism
+can make lightweight training-free methods highly competitive for
+streaming video understanding.
+Fine-grained Analysis. A finer-grained breakdown reveals that
+the gains introduced by MEMO are especially pronounced on tasks
+that require temporally coherent event preservation and fine-grained
+
+
+MEMO: Multi-Level Entity-Aware Memory for
+Streaming Video Understanding
+TimeChatOnline-7B
+LLaVA-OV-7B+ReKV
+LLaVA-OV-7B+MEMO
+Qwen2.5-VL-7B+MEMO
+0
+1
+2
+3
+4
+Latency (s)
+60
+65
+70
+75
+80
+Accuracy (%)
+0
+10
+20
+30
+40
+GPU Memory (GB)
+Figure 3: Comparison of different methods in terms of peak
+GPU memory usage, response latency, and accuracy. All ex-
+periments are conducted on a single NVIDIA A6000 GPU.
+Table 2: Ablation on perception and memory synergy.
+Base
+Perception
+Memory
+Acc. (%)
+✓
+✗
+✗
+73.2
+✓
+✗
+✓
+79.4 +6.2
+✓
+✓
+✗
+77.8 +4.6
+✓
+✓
+✓
+83.7 +10.5
+historical evidence recall. In particular, the improvements in ac-
+tion perception (ACP, +16.6%) and clip summarization (CS, +13.6%)
+suggest the benefit of Online Temporal Chunking, which better
+preserves semantically coherent events than fixed-length segmen-
+tation. Meanwhile, the gains in OCR (+12.8%), object recognition
+(OJR, +4.8%), and attribute perception (ATP, +9.6%) demonstrate
+the value of Structured Memory Construction and Query-Specific
+Evidence Retrieval, where M (𝑖)
+global and M (𝑖)
+entity provide lightweight
+yet informative indices for query-relevant evidence retrieval.
+4.3
+Efficiency Analysis
+To evaluate the inference efficiency of streaming video understand-
+ing, we benchmark the peak allocated GPU memory, end-to-end
+response latency, and accuracy on StreamingBench using a single
+NVIDIA A6000 GPU. Here, the response latency is defined as the
+elapsed time from receiving the input query to generating the com-
+plete textual answer, covering the entire pipeline of visual evidence
+retrieval, visual encoding, and MLLM decoding.
+The results in Figure 3 show that our proposed MEMO achieves
+a strong balance between performance and efficiency. When com-
+bined with Qwen2.5-VL-7B, MEMO attains the highest accuracy of
+78.5%, while requiring only 21.1 GB of peak memory and 1.2 seconds
+of average latency. Compared with TimeChat-Online, which is also
+built on Qwen2.5-VL-7B, MEMO improves accuracy by 3.2% while
+reducing memory consumption and latency by 10.9% and 67.6%,
+respectively. When applied to LLaVA-OneVision-7B, MEMO further
+reduces peak memory usage to 20.5 GB and response latency to 0.8
+seconds, while still maintaining a competitive accuracy of 73.2%,
+surpassing ReKV [9] by 4.1% under the same backbone.
+To further understand the computational overhead of MEMO,
+we provide a module-wise latency breakdown in Table 3. The main
+computational cost comes from the visual perception stage, where
+CLIP, Grounding DINO, and SAM require 297.60 ms per frame in
+Table 3: Latency breakdown of Qwen2.5-VL-7B + MEMO. Ret.
+and Gen. denote retrieval and generation, respectively.
+Vision / Frame
+Memory
+LLM / Query
+Module
+ms
+Operation
+ms
+Metric
+ms
+CLIP
+16.56
+Update
+0.39
+TTFT
+598.44
+Grounding DINO
+154.91
+Ret. & Recall
+8.08
+TPOT
+55.02
+SAM
+126.13
+Total Gen.
+1367.62
+Table 4: Ablation on multi-level memory. “Entity-only” relies
+exclusively on spatial and local cues for chunking and Mentity
+for retrieval. “Global-only” relies exclusively on global cues
+for chunking and Mglobal for retrieval.
+Variants
+Feature Dependency
+Acc. (%)
+Chunking Stage
+Retrieval Stage
+Full Model
+𝑆spatial + 𝑆local + 𝑆global
+Mentity + Mglobal
+83.69
+Entity-only
+𝑆spatial + 𝑆local
+Mentity
+81.77
+Global-only
+𝑆global
+Mglobal
+81.31
+total. In contrast, the memory update and retrieval modules intro-
+duce only marginal overhead, requiring 0.39 ms per frame and 8.08
+ms per query, respectively. These results demonstrate that MEMO’s
+structured memory construction and query-specific retrieval can
+be efficiently executed under the sampled-stream setting.
+Overall, these results demonstrate that MEMO effectively bal-
+ances efficiency and accuracy in streaming video understanding.
+Enabled by its multi-level structured memory and query-aware
+retrieval mechanism, MEMO supports efficient long-context rea-
+soning without incurring prohibitive inference overhead.
+4.4
+Ablation Studies
+To validate the effectiveness of the key components and design
+choices in MEMO, we conduct comprehensive ablation studies on
+StreamingBench using Qwen3-VL-8B.
+Ablation on the Synergy between Perception and Memory.
+To disentangle the importance of Perception (entity-aware percep-
+tion and dynamic chunking) and Memory (structured memory and
+query-specific retrieval), we construct degraded variants to iso-
+late their individual contributions (Table 2). Concretely, disabling
+perception regresses dynamic chunking to fixed-length segmenta-
+tion, while removing memory replaces retrieval with chronological
+truncation under the same visual budget. The results show that
+memory only improves over the base model by 6.2%, indicating that
+explicit memory retrieval effectively mitigates long-term forgetting.
+Meanwhile, perception only brings a 4.6% gain, suggesting that
+adaptive perception preserves semantically coherent events more
+effectively than rigid segmentation. Combining both further boosts
+performance, revealing strong complementarity.
+Ablation on Multi-Level Memory Representations. We eval-
+uate the impact of hierarchical visual memory representations of
+the overall framework. As detailed in Table 4, stripping the model
+down to an Entity-only variant (relying exclusively on spatial/local
+cues for chunking and Mentity for retrieval) decreases accuracy to
+
+
+Yinying Li et al.
+80.5
+81
+81.5
+82
+82.5
+83
+83.5
+84
+Full
+Local
+Global
+Nearest-k Random-k
+Accuracy (%)
+80.5
+81
+81.5
+82
+82.5
+83
+83.5
+84
+Adaptive Fixed-8 Fixed-16 Fixed-32 Fixed-64
+Accuracy (%)
+Figure 4: Ablation results for different retrieval strategies
+(left) and temporal chunking strategies (right).
+81.77%, while a Global-only configuration further drops the per-
+formance to 81.31%. These results validate the core motivation of
+our multi-level design: global features capture coarse-grained scene
+contexts, whereas local entity features pinpoint query-relevant,
+object-centric evidence. Their synergistic integration is beneficial
+for robust streaming video understanding.
+Ablation on Retrieval Strategies. Figure 4 (left) compares differ-
+ent memory retrieval strategies. The full retrieval scheme achieves
+the best performance, highlighting the importance of jointly exploit-
+ing local and global semantics within structured memory for accu-
+rate evidence recall. Interestingly, the nearest-𝐾strategy achieves
+competitive performance (82.32%) by leveraging the natural tem-
+poral continuity of video streams, yet it still falls short of the full
+retrieval strategy. This suggests that while temporal proximity pro-
+vides a valuable prior, precise memory recall ultimately demands
+explicit semantic matching. In contrast, random-𝐾retrieval yields
+only 81.73%, further highlighting the critical role of targeted evi-
+dence retrieval.
+Ablation on Online Temporal Chunking. Figure 4 (right) com-
+pares our adaptive semantic chunking strategy against fixed-length
+chunking strategies with different window sizes. To ensure a fair
+comparison, the memory extraction and retrieval pipelines remain
+strictly identical across all configurations. The results show that
+all fixed-length chunking variants perform worse than our adap-
+tive strategy. Specifically, a narrow fixed window (e.g., 8 frames,
+dropping to 81.77%) tends to break semantically coherent events
+into fragmented pieces, disrupting the continuity of critical visual
+evidence. Conversely, a broad fixed window (e.g., 64 frames, 81.82%)
+inevitably conflates distinct semantic events into a single chunk,
+diluting the relevance of the retrieved content to the user query.
+These findings confirm that our similarity-based dynamic chunking
+mechanism better aligns with the intrinsic semantic boundaries of
+streaming videos.
+5
+Limitations
+MEMO relies on external detection, segmentation, and short-term
+object association, so upstream perception errors may propagate
+to chunking and retrieval. Although multi-level cues mitigate lo-
+cal tracking noise, the current entity-centric indices remain less
+effective at representing implicit or absence-based scene states. Per-
+sistent cross-chunk identity association and memory consolidation
+for hour- or day-scale streams also remain open problems. Future
+work will explore explicit scene-state memory, evidence re-ranking,
+and importance-aware memory consolidation.
+6
+Conclusion
+In this work, we study streaming video understanding from the
+perspective of memory modeling, where the key challenge lies
+in handling unbounded visual streams while preserving rich se-
+mantic information over time. We propose MEMO, a multi-level,
+entity-aware structured memory framework that organizes stream-
+ing video into semantically coherent chunks and represents them
+using both global context and fine-grained entity-level informa-
+tion. By modeling entity dynamics and decoupling lightweight
+indexing from high-resolution visual evidence, MEMO enables ef-
+fective retrieval and reasoning over long video streams. Extensive
+experiments on StreamingBench and OVO-Bench demonstrate that
+MEMO consistently improves multiple base models and achieves
+state-of-the-art performance. We hope this work could highlight
+the importance of structured memory representation for streaming
+video understanding and also encourage future research on scalable
+and semantically grounded memory designs.
+Acknowledgments
+This work was supported by the Shanghai Municipal Science and
+Technology Major Project (No. 2025SHZDZX025G16).
+References
+[1] Xiang An, Yin Xie, Kaicheng Yang, Wenkang Zhang, Xiuwei Zhao, Zheng Cheng,
+Yirui Wang, Songcen Xu, Changrui Chen, Didi Zhu, et al. 2025. Llava-onevision-
+1.5: Fully open framework for democratized multimodal training. arXiv preprint
+arXiv:2509.23661 (2025).
+[2] Shuai Bai, Yuxuan Cai, Ruizhe Chen, Keqin Chen, Xionghui Chen, Zesen Cheng,
+Lianghao Deng, Wei Ding, Chang Gao, Chunjiang Ge, et al. 2025. Qwen3-vl
+technical report. arXiv preprint arXiv:2511.21631 (2025).
+[3] Shuai Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin Ge, Sibo Song, Kai Dang,
+Peng Wang, Shijie Wang, Jun Tang, Humen Zhong, Yuanzhi Zhu, Mingkun Yang,
+Zhaohai Li, Jianqiang Wan, Pengfei Wang, Wei Ding, Zheren Fu, Yiheng Xu, Jiabo
+Ye, Xi Zhang, Tianbao Xie, Zesen Cheng, Hang Zhang, Zhibo Yang, Haiyang Xu,
+and Junyang Lin. 2025. Qwen2.5-VL Technical Report. arXiv:2502.13923 [cs.CV]
+https://arxiv.org/abs/2502.13923
+[4] Ada-Astrid Balauca, Sanjana Garai, Stefan Balauca, Rasesh Udayakumar Shetty,
+Naitik Agrawal, Dhwanil Subhashbhai Shah, Yuqian Fu, Xi Wang, Kristina
+Toutanova, Danda Pani Paudel, et al. 2025. Understanding Museum Exhibits
+using Vision-Language Reasoning. In 2025 IEEE/CVF International Conference on
+Computer Vision (ICCV). IEEE, 2227–2238.
+[5] Tim Brödermann, Christos Sakaridis, Yuqian Fu, and Luc Van Gool. 2025. Cafuser:
+Condition-aware multimodal fusion for robust semantic perception of driving
+scenes. IEEE Robotics and Automation Letters 10, 4 (2025), 3134–3141.
+[6] Joya Chen, Zhaoyang Lv, Shiwei Wu, Kevin Qinghong Lin, Chenan Song, Difei
+Gao, Jia-Wei Liu, Ziteng Gao, Dongxing Mao, and Mike Zheng Shou. 2024.
+Videollm-online: Online video large language model for streaming video. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recogni-
+tion. 18407–18418.
+[7] Li Chen, Penghao Wu, Kashyap Chitta, Bernhard Jaeger, Andreas Geiger, and
+Hongyang Li. 2024. End-to-end autonomous driving: Challenges and frontiers.
+IEEE Transactions on Pattern Analysis and Machine Intelligence 46, 12 (2024),
+10164–10183.
+[8] Yilong Chen, Xiang Bai, Zhibin Wang, Chengyu Bai, Yuhan Dai, and Ming
+Lu. 2026. Streamkv: Streaming video question-answering with segment-based
+kv cache retrieval and compression. In Proceedings of the AAAI Conference on
+Artificial Intelligence, Vol. 40. 3120–3128.
+[9] Shangzhe Di, Zhelun Yu, Guanghao Zhang, Haoyuan Li, Tao Zhong, Hao Cheng,
+Bolin Li, Wanggui He, Fangxun Shu, and Hao Jiang. 2025. Streaming video
+question-answering with in-context video kv-cache retrieval. arXiv preprint
+arXiv:2503.00540 (2025).
+[10] Mingkang Dong, Muxin Pu, Jie Li, Bohan Guo, Songruo Chen, Bin Ren, Xu Zheng,
+Chen Zhao, Tianwen Qian, Mohamed Elhoseiny, et al. 2026. ObjectStream: Latent
+Objects as Memory Anchors for Streaming Video Understanding. arXiv preprint
+arXiv:2607.28312 (2026).
+[11] Shenghao Fu, Qize Yang, Yuan-Ming Li, Yi-Xing Peng, Kun-Yu Lin, Xihan Wei,
+Jian-Fang Hu, Xiaohua Xie, and Wei-Shi Zheng. 2025. Vispeak: Visual instruc-
+tion feedback in streaming videos. In Proceedings of the IEEE/CVF International
+
+
+MEMO: Multi-Level Entity-Aware Memory for
+Streaming Video Understanding
+Conference on Computer Vision. 21778–21788.
+[12] Yuqian Fu, Runze Wang, Bin Ren, Guolei Sun, Biao Gong, Yanwei Fu, Danda Pani
+Paudel, Xuanjing Huang, and Luc Van Gool. 2025. Objectrelator: Enabling
+cross-view object relation understanding across ego-centric and exo-centric
+perspectives. In 2025 IEEE/CVF International Conference on Computer Vision
+(ICCV). IEEE, 6530–6540.
+[13] Zhenpeng Huang, Xinhao Li, Jiaqi Li, Jing Wang, Xiangyu Zeng, Cheng Liang,
+Tao Wu, Xi Chen, Liang Li, and Limin Wang. 2025. Online video understanding:
+Ovbench and videochat-online. In Proceedings of the Computer Vision and Pattern
+Recognition Conference. 3328–3338.
+[14] Aaron Hurst, Adam Lerer, Adam P Goucher, Adam Perelman, Aditya Ramesh,
+Aidan Clark, AJ Ostrow, Akila Welihinda, Alan Hayes, Alec Radford, et al. 2024.
+Gpt-4o system card. arXiv preprint arXiv:2410.21276 (2024).
+[15] Alexander Kirillov, Eric Mintun, Nikhila Ravi, Hanzi Mao, Chloe Rolland, Laura
+Gustafson, Tete Xiao, Spencer Whitehead, Alexander C Berg, Wan-Yen Lo, et al.
+2023. Segment anything. In Proceedings of the IEEE/CVF international conference
+on computer vision. 4015–4026.
+[16] Jie Lei, Linjie Li, Luowei Zhou, Zhe Gan, Tamara L Berg, Mohit Bansal, and
+Jingjing Liu. 2021. Less is more: Clipbert for video-and-language learning via
+sparse sampling. In Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition. 7331–7341.
+[17] Bo Li, Yuanhan Zhang, Dong Guo, Renrui Zhang, Feng Li, Hao Zhang, Kaichen
+Zhang, Peiyuan Zhang, Yanwei Li, Ziwei Liu, et al. 2024. Llava-onevision: Easy
+visual task transfer. arXiv preprint arXiv:2408.03326 (2024).
+[18] KunChang Li, Yinan He, Yi Wang, Yizhuo Li, Wenhai Wang, Ping Luo, Yali Wang,
+Limin Wang, and Yu Qiao. 2025. Videochat: Chat-centric video understanding.
+Science China Information Sciences 68, 10 (2025), 200102.
+[19] Kailing Li, Tianwen Qian, Lijin Yang, Yuqian Fu, Jingyu Gong, Xiaoling Wang,
+and Liang He. 2026. Bridging the 2D-3D Gap: A Hierarchical Semantic-Geometric
+Map for Vision Language Navigation. arXiv preprint arXiv:2606.00095 (2026).
+[20] Yanjun Li, Yuqian Fu, Tianwen Qian, Qi’ao Xu, Silong Dai, Danda Pani Paudel,
+Luc Van Gool, and Xiaoling Wang. 2026. Egocross: Benchmarking multimodal
+large language models for cross-domain egocentric video question answering. In
+Proceedings of the AAAI Conference on Artificial Intelligence, Vol. 40. 6592–6600.
+[21] Junming Lin, Zheng Fang, Chi Chen, Zihao Wan, Fuwen Luo, Peng Li, Yang Liu,
+and Maosong Sun. 2024. Streamingbench: Assessing the gap for mllms to achieve
+streaming video understanding. arXiv preprint arXiv:2411.03628 (2024).
+[22] Haotian Liu, Chunyuan Li, Yuheng Li, Bo Li, Yuanhan Zhang, Sheng Shen, and
+Yong Jae Lee. 2024. Llavanext: Improved reasoning, ocr, and world knowledge.
+[23] Haotian Liu, Chunyuan Li, Qingyang Wu, and Yong Jae Lee. 2023. Visual in-
+struction tuning. Advances in neural information processing systems 36 (2023),
+34892–34916.
+[24] Jihao Liu, Zhiding Yu, Shiyi Lan, Shihao Wang, Rongyao Fang, Jan Kautz, Hong-
+sheng Li, and Jose M Alvare. 2024. Streamchat: Chatting with streaming video.
+arXiv preprint arXiv:2412.08646 (2024).
+[25] Shilong Liu, Zhaoyang Zeng, Tianhe Ren, Feng Li, Hao Zhang, Jie Yang, Qing
+Jiang, Chunyuan Li, Jianwei Yang, Hang Su, et al. 2024. Grounding dino: Marrying
+dino with grounded pre-training for open-set object detection. In European
+conference on computer vision. Springer, 38–55.
+[26] Haocheng Lu, Nan Zhang, Wei Tao, Xiaoyang Qu, Guokuan Li, Jiguang Wan,
+and Jianzong Wang. 2026. Vista: Scene-Aware Optimization for Streaming
+Video Question Answering Under Post-Hoc Queries. In Proceedings of the AAAI
+Conference on Artificial Intelligence, Vol. 40. 7539–7547.
+[27] Muhammad Maaz, Hanoona Rasheed, Salman Khan, and Fahad Khan. 2024.
+Video-chatgpt: Towards detailed video understanding via large vision and lan-
+guage models. In Proceedings of the 62nd Annual Meeting of the Association for
+Computational Linguistics (Volume 1: Long Papers). 12585–12602.
+[28] Zhenyu Ning, Guangda Liu, Qihao Jin, Wenchao Ding, Minyi Guo, and Jieru
+Zhao. 2025. Livevlm: Efficient online video understanding via streaming-oriented
+kv cache and retrieval. arXiv preprint arXiv:2505.15269 (2025).
+[29] Junbo Niu, Yifei Li, Ziyang Miao, Chunjiang Ge, Yuanhang Zhou, Qihao He,
+Xiaoyi Dong, Haodong Duan, Shuangrui Ding, Rui Qian, et al. 2025. Ovo-bench:
+How far is your video-llms from real-world online video understanding?. In
+Proceedings of the Computer Vision and Pattern Recognition Conference. 18902–
+18913.
+[30] Maxime Oquab, Timothée Darcet, Théo Moutakanni, Huy Vo, Marc Szafraniec,
+Vasil Khalidov, Pierre Fernandez, Daniel Haziza, Francisco Massa, Alaaeldin El-
+Nouby, et al. 2023. Dinov2: Learning robust visual features without supervision.
+arXiv preprint arXiv:2304.07193 (2023).
+[31] Jiancheng Pan, Runze Wang, Tianwen Qian, Mohammad Mahdi, Yanwei Fu,
+Xiangyang Xue, Xiaomeng Huang, Luc Van Gool, Danda Pani Paudel, and Yuqian
+Fu. 2026. V2-SAM: Marrying SAM2 with Multi-Prompt Experts for Cross-View
+Object Correspondence. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition. 16910–16919.
+[32] Chiara Plizzari, Gabriele Goletto, Antonino Furnari, Siddhant Bansal, Francesco
+Ragusa, Giovanni Maria Farinella, Dima Damen, and Tatiana Tommasi. 2024.
+An Outlook into the Future of Egocentric Vision: C. Plizzari et al. International
+Journal of Computer Vision 132, 11 (2024), 4880–4936.
+[33] Rui Qian, Shuangrui Ding, Xiaoyi Dong, Pan Zhang, Yuhang Zang, Yuhang Cao,
+Dahua Lin, and Jiaqi Wang. 2025. Dispider: Enabling video llms with active
+real-time interaction via disentangled perception, decision, and reaction. In
+Proceedings of the Computer Vision and Pattern Recognition Conference. 24045–
+24055.
+[34] Rui Qian, Xiaoyi Dong, Pan Zhang, Yuhang Zang, Shuangrui Ding, Dahua Lin,
+and Jiaqi Wang. 2024. Streaming long video understanding with large language
+models. Advances in Neural Information Processing Systems 37 (2024), 119336–
+119360.
+[35] Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sand-
+hini Agarwal, Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark, et al.
+2021. Learning transferable visual models from natural language supervision. In
+International conference on machine learning. PmLR, 8748–8763.
+[36] Nikhila Ravi, Valentin Gabeur, Yuan-Ting Hu, Ronghang Hu, Chaitanya Ryali,
+Tengyu Ma, Haitham Khedr, Roman Rädle, Chloe Rolland, Laura Gustafson,
+et al. 2024. Sam 2: Segment anything in images and videos. arXiv preprint
+arXiv:2408.00714 (2024).
+[37] Kele Shao, Keda Tao, Kejia Zhang, Sicheng Feng, Mu Cai, Yuzhang Shang, Haox-
+uan You, Can Qin, Yang Sui, and Huan Wang. 2025. When tokens talk too much:
+A survey of multimodal long-context token compression across images, videos,
+and audios. arXiv preprint arXiv:2507.20198 (2025).
+[38] Xiaoqian Shen, Yunyang Xiong, Changsheng Zhao, Lemeng Wu, Jun Chen,
+Chenchen Zhu, Zechun Liu, Fanyi Xiao, Balakrishnan Varadarajan, Florian
+Bordes, et al. 2024. Longvu: Spatiotemporal adaptive compression for long
+video-language understanding. arXiv preprint arXiv:2410.17434 (2024).
+[39] Enxin Song, Wenhao Chai, Guanhong Wang, Yucheng Zhang, Haoyang Zhou,
+Feiyang Wu, Haozhe Chi, Xun Guo, Tian Ye, Yanting Zhang, et al. 2024.
+Moviechat: From dense token to sparse memory for long video understand-
+ing. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. 18221–18232.
+[40] Gemini Team, Petko Georgiev, Ving Ian Lei, Ryan Burnell, Libin Bai, Anmol
+Gulati, Garrett Tanzer, Damien Vincent, Zhufeng Pan, Shibo Wang, et al. 2024.
+Gemini 1.5: Unlocking multimodal understanding across millions of tokens of
+context. arXiv preprint arXiv:2403.05530 (2024).
+[41] Junke Wang, Dongdong Chen, Zuxuan Wu, Chong Luo, Luowei Zhou, Yucheng
+Zhao, Yujia Xie, Ce Liu, Yu-Gang Jiang, and Lu Yuan. 2022. Omnivl: One founda-
+tion model for image-language and video-language tasks. Advances in neural
+information processing systems 35 (2022), 5696–5710.
+[42] Weiyun Wang, Zhangwei Gao, Lixin Gu, Hengjun Pu, Long Cui, X Wei, Z Liu, L
+Jing, S Ye, J Shao, et al. 2025. InternVL3. 5: Advancing Open-Source Multimodal
+Models in Versatility. Reasoning, and Efficiency. arXiv 20252508 (2025).
+[43] Yifei Wang, Zhenkai Li, Tianwen Qian, Huanran Zheng, Zheng Wang, Yuqian Fu,
+and Xiaoling Wang. 2026. Streameqa: Towards streaming video understanding
+for embodied scenarios. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition. 9422–9432.
+[44] Yiweng Xie, Bo He, Junke Wang, Xiangyu Zheng, Ziyi Ye, and Zuxuan Wu. 2026.
+FluxMem: Adaptive Hierarchical Memory for Streaming Video Understanding.
+arXiv preprint arXiv:2603.02096 (2026).
+[45] Haomiao Xiong, Zongxin Yang, Jiazuo Yu, Yunzhi Zhuge, Lu Zhang, Jiawen
+Zhu, and Huchuan Lu. 2025. Streaming video understanding and multi-round
+interaction with memory-enhanced knowledge. arXiv preprint arXiv:2501.13468
+(2025).
+[46] Ruyi Xu, Guangxuan Xiao, Yukang Chen, Liuning He, Kelly Peng, Yao Lu, and
+Song Han. 2025. Streamingvlm: Real-time understanding for infinite video
+streams. arXiv preprint arXiv:2510.09608 (2025).
+[47] Yanlai Yang, Zhuokai Zhao, Satya Narayan Shukla, Aashu Singh, Shlok Ku-
+mar Mishra, Lizhu Zhang, and Mengye Ren. 2025.
+Streammem: Query-
+agnostic kv cache memory for streaming video understanding. arXiv preprint
+arXiv:2508.15717 (2025).
+[48] Zhenyu Yang, Kairui Zhang, Yuhang Hu, Bing Wang, Shengsheng Qian, Bin Wen,
+Fan Yang, Tingting Gao, Weiming Dong, and Changsheng Xu. 2025. LiveStar:
+Live Streaming Assistant for Real-World Online Video Understanding. arXiv
+preprint arXiv:2511.05299 (2025).
+[49] Linli Yao, Yicheng Li, Yuancheng Wei, Lei Li, Shuhuai Ren, Yuanxin Liu, Kun
+Ouyang, Lean Wang, Shicheng Li, Sida Li, et al. 2025. Timechat-online: 80%
+visual tokens are naturally redundant in streaming videos. In Proceedings of the
+33rd ACM International Conference on Multimedia. 10807–10816.
+[50] Xiangyu Zeng, Kefan Qiu, Qingyu Zhang, Xinhao Li, Jing Wang, Jiaxin Li,
+Ziang Yan, Kun Tian, Meng Tian, Xinhai Zhao, et al. 2025. Streamforest: Effi-
+cient online video understanding with persistent event memory. arXiv preprint
+arXiv:2509.24871 (2025).
+[51] Boqiang Zhang, Kehan Li, Zesen Cheng, Zhiqiang Hu, Yuqian Yuan, Guanzheng
+Chen, Sicong Leng, Yuming Jiang, Hang Zhang, Xin Li, et al. 2025. Videollama
+3: Frontier multimodal foundation models for image and video understanding.
+arXiv preprint arXiv:2501.13106 (2025).
+[52] Deheng Zhang, Yuqian Fu, Runyi Yang, Yang Miao, Tianwen Qian, Xu Zheng,
+Guolei Sun, Ajad Chhatkuli, Xuanjing Huang, Yu-Gang Jiang, et al. 2026. Ego-
+night: Towards egocentric vision understanding at night with a challenging
+
+
+Yinying Li et al.
+benchmark. In International Conference on Learning Representations, Vol. 2026.
+887–901.
+[53] Haoji Zhang, Yiqin Wang, Yansong Tang, Yong Liu, Jiashi Feng, and Xiaojie Jin.
+2025. Flash-vstream: Efficient real-time understanding for long video streams. In
+Proceedings of the IEEE/CVF international conference on computer vision. 21059–
+21069.
+[54] Peiyuan Zhang, Kaichen Zhang, Bo Li, Guangtao Zeng, Jingkang Yang, Yuanhan
+Zhang, Ziyue Wang, Haoran Tan, Chunyuan Li, and Ziwei Liu. 2024. Long
+context transfer from language to vision. arXiv preprint arXiv:2406.16852 (2024).
+[55] Yuanhan Zhang, Jinming Wu, Wei Li, Bo Li, Zejun Ma, Ziwei Liu, and Chunyuan
+Li. 2024. Llava-video: Video instruction tuning with synthetic data. arXiv preprint
+arXiv:2410.02713 (2024).
+[56] Duo Zheng, Shijia Huang, Lin Zhao, Yiwu Zhong, and Liwei Wang. 2024. To-
+wards learning a generalist model for embodied navigation. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition. 13624–13634.
+[57] Bingwen Zhu, Yuqian Fu, Qiaole Dong, Guolei Sun, Tianwen Qian, Yuzheng Wu,
+Danda Pani Paudel, Yanwei Fu, and Xiangyang Xue. 2026. Egosound: Benchmark-
+ing sound understanding in egocentric videos. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition. 25589–25598.
