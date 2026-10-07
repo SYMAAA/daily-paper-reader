@@ -1,0 +1,1118 @@
+Title: VisionMX: Unlocking Microscaling Post-Training Quantization for Vision Models
+
+URL Source: https://arxiv.org/pdf/2610.03218v1
+
+Published Time: Mon, 05 Oct 2026 01:29:04 GMT
+
+Number of Pages: 22
+
+Markdown Content:
+# VisionMX: Unlocking Microscaling Post-Training Quantization for Vision Models 
+
+## Elad Dror Cohen, Ofir Gordon, Lior Dikstein, Idan Achituve, Hai Victor Habi *
+
+## Arm AI Research (AAIR), Arm Ltd 
+
+## Abstract 
+
+Microscaling (MX) formats are emerging as a hardware-supported approach to efficient training and inference. They combine low-precision elements with shared block scales, but their impact on vision models remains underexplored. We systematically investigate post-training MX quantiza-tion across vision models and tasks. An analysis of di-rect conversion identifies three sources of error: block-scale representation, the poor alignment of some small con-volutional weight tensors with nonuniform element grids, and the underuse of signed codes by nonnegative activa-tions. These findings motivate VisionMX, a post-training MX quantization method that optimizes bounded weight rounding and applies a foldable affine correction to acti-vations. We evaluate VisionMX across image classification, object detection, semantic segmentation, and low-light im-age enhancement using several MX-style formats. It im-proves on direct conversion and the evaluated post-training quantization baselines, with the largest performance recov-eries in architectures most sensitive to MX conversion. 
+
+## 1. Introduction 
+
+Modern deep learning models have led to significant progress in computer vision, spanning a broad set of tasks and applications such as image classification [5, 38], ob-ject detection[35, 41], and image restoration[48]. These advances, however, have come with growing computa-tion and memory demands that complicate efficient de-ployment and inference. This is especially important for high-resolution inputs and deployments with tight latency, memory-bandwidth, or power budgets. Quantization [11, 12, 16, 18, 31, 44] helps meet these requirements by representing weights and intermediate ac-tivations at lower precision, reducing both storage and com-putation. Quantization methods are commonly divided into quantization-aware training (QAT) [16, 32] and post-    
+
+> *Corresponding author: Hai Victor Habi,
+> haivictor.habi@arm.com .
+
+training quantization (PTQ) [12, 14, 18, 26, 31, 44]. QAT trains or fine-tunes a model while accounting for quantiza-tion, often using labeled data and a task-specific training recipe. PTQ instead starts from a pretrained model and uses a small calibration set, typically without labels, to choose quantization parameters or apply limited fine-tuning. Quan-tization of vision models [12, 18, 20, 31, 44, 50] has been studied extensively in integer formats, including learned rounding, which optimizes weight rounding decisions to preserve layer outputs, as well as block reconstruction, activation-aware reconstruction, and transformer-specific reparameterization methods. Recently, the Open Compute Project (OCP) introduced Microscaling (MX) formats [36], which combine low-precision element formats with a shared scale over small tensor blocks. Moreover, NVIDIA introduced NVFP4 as its own MX-like format for low-precision computation [1]. We collectively refer to these MX-style formats as block-scaled formats. Recent work on MX quantization for LLMs has re-ported a significant performance drop when activation and weights are quantized via direct casting to low-bit formats. To mitigate this, several studies have addressed the prob-lem in different ways: (i) [9, 13] propose transforming the feature distribution to better match the MX block structure; and (ii) others explore alternatives to power-of-two scaling factors [10]. Vision-specific evidence remains limited and mixed, with existing studies reporting substantial MXFP4 degradation in some architectures and settings [7, 36, 45]. This leaves a central question: When are MX quantization effective for vision inference, and what PTQ adaptations are needed when direct conversion falls short? 
+
+To address this question, we study post-training quan-tization with MX quantization across diverse vision archi-tectures and tasks. We examine how model architecture, element format, block-scale format, and the quantization of weights and activations affect performance. Our analysis re-veals substantial variation in sensitivity to MX quantization across architectures. Several evaluated transformer mod-els remain relatively robust, whereas compact convolutional and hybrid models can suffer severe degradation. In addi-tion to variation at the architectural level, the block-scale 1arXiv:2610.03218v1 [cs.CV] 2 Oct 2026 format can significantly impact accuracy. We further note two representation mismatches: (1) a discrepancy between adaptive rounding methods[12, 18, 31, 44] and the nonuni-form floating-point grid, and (2) signed grids can waste rep-resentational capacity when activations are nonnegative due to nonlinearities such as ReLU. These findings point to two complementary adaptations: more flexible weight rounding on nonuniform element grids and better alignment of nonnegative activations with signed grids. Guided by this analysis, we introduce VisionMX: a vision-specified MX PTQ approach proposing a new adap-tive rounding, the learned quantizer RangeRound, which addresses the mismatch with floating-point values and ex-tending the asymmetric correction [3, 14] to MX quanti-zation, which we refer to as affine activation correction. RangeRound addresses the first issue by relaxing the con-ventional restriction of optimizing the rounding decision only between the two nearest quantization levels. Instead, RangeRound allows each value to select its quantized rep-resentation from a fixed local range of quantization levels. This additional flexibility enables the reconstruction objec-tive to better adapt to the nonuniform grid of floating-point formats: values near zero can move across multiple densely spaced quantization levels, while values near the clipping boundary can be rounded either upward or downward to better minimize the reconstruction error. For activation alignment, we adapt affine reparameterization to the MX setting through Activation Affine Correction (AAC), which shifts and scales activations before quantization and folds the inverse transformation into the subsequent linear oper-ation. In our experiments, we evaluate VisionMX across convolutional, transformer, and hybrid architectures on im-age classification, object detection, semantic segmentation, and low-light image enhancement. The results show im-provements over established PTQ baselines in most evalu-ated settings under joint 4-bit weight and activation quanti-zation. Moreover, we conduct ablation studies to assess the contribution of each component and examine the effect of the rounding-range. Our contributions are threefold. 1 We provide a sys-tematic analysis of post-training MX quantization across diverse vision architectures, characterizing architecture-dependent sensitivity, examining how floating-point for-mats affect adaptive rounding weight quantization, and identifying the underutilization of signed element grids by nonnegative activation distributions. 2 We introduce Vi-sionMX, a vision-specific MX PTQ method which intro-duce RangeRound for adaptive weight rounding of float point with Activation Affine Correction. 3 We thoroughly assess the proposed method against established baselines across representative convolutional, transformer, and hybrid vision architectures, observing performance improvements on most models and tasks. 
+
+## 2. Background and Notation 
+
+Throughout this paper, we adopt the following notation: vectors are denoted by x and their scalar components by 
+
+xi. Matrices and tensors are denoted by A.
+
+2.1. MX Block-Scaled Quantization 
+
+Microscaling (MX) formats combine a low-precision ele-ment format with a shared scale for each block of B val-ues [36]. Let x ∈ Rd a vector of size d we wise to quan-tized. Assume B divides d, so Nblk = d/B blocks are formed. The index set for block b is Ib = {(b − 1) B +1, . . . , bB } for b = 1 , . . . , N blk . Let Q = {q0, . . . , q |Q|− 1}
+
+denote the finite set of distinct representable values of the unscaled element format, ordered as q0 < · · · < q |Q|− 1
+
+with |Q| ≥ 2. Let QE denote the corresponding element quantizer, S the legal set of stored scale values, and QS the scale quantizer mapping an ideal nonnegative scale to S.The quantity qmax = max q∈Q |q| is the largest magnitude representable by the element format. For block b, the max-based reference scale s⋆b = max i∈I b |xi|/q max is mapped to a legal stored scale: 
+
+bsb = QS(s⋆b ) = QS
+
+ max i∈I b |xi|
+
+qmax 
+
+
+
+∈ S . (1) The scale format determines the representable scale val-ues, while the scale-selection rule determines which value is used. For details, see Appendix A.2. The MX-quantized tensor is then 
+
+QMX (x)i = bsbQE
+
+ xi
+
+bsb
+
+
+
+, i ∈ I b. (2) Throughout this work, MXFP4 uses four-bit floating-point elements in E2M1 format, comprising one sign bit, two ex-ponent bits, and one mantissa bit. For the shared block scales, we consider two formats: (i) UE8M0, our notation for the unsigned exponent-only 8-bit format defined in the OCP specification [36], whose finite representable scales are restricted to powers of two; and (ii) UE5M3, proposed in [10], an unsigned 8-bit floating-point format with five exponent bits and three mantissa bits, enabling finer scale granularity. We denote these configurations by MXFP4-UE8M0 and MXFP4-UE5M3, respectively. We also report results for NVFP4; its scaling conventions are described in Appendix A.2. 
+
+## 3. Related Work 
+
+MX Quantization. The Microscaling (MX) Data For-mats, recently introduced by the Open Compute Project (OCP), are driven by key hardware vendors such as Arm, AMD, NVIDIA, Qualcomm, Intel, Meta, and Microsoft, and aim to standardize data formats for neural-network de-ployment [36]. MX introduces block-scaled quantization 2with several numerical formats, including floating-point and integer variants. In addition, NVIDIA developed its own block-scaled format, NVFP4 [1]. Most subsequent MX research has focused on language models. MicroScopiQ, MicroMix, MR-GPTQ, and LAT-MiX explore mixed formats, feature transformations, and reconstruction methods for LLM inference [9, 13, 23, 33]. FAAR [17] adapts learned rounding [31] to NVFP4’s nonuniform grid by optimizing a relaxed decision between adjacent representable values for each weight. Separately, a study [10] analyzes how block size interacts with quantized block scales, showing that finer blocks can hurt LLM per-formance when the scale format has limited dynamic range, and proposes UE5M3 as an alternative block-scale format. Early ImageNet results for MX quantization of vision models showed that post-training MXFP4 can cause sub-stantial accuracy degradation, particularly for compact con-volutional networks [36]. The limited vision-specific litera-ture includes TetraJet [7], which studies oscillation-reduced MXFP4 training for vision transformers rather than PTQ, and [45] is a recent study that evaluates emulated MX in-ference for classification, detection, and segmentation but reports substantial MXFP4 accuracy losses.In addition, a re-cent study [39] investigates NVFP4 quantization for image classification, assessing block size, weight precision, and how activation scaling affects performance both with and without retraining. 
+
+Vision Quantization. Integer quantization has been extensively studied for vision models through both quantization-aware training and PTQ, including rounding optimization and reconstruction-based methods. We focus on PTQ because it avoids costly model retraining. Meth-ods such as AdaRound [31], BRECQ [18], QDrop [44], and EPTQ [12] have substantially improved low-bit inte-ger PTQ through learned rounding and different optimiza-tion strategies, such as blockwise reconstruction, stochastic activation bypass, and network-wide optimization. These techniques enable practical 4-bit quantization and improve more challenging lower-bit settings, although severe degra-dation can remain at extremely low precision. Earlier CNN-oriented PTQ work established calibration, bias correc-tion, and cross-layer weight equalization as effective mech-anisms for reducing quantization error [2, 30]. More re-cent work targets vision transformers, whose activation dis-tributions and outliers are particularly difficult to quan-tize. Other methods address additional difficulties arising from attention, Softmax, GELU, LayerNorm, inter-channel variation, and calibration under low-precision quantization [25, 27, 29, 46, 49]. RepQ-ViT reparameterizes activation scales, while ERQ reduces errors arising from both weight and activation quantization [20, 50]. All vision PTQ meth-ods discussed above target integer quantization. Because MX is a newly emerging data format and PTQ in low-bit regimes is still insufficiently studied with a sub-stantial performance gap, this paper explores post-training MX quantization by analyzing where accuracy degrades across major vision architecture families and proposing Vi-sionMX, which leverages these findings to combine learned weight rounding with affine activation correction. 
+
+## 4. Analysis 
+
+We study how model architecture, block-scale for-mat, weight structure, and activation distribution af-fect vision models’ sensitivity to MX quantization. The analysis is organized around three questions that characterize the main sources of this sensitivity. 
+
+Q1: How does sensitivity to MX quantization vary across vision architecture families and between weights and ac-tivations? 
+
+Q2: How do nonuniform element grid affect adaptive rounding algorithm ? 
+
+Q3: How well do signed element grids represent activa-tion distributions produced by nonlinear operations? To identify the sources of degradation, we combine empiri-cal comparisons across vision architectures and theoretical analysis of weight rounding and an examination of acti-vation code utilization. We begin with round-to-nearest evaluations to establish baseline sensitivity before applying learned PTQ adaptations. 
+
+4.1. Architecture Behavior under MX Quantization 
+
+Here, we compare the impact of applying weight-only and activation-only MXFP4-UE8M0 quantization separately, using direct round-to-nearest conversion. Results are pre-sented in Figure 1a, with detailed numbers in Appendix E.3. The results cover classification, object detection, semantic segmentation, and low-light enhancement. For each model– task pair, we report the performance decrease relative to its floating-point reference. This exposes the relative sen-sitivity of the two quantization modes while retaining each task’s evaluation metric. Sensitivity varies substantially among the evaluated models. DeiT-B, Swin-T, ViT-S/16, and ConvNeXt-Tiny remain within 5% relative loss in both quantization modes. In contrast, MobileNetV2 loses 97.40% of its reference ac-curacy under weight-only quantization and 52.30% under activation-only quantization. EfficientViT-L2 approaches complete accuracy loss in both settings. These results high-light the pronounced sensitivity of some convolutional mod-els to four-bit MXFP quantization, although the robustness of ConvNeXt-Tiny shows that this behavior is not uniform across convolutional architectures. At higher precision, MXFP8 RTN preserves perfor-mance close to the floating-point reference for most evalu-ated models, with detailed results reported in Appendix E.4. 30 20 40 60 80 100 Weight-only relative performance loss (%) 020 40 60 80 100 Activation-only relative performance loss (%)     
+
+> MobileNetV2 Effi cientViT-L2 YOLOv8-s DeepLabV3 –
+> MobileNetV3 04812 04812 16 Low-loss region
+> DeiT-B ConvNeXt-T RetinexFormer Classi fi cation Detection Segmentation Low-light enhancement
+
+(a) Model sensitivity −1 0 1 2 3 4    
+
+> Quantized weight ( )wq 1
+> 23456
+> Quantized weight (  )wq  20.75 366 w
+> BC
+> Other legal pair
+> 4 candidate
+> Rounding up–down set Float weights B: nearest / best up–down C: full-grid optimum
+> 0124812 16
+> Reconstruction loss  
+
+(b) FP4 weight reconstruction -6 -4 -3 -2 -1.5 -1 -0.5 0 0.5 1 1.5 2 3 4 6FP4 Element Values 010 20 30 40 50 Percent  
+
+> negative value region Raw Data AAC
+
+(c) Post-ReLU FP4 occupancy 
+
+Figure 1. Three sources of sensitivity under block-scaled quantization. (a) Relative loss from the floating-point reference under separate weight-only and activation-only MXFP4-UE8M0 RTN quantization; each point is a model–task pair, and the inset enlarges the low-loss region. (b) Example quadric loss approximation, the contour plot compares the rounding up–down set (dashed rectangle) with the 21-point RangeRound set MFP4 (w) (teal points). The star denotes the float weights, B the coincident nearest and best assignment in the rounding up–down set, and C the full-grid and RangeRound optimum. (c) MXFP4 element-code occupancy of ReLU output with and without AAC. 
+
+4.2. Analysis of Weight MX Quantization 
+
+The effect of weight quantization on model performance has been studied through Hessian-based sensitivity analysis [8, 12, 18, 31, 44]. We adopt this perspective to analyze MX weight quantization. Let Ltask (w) denote the expected task loss and define the quantization error as ϵw ≜ w − wq .Assuming a sufficiently small perturbation and a negligible first-order contribution at the pretrained weights, a second-order Taylor expansion gives 
+
+∆Ltask (wq , w) ≜ Ltask (wq ) − L task (w) (3) 
+
+≈ 12 ϵ⊤
+
+wHwϵw = ∆ Lapx (wq ; w),
+
+where Hw = ∇2
+
+wLtask (w) is the task-loss Hessian evalu-ated at the float weights. Appendix B.1 gives the derivation and assumptions. We next examine whether restricting each weight to its round-down and round-up levels preserves the minimum of the task-loss quadratic approximation ∆Lapx in Eq. (3). 
+
+Theorem 4.1 (Rounding up–down optimality for INT4 and FP4) . Assume that w ∈ [min Q, max Q]d
+
+and that Hw is positive definite and satisfies 
+
+(Hw)ii ≥ 2 P
+
+j̸ =i |(Hw)ij | for every coordinate i.Define Q(UD) (w) = Qdi=1 {a(wi), b (wi)} as the rounding up–down set, where a(u) = max {q ∈ Q : q ≤ u} and 
+
+b(u) = min {q ∈ Q : q ≥ u} denote rounding down and up in Q, respectively. For INT4, let QINT4 = ∆ INT4 {− 8, . . . , 7} with com-mon fixed spacing ∆INT4 > 0, and assume that the full-grid minimizer is unique. Then 
+
+min 
+
+wq ∈Q d
+
+> INT4
+
+∆Lapx (wq ; w) = min 
+
+wq ∈Q (UD) INT4 (w)
+
+∆Lapx (wq ; w).
+
+For unscaled E2M1 FP4, 
+
+min 
+
+wq ∈Q d
+
+> FP4
+
+∆Lapx (wq ; w) ≤ min 
+
+wq ∈Q (UD) FP4 (w)
+
+∆Lapx (wq ; w).
+
+Proof. See Appendix C.1. Theorem 4.1 establishes that the unique optimal INT4 assignment lies in the rounding up–down set under the stated conditions. The FP4 inequality follows from inclu-sion of the rounding up–down candidates in the full code-book. This result concerns the quadratic approximation un-der the stated task-Hessian conditions; extending it to the exact task loss requires control of the Taylor remainder. MX quantization uses floating-point formats with a nonuniform element grid, meaning the size of any round-ing correction varies depending on where the weight falls within that grid. Figure 1b illustrates this for FP4 E2M1, whose adjacent spacings are 0.50 , 1, and 2 before block scaling. To illustrate their interaction, consider a quadratic task loss centered at the float weights, with fixed block scale 
+
+bs = 1 and 
+
+w =
+
+1.40 4.90 
+
+
+
+, Hw =
+
+ 1 0.50 0.50 1
+
+
+
+. (4) This illustrative task Hessian satisfies the theorem’s con-dition at equality. The rounding up–down set Q(UD) (w)
+
+is {1, 1.50 } × { 4, 6}. Nearest rounding and the best as-signment in the rounding up–down set coincide at wq,B =(1 .50 , 4) ⊤, with loss 0.365 . The additional legal assign-ment wq,C = (2 , 4) ⊤ reduces the loss to 0.315 , despite increasing squared weight error from 0.82 to 1.17 . The wider candidate set illustrated in Figure 1b contains this op-timum. This motivates the bounded RangeRound search an-alyzed in Proposition 5.1. Appendix C provides the proofs, INT4 comparison, and correlation sweep. In addition, Ap-pendix B.2 examines the effect of block-scale format on weight quantization. In weight-only sweeps for ResNet-18 and ConvNeXt-Tiny, UE5M3 achieves the highest Im-ageNet top-1 accuracy among the evaluated formats. These results are consistent with findings in LLM quantization, where prior work highlights the importance of scale format 4and recommends UE5M3 scales [10]. 
+
+4.3. MX Quantization after Nonlinearities 
+
+Activation quantization introduces a mismatch between ac-tivation distributions and the available quantization levels. Nonlinearities such as ReLU produce nonnegative outputs, leaving the negative levels of signed MX element grids un-used. Figure 1c illustrates this restriction for ResNet18’s final post-residual ReLU output. The bars report quantized FP4 element-code occupancy; each distribution uses its own dynamically recomputed block scales. The unshifted output is nonnegative and therefore cannot use negative element codes. For an approximately symmetric signed grid, this leaves roughly half of the nonzero representable values un-used, corresponding to an effective loss of approximately one bit of code-space capacity. Changing the shared scale can expand or contract the represented range, but it cannot recenter the distribution or make the unused negative codes accessible. Applying an affine shift before quantization moves part of the originally nonnegative activation distribution onto the negative side of the signed grid, making previously unused codes accessible. At the same time, the scale adjustment controls its range. The resulting change in code utiliza-tion diagnoses the mismatch between post-nonlinearity ac-tivation distributions and signed block-scaled formats. This observation motivates Activation Affine Correction (AAC), which shifts and scales activations before quantization and folds the inverse transformation into the subsequent linear or convolutional operation. 
+
+## 5. Method 
+
+Motivated by the distinct challenges identified for weight and activation quantization in Section 4, our proposed PTQ pipeline, VisionMX, has two complementary components. First, Activation Affine Correction (AAC) shifts and scales activations before MX activation quantization. Second, RangeRound optimizes weight-rounding decisions within a bounded region of the nonuniform element grid while keep-ing the deployed block scales fixed. 
+
+5.1. Activation Affine Correction 
+
+We address the issue in Figure 1c, where enforcing non-negativity leaves part of a signed MX quantization grid un-used. Following LSQ+ [3] and HPTQ [14], we apply an affine transform to better align the feature distribution with the quantization range. Specifically, before dynamic MX activation quantization we shift and scale the input to each linear operation, then fold the inverse transform into the lin-ear operation. The shift recenters activations to better utilize the signed grid, and the scale adjusts the range. We adapt affine correction to the MX block structure by calibrating per-channel shifts and scales block by block, accounting for their shared scale when selecting the correction parameters. We call this correction Activation Affine Correction (AAC): Let x ∈ Rd be the activation vector input to a linear op-eration. For each channel i, AAC applies a positive scale 
+
+αi > 0 and shift γi.
+
+ui = ( xi − γi)αi, i = 1 , . . . , d. (5) Note that channel parameters are shared across spatial po-sitions and calibration samples. We select the affine param-eters to minimize the error obtained after transforming the activations, applying block scaling quantization, and map-ping them back to the original domain: 
+
+(α⋆, γ⋆) = arg min 
+
+> α∈Rd>0
+> γ∈Rd
+
+X
+
+> x∈D cal
+
+x −  QMX (u) ⊘ α + γ 22
+
+,
+
+where ⊘ denotes per-element division. Implementation de-tails of AAC are given in Appendix A.5. 
+
+5.2. RangeRound for MX Quantization 
+
+RangeRound extends prior learned-rounding methods [12, 17, 18, 31, 44] by optimizing rounding decisions over a specified range rather than only between adjacent values, addressing the weight-quantization behavior analyzed in Section 4.2. Specifically, let W denote the full-precision weight ten-sor supplied to RangeRound, and let w = vec( W) ∈ Rd1.Each block Ib has a fixed representable scale bsb > 0 se-lected as described in Appendix A.3. For a weight element 
+
+wi in block Ib, RangeRound operates in the normalized el-ement domain: 
+
+zi = clip 
+
+ wi
+
+bsb
+
+, min Q, max Q
+
+
+
+, i ∈ I b. (6) Then, in the normalized element domain, the candidate set combines the representable grid points within a centered window with the nearest strict lower and upper grid points: 
+
+Cδ (z) = {q ∈ Q : |q − z| ≤ δ/ 2} ∪ { qlow (z), q high (z)},
+
+(7) where qlow (z) = max {q ∈ Q : q < z } and qhigh (z) = min {q ∈ Q : q > z } are the nearest strict representable grid points below and above z, omitting a strict neighbor when it does not exist. 
+
+Proposition 5.1 (Sufficiency of a bounded FP4 candidate window) . Assume that w ∈ [min Q, max Q]d and that the assumptions of Theorem 4.1 hold. Define gmax =max 0≤i< |Q|− 1(qi+1 − qi). Then, for all δ ≥ 2gmax ,
+
+min  
+
+> wq∈Q d
+
+∆Lapx (wq ; w) = min    
+
+> wq∈Qdi=1 Cδ(wi)
+
+∆Lapx (wq ; w).      
+
+> 1For clarity, we present the formulation for a fully connected layer with
+> W∈Rm×nand d=mn ; the same elementwise formulation applies directly to convolutional weight tensors without changing their shape.
+
+5For unscaled E2M1 FP4, gmax = 2 , so δ = 4 suffices. Proof. See Appendix C.2. Proposition 5.1 shows that the unscaled candidate win-dow preserves the minimum of the task-loss quadratic ap-proximation under the stated assumptions. In addition, for MX quantization, Proposition 5.1 holds under the corre-sponding assumptions on the normalized weights and the transformed Hessian, as detailed in Appendix C.2. We now optimize the rounding of each normalized weight zi using its candidate set Cδ (zi). RangeRound learns a logit matrix V ∈ Rm×n, with vectorization v =vec( V) and one component vi per weight. Following AdaRound [31], we map each logit through a rectified sig-moid. Here, the resulting gate interpolates between the end-points of the candidate set: 
+
+h(vi) = clip  σ(vi)( ζ − γ) + γ, 0, 1 ,
+
+ez(vi; zi) = z↓(zi) + h(vi)
+
+h
+
+z↑(zi) − z↓(zi)
+
+i
+
+, (8) where σ(x) denotes an elementwise sigmoid activation function. For a fixed range width δ, we suppress its sub-script in C(z) and in the endpoint functions below. Here, 
+
+z↓(z) = min C(z) and z↑(z) = max C(z) are the interval endpoint functions. We use γ = −0.10 and ζ = 1 .10 as the rectified-sigmoid hyperparameters (Appendix A.3). This yields the relaxed weight vector used during opti-mization: 
+
+[ ew]i = QRR (w; v) 
+
+> i
+
+= bsb ez(vi; zi), i ∈ I b. (9) To drive the relaxed weights toward legal discrete codes without restricting each weight to a binary lower-or-upper choice, we adapt AdaRound’s regularizer [31] into a multi-well penalty whose minima coincide with the legal codes. Using the ordered levels of Q, let ki = k(ez(vi; zi)) de-note the index of the grid cell containing the relaxed value. The adjacent representable grid points are q− 
+
+> i
+
+:= qki and 
+
+q+ 
+
+> i
+
+:= qki+1 , and the relative coordinate within the cell is 
+
+ui := ( ez(vi; zi) − q− 
+
+> i
+
+)/(q+ 
+
+> i
+
+− q− 
+
+> i
+
+). The corresponding reg-ularization penalty for the current weight tensor is 
+
+Rround =
+
+> d
+
+X
+
+> i=1
+
+h
+
+1 − | 2ui − 1|β i
+
+. (10) Here, β > 0 is the multi-well shape exponent, annealed as described in Appendix A.3. The tensorwise penalties are summed over all quantized weight tensors in the current re-construction unit. As illustrated in Figure 2, the penalty vanishes at every representable grid point and is largest at cell midpoints; exact grid points are assigned zero penalty with a zero subgradient.                      
+
+> Figure 2. RangeRound per-weight penalty 1− | 2ui−1|βin nor-malized MX element-code space, for β∈ { 20 ,2}. The penalty vanishes at legal FP4 codes qk(open circles) and reaches one at cell midpoints. The axis break omits (1 .5,3) . Colored markers illustrate relaxed values ez= 0 .10 and 4.10 on the β= 2 curve.
+
+5.3. Optimization 
+
+We use asymmetric reconstruction following [18, 31]: the teacher receives inputs from the floating-point pre-fix, whereas the student receives inputs from the already-quantized prefix. We propose two variants: Layer-wise RangeRound, which integrates RangeRound into AdaRound-style layer reconstruction [31], and Blockwise RangeRound, which applies it in a BRECQ-style block reconstruction [18]. We denote them VisionMX-LW and VisionMX-BW, respectively. The equations below describe a single affine layer; the blockwise reconstruction units and their output-level objective are defined in Appendix A.4. Let X and Y be the floating-point input and output ten-sors for the current layer, and let Xq be the corresponding input from the already-quantized prefix. During reconstruc-tion, we optimize the rounding variables V and bias update 
+
+δbias , giving the parameter set Ω = {V, δbias }. During op-timization, AAC is applied before input quantization, and RangeRound relaxes the affine-folded weights to define the soft student path: 
+
+eX = QMX 
+
+ (Xq − γ) ⊙ α ,
+
+eY = QRR (( W′); V) eX + Wγ + δbias . (11) Here, W′ = W diag( α)−1 is the weight matrix with AAC folded in. The following squared-error objective describes this single affine layer: 
+
+L(Ω) = ∥WX − eY∥2 
+
+> F
+
++ λ Rround + ηbias ∥δbias ∥2 
+
+> F
+
+, (12) where λ denotes the rounding regularization hyperparame-6Table 1. ImageNet-1K Top-1 classification accuracy (%). We report the mean and sample standard deviation over five seeds. Within each format and network, darker blue marks the best result and light blue marks the second-best result.                                                                                                                                                                                                                                                                                                           
+
+> Format Method Tiny Small Medium Large MobileNetV2 ResNet-18 CaiT-XXS24 ConvNeXt-Tiny EfficientFormer-L3 ResNeXt-101 32x8d EfficientViT-L2 14.30 MB 46.80 MB 47.90 MB 114.40 MB 125.60 MB 355.20 MB 255.00 MB Float –72.15 69.76 78.39 82.52 82.55 82.83 85.06 MXFP4 UE8M0 RTN 0.40 57.72 69.48 76.27 63.07 64.89 0.10 AdaRound 41.20 ±0.45 65.73 ±0.10 65.24 ±0.18 78.67 ±0.05 79.33 ±0.09 55.24 ±0.46 2.54 ±0.37 QDrop 57.99 ±0.14 66.27 ±0.13 73.39 ±0.06 79.75 ±0.06 80.17 ±0.05 78.80 ±0.06 4.80 ±0.13
+> VisionMX-LW (Ours) 64.97 ±0.09 66.72 ±0.08 70.16 ±0.09 79.66 ±0.03 80.29 ±0.02 78.82 ±0.08 78.68 ±0.09
+> VisionMX-BW (Ours) 65.48 ±0.19 66.78 ±0.06 73.56 ±0.09 80.28 ±0.06 80.81 ±0.04 80.71 ±0.06 81.58 ±0.06 MXFP4 UE5M3 RTN 17.35 62.28 74.57 79.37 74.46 67.41 0.12 AdaRound 50.96 ±0.19 67.08 ±0.06 73.06 ±0.14 80.06 ±0.06 80.53 ±0.08 75.91 ±0.15 1.35 ±0.20 QDrop 61.35 ±0.08 67.39 ±0.10 75.50 ±0.07 80.72 ±0.04 81.00 ±0.08 80.69 ±0.09 20.18 ±0.54
+> VisionMX-LW (Ours) 67.07 ±0.06 68.08 ±0.10 74.57 ±0.07 81.06 ±0.07 81.36 ±0.04 81.23 ±0.03 78.44 ±0.06
+> VisionMX-BW (Ours) 68.27 ±0.05 68.23 ±0.08 76.18 ±0.06 81.48 ±0.02 81.68 ±0.06 81.89 ±0.03 82.15 ±0.24 NVFP4 RTN 13.74 64.15 75.09 80.37 77.19 77.25 0.08 AdaRound 54.20 ±0.27 67.35 ±0.07 73.71 ±0.18 80.64 ±0.07 80.84 ±0.06 77.79 ±0.06 1.75 ±0.31 QDrop 62.73 ±0.15 67.79 ±0.08 75.85 ±0.12 81.05 ±0.06 81.33 ±0.06 81.30 ±0.05 14.40 ±1.59
+> VisionMX-LW (Ours) 67.95 ±0.14 68.15 ±0.07 74.77 ±0.07 81.23 ±0.05 81.44 ±0.07 81.34 ±0.03 81.40 ±0.07
+> VisionMX-BW (Ours) 68.42 ±0.08 68.18 ±0.08 76.34 ±0.07 81.53 ±0.03 81.72 ±0.06 82.10 ±0.03 82.82 ±0.08
+
+ter, and ηbias is the bias weight-decay regularization. For convolutional layers, the same expressions denote the lin-ear operators induced by the convolution kernels. For this single affine layer, the original bias contributes identically to teacher and student outputs and therefore cancels in their squared-error term. For Blockwise RangeRound, the regu-larization and bias-penalty terms are summed over the quan-tized weight tensors and enabled bias updates within the network block. The quantization pipeline begins by selecting AAC pa-rameters (Appendix A.5) and weight block scales (Ap-pendix A.2). Both remain fixed during RangeRound op-timization. After optimization, each relaxed normalized weight is mapped to a legal element code using the quan-tizer’s native rounding operation, preserving its format-specific tie behavior. We refer to this conversion as harden-ing. Each reconstructed layer or network block is persisted immediately after hardening, so subsequent reconstruction units are calibrated against the quantized prefix that will be present at deployment. 
+
+## 6. Experimental Results 
+
+Here, we evaluate and ablate VisionMX and demonstrate its benefits across various models and tasks. We begin by evaluating the proposed method VisionMX across different model families and block-scaled formats on ImageNet clas-sification. We then present object-detection and semantic-segmentation results, with low-light image-enhancement results provided in Appendix E.2. Finally, we ablate our method to show the contribution of each component. 
+
+6.1. Experimental Setup 
+
+Models and tasks. For ImageNet-1K classification [37], we evaluate models from several architecture families [4, 15, 19, 28, 38, 42, 47] and capacity ranges, as summarized in Table 1 and Appendix E.1 (Table 8). We additionally evaluate object detection with Faster R-CNN, RetinaNet, and FCOS [22, 35, 41], and semantic segmentation [6] on COCO [21], to determine whether the observed behavior extends beyond image classification. Finally, we assess the proposed approach on the low-light image enhancement [5, 48] task. 
+
+Baselines. Round-to-nearest (RTN) serves as the direct block-scaled conversion baseline. We additionally com-pare against AdaRound [31] and QDrop [44]. All baseline results are obtained from our runs using implementations of these methods integrated with the corresponding block-scaled quantizers. For QDrop, we sample the quantization-bypass mask at the MX block granularity, such that all elements within a block are either quantized or retained in floating point together during reconstruction optimiza-tion. We compare these baselines with our complete PTQ pipeline, which combines RangeRound, AAC, learned bias updates, and the block-granular QDrop adaptation which is described in Appendix D . Results are reported for both layerwise and blockwise reconstruction. We con-sider three 4-bit block-scaled formats: MXFP4-UE8M0, MXFP4-UE5M3, and NVFP4. Object-detection results are reported for MXFP4-UE8M0 and MXFP4-UE5M3. 
+
+Calibration and optimization. In our experiments, we average results over five random seeds and report the mean 7Table 2. W4A4 post-training quantization results on COCO val2017 object detection using MXFP4 with UE8M0 and UE5M3 block scales. Higher AP is better. Within each format and net-work, darker blue marks the best result and light blue marks the second-best result.                                                                                       
+
+> Format Method Faster R-CNN R50-FPN RetinaNet R50-FPN FCOS R50-FPN Float –36.90 36.40 39.10 MXFP4 UE8M0 RTN 24.50 23.80 25.10 AdaRound 5.45 ±0.18 30.83 ±0.08 31.96 ±0.04 QDrop 32.45 ±0.08 31.69 ±0.10 33.90 ±0.10
+> VisionMX-LW (Ours) 2.11 ±0.12 32.62 ±0.10 34.81 ±0.03
+> VisionMX-BW (Ours) 33.15 ±0.10 32.30 ±0.08 34.69 ±0.08 MXFP4 UE5M3 RTN 29.00 28.00 30.60 AdaRound 10.64 ±0.10 33.06 ±0.06 35.17 ±0.06 QDrop 33.82 ±0.08 33.13 ±0.08 35.38 ±0.06
+> VisionMX-LW (Ours) 4.17 ±0.08 34.19 ±0.04 36.42 ±0.05
+> VisionMX-BW (Ours) 34.64 ±0.05 34.07 ±0.11 36.42 ±0.06
+
+and standard deviation across runs. For each task, evalua-tion is conducted on the corresponding validation set. The calibration set is randomly sampled from the training set, with task-specific sizes (ImageNet-1K: 2,048; COCO: 256; Low-light: 256). Each learned-rounding optimization is run for 10k–20k iterations on a single NVIDIA H100 GPU. Full details are provided in Appendix A.1. 
+
+6.2. ImageNet Classification Results 
+
+Table 1 reports ImageNet-1K top-1 accuracy under joint 4-bit quantization of weights and activations. Consistent with Section 4.1, the evaluated ViTs are generally less sensitive to MX quantization. We therefore focus the main results on convolutional and hybrid models and report the ViT com-parisons in Appendix E.1. The results for the CNN and hybrid models clearly show that VisionMX provides an ac-curacy improvement across all models. In some cases, the gain reaches up to 10%. In addition, the results suggest that larger models are generally more robust to MX quanti-zation, with the exception of EfficientViT-L2. In addition, the results reproduce the architecture-dependent pattern ob-served in our analysis shown in Section 4.1. The results underscore the benefits of block-scale representation. We find that UE5M3 block scaling consistently improves per-formance across all models, with gains reaching around 3% in some cases. In addition, the improvement from using NVFP4 instead of UE5M3 is small in most cases. 
+
+6.3. Additional Vision Tasks 
+
+We next evaluate whether the classification findings ex-tend to object detection and semantic segmentation. De-tection results are reported in Table 2 using average preci-sion (AP), while segmentation results are reported in Ta-ble 3 using mean intersection-over-union (mIoU). Addi-tional low-light image-enhancement results are provided in Appendix E.2 (Table 9). Across detection and segmen-tation, direct block-scaled conversion produces substantial performance degradation. Existing PTQ baselines provide varying degrees of recovery, whereas VisionMX-BW out-
+
+Table 3. W4A4 post-training quantization results on COCO val2017 semantic segmentation. Higher mIoU is better. Within each format and network, darker blue marks the best result and light blue marks the second-best result.                                                                                     
+
+> Format Method DeepLabV3 R50 DeepLabV3 MobileNetV3 Float –66.20 60.00 MXFP4 UE8M0 RTN 56.90 4.80 AdaRound 59.72 ±0.20 20.08 ±0.61 QDrop 62.61 ±0.19 47.21 ±0.46
+> VisionMX-LW (Ours) 62.24 ±0.09 52.96 ±0.21
+> VisionMX-BW (Ours) 63.13 ±0.08 53.31 ±0.28 MXFP4 UE5M3 RTN 58.90 11.60 AdaRound 62.36 ±0.18 39.39 ±0.50 QDrop 63.81 ±0.13 52.29 ±0.23
+> VisionMX-LW (Ours) 64.41 ±0.09 56.02 ±0.21
+> VisionMX-BW (Ours) 64.60 ±0.03 56.93 ±0.11 NVFP4 RTN 61.20 18.30 AdaRound 62.80 ±0.09 38.66 ±0.11 QDrop 64.43 ±0.11 50.07 ±0.54
+> VisionMX-LW (Ours) 64.35 ±0.07 56.46 ±0.10
+> VisionMX-BW (Ours) 64.24 ±0.06 56.56 ±0.12
+
+performs them in most of the evaluated model–format com-binations. VisionMX-BW improves detection by 5.64–9.59 AP and segmentation by 3.04–48.51 mIoU relative to RTN, supporting the effectiveness of the combined adaptations for dense prediction. 
+
+6.4. Ablation Studies 
+
+We ablate RangeRound (RR), the learned bias update, and Activation Affine Correction (AAC) for MXFP4 elements with UE8M0 block scales. Table 4 reports blockwise Ima-geNet top-1 results for MobileNetV2 and CaiT-XXS24 with QDrop. The separate layerwise ablation without QDrop is reported in Appendix E.5 (Table 12); its optimization set-tings differ from those of the blockwise ablation. With RR 
+
+Table 4. VisionMX-BW ablation with MXFP4-UE8M0. Ima-geNet Top-1 accuracy is reported in percent. 
+
+RR Bias AAC MobileNetV2 CaiT-XXS24 
+
+✗ ✗ ✗ 52.73 73.15 
+
+✗ ✗ ✓ 64.54 73.27 
+
+✗ ✓ ✗ 54.91 73.16 
+
+✗ ✓ ✓ 64.84 73.55 
+
+✓ ✗ ✗ 56.12 73.35 
+
+✓ ✗ ✓ 65.24 73.50 
+
+✓ ✓ ✗ 57.42 73.30 
+
+✓ ✓ ✓ 65.53 73.56 and AAC enabled, adding the learned bias update raises top-1 accuracy from 65.24% to 65.53% on MobileNetV2 and from 73.50% to 73.56% on CaiT-XXS24, gains of 0.29 and 0.06 percentage points. With RR and bias enabled, AAC raises accuracy from 57.42% to 65.53% and from 73.30% to 73.56%, gains of 8.11 and 0.26 points. With bias and 8AAC enabled, adding RR raises accuracy from 64.84% to 65.53% and from 73.55% to 73.56%, gains of 0.69 and 0.01 points. The configuration with all three components has the highest top-1 accuracy among the evaluated blockwise rows for both models. 
+
+## 7. Conclusion 
+
+This work studies post-training Microscaling quantization across convolutional, transformer, and hybrid vision ar-chitectures. Our analysis shows that, among the evalu-ated models, compact convolutional and hybrid architec-tures tend to be more sensitive to MX quantization, while transformers are generally more robust. We identify two sources of accuracy degradation: (i) nonuniform floating-point grids, which can limit weight reconstruction when rounding is restricted to adjacent levels; and (ii) nonneg-ative activations produced by nonlinearities, which leave negative quantization codes unused. We address these limitations by introducing a new quan-tization method, VisionMX, that extends adaptive round-ing to nonuniform floating-point grids through range-rounding, allowing weight assignments to be optimized over a bounded range of quantization levels. Additionally, we adapt affine activation correction to the MX block struc-ture, shifting and scaling activations to utilize the signed grid better. Our experimental results show that the proposed method outperforms established PTQ baselines on MXFP4-UE8M0, MXFP4-UE5M3, and NVFP4, across a broad range of vision tasks. Finally, using VisionMX, we have shown that MX-aware post-training quantization enables state-of-the-art performance in most benchmarked models. Moreover, these results demonstrate that the new MX data format is well suited for vision applications. 
+
+## References 
+
+[1] Eduardo Alvarez, Omri Almog, Eric Chung, Simon Layton, Dusan Stosic, Ronny Krashinsky, and Kyle Aubrey. Intro-ducing nvfp4 for efficient and accurate low-precision infer-ence. NVIDIA Technical Blog , 24, 2025. 1, 3, 12 [2] Ron Banner, Yury Nahshan, and Daniel Soudry. Post train-ing 4-bit quantization of convolutional networks for rapid-deployment. Advances in neural information processing sys-tems , 32, 2019. 3 [3] Yash Bhalgat, Jinwon Lee, Markus Nagel, Tijmen Blankevoort, and Nojun Kwak. Lsq+: Improving low-bit quantization through learnable offsets and better initializa-tion. In 2020 IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops (CVPRW) , pages 2978– 2985. IEEE, 2020. 2, 5 [4] Han Cai, Junyan Li, Muyan Hu, Chuang Gan, and Song Han. Efficientvit: Lightweight multi-scale attention for high-resolution dense prediction. In 2023 IEEE/CVF interna-tional conference on computer vision (ICCV) , pages 17256– 17267. IEEE, 2023. 7 [5] Yuanhao Cai, Hao Bian, Jing Lin, Haoqian Wang, Radu Tim-ofte, and Yulun Zhang. Retinexformer: One-stage retinex-based transformer for low-light image enhancement. In 
+
+2023 IEEE/CVF international conference on computer vi-sion (ICCV) , pages 12470–12479. IEEE, 2023. 1, 7, 19 [6] Liang-Chieh Chen, George Papandreou, Florian Schroff, and Hartwig Adam. Rethinking atrous convolution for seman-tic image segmentation. arXiv preprint arXiv:1706.05587 ,2017. 7 [7] Yuxiang Chen, Haocheng Xi, Jun Zhu, and Jianfei Chen. Oscillation-reduced MXFP4 training for vision transform-ers. In Forty-second International Conference on Machine Learning , 2025. 1, 3 [8] Zhen Dong, Zhewei Yao, Amir Gholami, Michael W. Ma-honey, and Kurt Keutzer. Hawq: Hessian aware quantization of neural networks with mixed-precision. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) , 2019. 4 [9] Vage Egiazarian, Roberto Castro, Denis Kuznedelev, Andrei Panferov, Eldar Kurtic, Shubhra Pandit, Alexandre Marques, Mark Kurtz, Saleh Ashkboos, Torsten Hoefler, et al. Bridg-ing the gap between promise and performance for microscal-ing fp4 quantization. In International Conference on Learn-ing Representations , pages 113529–113563, 2026. 1, 3, 12 [10] Andrea Fasoli, Monodeep Kar, Chi-Chun Liu, Swagath Venkataramani, Viji Srinivasan, Leland Chang, and Naigang Wang. Is finer better? the limits of microscaling formats in large language models. In International Conference on Learning Representations , pages 94192–94223, 2026. 1, 2, 3, 5 [11] Amir Gholami, Sehoon Kim, Zhen Dong, Zhewei Yao, Michael W Mahoney, and Kurt Keutzer. A survey of quan-tization methods for efficient neural network inference. In 
+
+Low-power computer vision , pages 291–326. Chapman and Hall/CRC, 2022. 1 [12] Ofir Gordon, Elad Cohen, Hai Victor Habi, and Arnon Net-zer. Eptq: Enhanced post-training quantization via hessian-guided network-wise optimization. In European Conference on Computer Vision , pages 150–166. Springer, 2024. 1, 2, 3, 4, 5, 14 [13] Ofir Gordon, Lior Dikstein, Arnon Netzer, Idan Achituve, and Hai Victor Habi. LATMix: Learnable affine transforma-tions for microscaling quantization of LLMs. In Forty-third International Conference on Machine Learning , 2026. 1, 3 [14] Hai Victor Habi, Reuven Peretz, Elad Cohen, Lior Dikstein, Oranit Dror, Idit Diamant, Roy H Jennings, and Arnon Net-zer. Hptq: Hardware-friendly post training quantization. 
+
+arXiv preprint arXiv:2109.09113 , 2021. 1, 2, 5 [15] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In Proceed-ings of the IEEE conference on computer vision and pattern recognition , pages 770–778, 2016. 7 [16] Benoit Jacob, Skirmantas Kligys, Bo Chen, Menglong Zhu, Matthew Tang, Andrew Howard, Hartwig Adam, and Dmitry Kalenichenko. Quantization and training of neural networks 
+
+9for efficient integer-arithmetic-only inference. In Proceed-ings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR) , 2018. 1 [17] Hanglin Li, Shuchang Tian, Chen Lin, Zhiyong Zhao, and Kun Zhan. Faar: Format-aware adaptive rounding for nvfp4. 
+
+arXiv preprint arXiv:2603.22370 , 2026. 3, 5 [18] Yuhang Li, Ruihao Gong, Xu Tan, Yang Yang, Peng Hu, Qi Zhang, Fengwei Yu, Wei Wang, and Shi Gu. {BRECQ }:Pushing the limit of post-training quantization by block re-construction. In International Conference on Learning Rep-resentations , 2021. 1, 2, 3, 4, 5, 6 [19] Yanyu Li, Geng Yuan, Yang Wen, Ju Hu, Georgios Evan-gelidis, Sergey Tulyakov, Yanzhi Wang, and Jian Ren. Ef-ficientformer: Vision transformers at mobilenet speed. Ad-vances in neural information processing systems , 35:12934– 12949, 2022. 7 [20] Zhikai Li, Junrui Xiao, Lianwei Yang, and Qingyi Gu. Repq-vit: Scale reparameterization for post-training quan-tization of vision transformers. In 2023 IEEE/CVF In-ternational Conference on Computer Vision (ICCV) , pages 17181–17190. IEEE, 2023. 1, 3 [21] Tsung-Yi Lin, Michael Maire, Serge Belongie, James Hays, Pietro Perona, Deva Ramanan, Piotr Doll´ ar, and C Lawrence Zitnick. Microsoft coco: Common objects in context. In 
+
+European conference on computer vision , pages 740–755. Springer, 2014. 7 [22] Tsung-Yi Lin, Priya Goyal, Ross Girshick, Kaiming He, and Piotr Doll´ ar. Focal loss for dense object detection. In Pro-ceedings of the IEEE international conference on computer vision , pages 2980–2988, 2017. 7 [23] Wenyuan Liu, Haoqian Meng, Yilun Luo, Peng Zhang, and Xindian Ma. Micromix: Efficient mixed-precision quantiza-tion with microscaling formats for large language models. In International Conference on Learning Representations ,pages 112668–112687, 2026. 3 [24] Yanli Liu, Fei Feng, and Wotao Yin. Acceleration of SVRG and Katyusha x by inexact preconditioning. In Proceedings of the 36th International Conference on Machine Learning ,pages 4003–4012. PMLR, 2019. 16 [25] Yijiang Liu, Huanrui Yang, Zhen Dong, Kurt Keutzer, Li Du, and Shanghang Zhang. Noisyquant: Noisy bias-enhanced post-training activation quantization for vision transform-ers. In Proceedings of the IEEE/CVF Conference on Com-puter Vision and Pattern Recognition (CVPR) , pages 20321– 20330, 2023. 3 [26] Zhenhua Liu, Yunhe Wang, Kai Han, Wei Zhang, Siwei Ma, and Wen Gao. Post-training quantization for vision trans-former. Advances in Neural Information Processing Systems ,34:28092–28103, 2021. 1 [27] Zhenhua Liu, Yunhe Wang, Kai Han, Wei Zhang, Siwei Ma, and Wen Gao. Post-training quantization for vision trans-former. In Advances in Neural Information Processing Sys-tems , pages 28092–28103. Curran Associates, Inc., 2021. 3 [28] Zhuang Liu, Hanzi Mao, Chao-Yuan Wu, Christoph Feicht-enhofer, Trevor Darrell, and Saining Xie. A convnet for the 2020s. In 2022 IEEE/CVF conference on computer vision and pattern recognition (CVPR) , pages 11966–11976. IEEE, 2022. 7 [29] Jaehyeon Moon, Dohyung Kim, Junyong Cheon, and Bum-sub Ham. Instance-aware group quantization for vision transformers. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , pages 16132–16141, 2024. 3 [30] Markus Nagel, Mart van Baalen, Tijmen Blankevoort, and Max Welling. Data-free quantization through weight equal-ization and bias correction. In Proceedings of the IEEE/CVF international conference on computer vision , pages 1325– 1334, 2019. 3 [31] Markus Nagel, Rana Ali Amjad, Mart Van Baalen, Chris-tos Louizos, and Tijmen Blankevoort. Up or down? adap-tive rounding for post-training quantization. In International conference on machine learning , pages 7197–7206. PMLR, 2020. 1, 2, 3, 4, 5, 6, 7 [32] Markus Nagel, Marios Fournarakis, Yelysei Bondarenko, and Tijmen Blankevoort. Overcoming oscillations in quantization-aware training. In Proceedings of the 39th In-ternational Conference on Machine Learning , pages 16318– 16330. PMLR, 2022. 1 [33] Akshat Ramachandran, Souvik Kundu, and Tushar Krishna. MicroScopiQ: Accelerating foundational models through outlier-aware microscaling quantization. In Proceedings of the 52nd Annual International Symposium on Computer Ar-chitecture , pages 1193–1209. ACM, 2025. 3 [34] Alexandre Rame, Guillaume Couairon, Corentin Dancette, Jean-Baptiste Gaya, Mustafa Shukor, Laure Soulier, and Matthieu Cord. Rewarded soups: towards pareto-optimal alignment by interpolating weights fine-tuned on diverse re-wards. Advances in Neural Information Processing Systems ,36:71095–71134, 2023. 16 [35] Shaoqing Ren, Kaiming He, Ross Girshick, and Jian Sun. Faster r-cnn: Towards real-time object detection with region proposal networks. IEEE transactions on pattern analysis and machine intelligence , 39(6):1137–1149, 2016. 1, 7 [36] Bita Darvish Rouhani, Ritchie Zhao, Ankit More, Mathew Hall, Alireza Khodamoradi, Summer Deng, Dhruv Choud-hary, Marius Cornea, Eric Dellinger, Kristof Denolf, et al. Microscaling data formats for deep learning. arXiv preprint arXiv:2310.10537 , 2023. 1, 2, 3 [37] Olga Russakovsky, Jia Deng, Hao Su, Jonathan Krause, San-jeev Satheesh, Sean Ma, Zhiheng Huang, Andrej Karpathy, Aditya Khosla, Michael Bernstein, et al. Imagenet large scale visual recognition challenge. International journal of computer vision , 115(3):211–252, 2015. 7 [38] Mark Sandler, Andrew Howard, Menglong Zhu, Andrey Zh-moginov, and Liang-Chieh Chen. Mobilenetv2: Inverted residuals and linear bottlenecks. In 2018 IEEE/CVF con-ference on computer vision and pattern recognition , pages 4510–4520. Ieee, 2018. 1, 7 [39] Ovishake Sen, Venkata Nithin Kamineni, Daniel Lobo, Swarup Bhunia, Rickard Ewetz, and Baibhab Chatter-jee. Characterizing the impact of nvfp4 quantization for low-power edge ai deployment. arXiv preprint arXiv:2606.06527 , 2026. 3 [40] Xun Tang, Michael Shavlovsky, Holakou Rahmanian, Elisa Tardini, Kiran Thekumparampil, Tesi Xiao, and Lexing 
+
+10 Ying. Accelerating sinkhorn algorithm with sparse newton iterations. In International Conference on Learning Repre-sentations , pages 13558–13577, 2024. 16 [41] Zhi Tian, Chunhua Shen, Hao Chen, and Tong He. Fcos: Fully convolutional one-stage object detection. In 2019 IEEE/CVF international conference on computer vision (ICCV) , pages 9626–9635. Ieee, 2019. 1, 7 [42] Hugo Touvron, Matthieu Cord, Alexandre Sablayrolles, Gabriel Synnaeve, and Herv´ e J´ egou. Going deeper with im-age transformers. In 2021 IEEE/CVF international confer-ence on computer vision (ICCV) , pages 32–42. IEEE, 2021. 7[43] Hongjian Wang, Mert Gurbuzbalaban, Lingjiong Zhu, Umut Simsekli, and Murat Erdogdu. Convergence rates of stochas-tic gradient descent under infinite noise variance. In Ad-vances in Neural Information Processing Systems , pages 18866–18877. Curran Associates, Inc., 2021. 16 [44] Xiuying Wei, Ruihao Gong, Yuhang Li, Xianglong Liu, and Fengwei Yu. QDrop: Randomly dropping quantization for extremely low-bit post-training quantization. In Interna-tional Conference on Learning Representations , 2022. 1, 2, 3, 4, 5, 7, 18 [45] Jinghao Wen, Ruixuan Wang, Shaohuang Wang, and Xun Jiao. Improving efficiency and reliability of computer vi-sion models in real-world deployment with mx quantization. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) Workshops , pages 9373–9382, 2026. 1, 3 [46] Zhuguanyu Wu, Shihe Wang, Jiayi Zhang, Jiaxin Chen, and Yunhong Wang. Fima-q: Post-training quantization for vi-sion transformers by fisher information matrix approxima-tion. In Proceedings of the IEEE/CVF Conference on Com-puter Vision and Pattern Recognition (CVPR) , pages 14891– 14900, 2025. 3 [47] Saining Xie, Ross Girshick, Piotr Doll´ ar, Zhuowen Tu, and Kaiming He. Aggregated residual transformations for deep neural networks. In 2017 IEEE conference on computer vision and pattern recognition (CVPR) , pages 5987–5995. IEEE, 2017. 7 [48] Qingsen Yan, Yixu Feng, Cheng Zhang, Guansong Pang, Kangbiao Shi, Peng Wu, Wei Dong, Jinqiu Sun, and Yan-ning Zhang. Hvi: A new color space for low-light image enhancement. In 2025 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , pages 5678–5687. IEEE, 2025. 1, 7, 19 [49] Zhihang Yuan, Chenhao Xue, Yiqi Chen, Qiang Wu, and Guangyu Sun. Ptq4vit: Post-training quantization for vision transformers with twin uniform quantization. In Computer Vision – ECCV 2022 , pages 191–207, Cham, 2022. Springer Nature Switzerland. 3 [50] Yunshan Zhong, Jiawei Hu, You Huang, Yuxin Zhang, and Rongrong Ji. Erq: Error reduction for post-training quan-tization of vision transformers. In Forty-first International Conference on Machine Learning , 2024. 1, 3 
+
+11 A. Implementation Details 
+
+A.1. Experimental Details 
+
+Unless otherwise stated, we use the following settings in all experiments. We quantize the input activations and weights of all linear operations, including the input and output layers. Weight block scales are initialized by min-imizing the mean squared error between the original and quantized weights, as described in Appendix A.2. We use the Adam optimizer with weight decay 0.01 and a warmup fraction of 0.2. When QDrop is enabled, its probability is 
+
+0.5.
+
+ImageNet-1K classification. We select calibration im-ages with a deterministic class-round-robin sampler and use a batch size of 32. We run reconstruction for 20,000 steps per layer or block, except for ViT-S/16, for which we use 10,000 steps. For layerwise reconstruction, we set the bias learning rate to 10 −3 and disable both the bias penalty and QDrop. For blockwise reconstruction, we set the bias learn-ing rate to 10 −5 and the bias penalty to 10 −3, and enable QDrop. For MobileNetV2 with layerwise UE8M0 quanti-zation, we set the rounding learning rate to 0.003 and the regularization weight to 1.0. We evaluate all 50,000 vali-dation images using the preprocessing associated with each pretrained checkpoint and report top-1 accuracy. 
+
+COCO detection and segmentation. We select calibra-tion images from train2017 with a class-aware round-robin sampler. We run adaptive reconstruction for 20,000 steps per layer, with a rounding learning rate of 10 −3 and a regu-larization weight of 0.01 . We use a batch size of 1 to eval-uate all 5,000 val2017 images. For detection, we report bounding-box average precision (AP). For segmentation, we resize predictions to the target mask resolution and re-port mean intersection-over-union (mIoU) over classes with nonzero union. 
+
+Low-light image enhancement. We use deterministic calibration crops from the LOLv2-Real Train/Low split. We run both layerwise and blockwise reconstruction for 15,000 steps and set the rounding learning rate and regularization weight to 10 −2. We enable QDrop only for blockwise re-construction. We evaluate at native resolution with a batch size of 1 and report per-image RGB PSNR, SSIM, and LPIPS-Alex without mean correction. 
+
+A.2. Quantization Format Implementation Details 
+
+MXFP4. We use signed E2M1 elements with maximum magnitude 6, blocks of 32 values, and no tensor-level scale. Define 
+
+Mb = max 
+
+> i∈I b
+
+|xi|, s⋆b = Mb/6.
+
+The positive scale codebooks are 
+
+SUE8M0 = {2e : e = −127 , . . . , 127 },
+
+SUE5M3 = {(1 + k/ 8)2 e : k = 0 , . . . , 7, e = −14 , . . . , 16 }.
+
+For a scale codebook S, define strict upward projection with endpoint clamping: 
+
+Π↑,>  
+
+> S
+
+(s) = min  {u ∈ S : u > s } ∪ { max S} .
+
+Our implementation selects 
+
+bsUE8M0  
+
+> b
+
+= Π ↑,>  
+
+> SUE8M0
+
+(s⋆b ),
+
+bsUE5M3  
+
+> b
+
+= Π ↑,>  
+
+> SUE5M3
+
+(s⋆b ),
+
+Exact grid values advance to the next scale, unless already at the maximum. Zero blocks receive the minimum scale: 
+
+2−127 for UE8M0 and 2−14 for UE5M3. Values exceeding the scaled E2M1 range are saturated. 
+
+NVFP4. NVFP4 uses E2M1 elements with E4M3 scales shared by groups of 16 [9] and an FP32 tensor-level scale [1]. With Mtensor = max i |xi|, the multiplicative re-construction factor is 
+
+g =
+
+(
+
+1, Mtensor = 0 ,
+
+max {Mtensor /(448 · 6) , 2−126 }, Mtensor > 0.
+
+The tensor maximum and g are computed in FP32; normal-ization casts the factor to the input dtype. Writing the result-ing normalized tensor as y = x/g , max-based local scale selection is 
+
+sNV  
+
+> b
+
+= Π ↑,> 
+
+> SE4M3
+
+ max i∈I b |yi|
+
+6
+
+
+
+.
+
+The positive E4M3 codebook contains 126 scales, includ-ing subnormals, from 2−9 to 448 . Projection preserves ex-act grid values and clamps at these endpoints; zero blocks receive 2−9. The effective scale and reconstruction are 
+
+ab = g s NV  
+
+> b
+
+,
+
+bxi = ab QE
+
+ xi/a b
+
+ .
+
+The quantizer returns the effective scale after folding in the global factor. We use the NVFP4 format with upward-rounded local scales. 
+
+A.2.1. Element rounding and scale selection 
+
+E2M1 elements are rounded to the nearest representable value, with ties resolved to an even encoding and saturation at ±6. For weights, we select the block scale by minimizing reconstruction MSE ( psearch = 2 ) over all positive values in the corresponding scale codebook: 
+
+Cb(s) = 1
+
+B
+
+X
+
+> i∈I b
+
+yi − s Q E(yi/s ) 2 , s ∈ S .
+
+12 For MXFP4, y = x. For NVFP4, y = x/g , with the tensor-level factor g held fixed during the local scale search. Equal costs select the smaller scale, and zero blocks receive the minimum positive scale. 
+
+A.3. RangeRound Implementation Details 
+
+RangeRound obtains initialized block scales from the active quantizer before optimizing rounding logits. The selected scales and zero-points remain fixed throughout RangeR-ound optimization. The rectified sigmoid in the main text uses γ = −0.10 
+
+and ζ = 1 .10 . For zero-based step t, total steps T , and warmup fraction w, the implementation sets 
+
+tw = ⌊wT ⌋,p(t) = clip 
+
+ t − tw
+
+T − 1 − tw
+
+, 0, 1
+
+
+
+,λ(t) = λmax p(t),β(t) = 20 + (2 − 20) p(t).
+
+(13) One seeded random cached calibration batch is drawn at each step. Experimental hyperparameters and task-specific overrides are provided in Appendix A.1. 
+
+A.4. Blockwise Reconstruction Setup 
+
+A blockwise reconstruction unit U is a complete executable module, rather than a sequence represented by one weight matrix. Specifically, for a calibration minibatch, let Xq,U
+
+be the input captured at the boundary of U after the already-quantized network prefix, and let YU be the structured out-put of the corresponding floating-point reference unit. The student output is eYU = f Q 
+
+> U
+
+(Xq,U ; Ω U ), where ΩU con-tains the relaxed rounding variables and enabled bias up-dates of the quantized layers inside U. Both full block for-ward passes include their intervening operations, residual paths, nonlinearities, normalization operations, and origi-nal internal biases. For dynamic reference roots that require replay, the floating-point root is evaluated on the captured student boundary input instead. Let TU index the selected floating-point tensors at the block output. The block-output reconstruction error and bias penalty are 
+
+EU = 1
+
+NU
+
+X
+
+> j∈T U
+
+∥ eYU,j − YU,j ∥2 
+
+> F
+
+,
+
+PU = X 
+
+> ℓ∈U :
+> δbias ,ℓ enabled
+
+∥δbias ,ℓ ∥2 
+
+> F
+
+/C ℓ
+
+∥yref  
+
+> ℓ
+
+∥2 
+
+> F
+
+/N ℓ + ϵ . (14) where NU = P 
+
+> j∈T U
+
+numel( YU,j ) is the number of scalar elements in the selected block output tensors. Here Cℓ is the number of bias-update elements, Nℓ is the number of reference-output elements, and ϵ = 10 −8 by default. At optimization step t, the objective is 
+
+LU (Ω U ) = EU + λ(t) X
+
+> ℓ∈U
+
+Rround ,ℓ 
+
++ ηbias PU .
+
+(15) Here Rround ,ℓ is the rounding penalty defined in the main text for quantized weight tensor ℓ, and λ(t) follows the warmup schedule in Appendix A.3. 
+
+A.5. Activation Affine Correction Details 
+
+Activation affine correction stores a per-channel scale α and shift γ with each quantized layer. The transform is applied before dynamic block activation quantization: 
+
+u = diag( α)( x − γ).
+
+Before weight quantization, the inverse transform is folded into the following floating-point linear operation: 
+
+W′ = W diag( α)−1, b′ = b + Wγ. (16) Replacing activation quantization by the identity therefore preserves the original computation algebraically, and up to floating-point rounding in the implementation. For convolutions, weight division and bias compensation are performed per input channel within each convolution group. The bias compensation sums the original kernel mul-tiplied by the corresponding channel shift over input chan-nels and kernel positions. This also covers depthwise con-volution. At inference, spatial padding is applied before the affine transform and activation quantization, and the convo-lution then uses zero internal padding. Calibration instead uses the captured real layer-input positions, excluding spa-tial padding. 
+
+Initialization of Activation Affine Correction The stan-dard grid-search initializer calibrates supported layers se-quentially using captured inputs with activation quantiza-tion disabled. It directly searches the stored scale and shift. Write αj = ( α)j and γj = ( γ)j . Let xp,j denote calibra-tion activation j at sample position p, where p = 1 , . . . , P 
+
+indexes all collected batch and spatial or token positions, excluding convolution spatial padding. For samples xp,j 
+
+and real channels Rb in block b, define 
+
+up,j = αj (xp,j − γj ),
+
+bxp,j = (QMX (U)) p,j 
+
+αj
+
++ γj ,Eb = 1
+
+P |Rb|
+
+> P
+
+X
+
+> p=1
+
+X
+
+> j∈Rb
+
+(bxp,j − xp,j )2,
+
+13 where U = [ up,j ] and QMX includes quantization and de-quantization. Quantizer-required channel padding is ex-cluded from the reconstruction error. For MX formats without a tensor-level scale, each chan-nel block is optimized independently. Starting from αj = 1 
+
+and γj = 0, the initializer first searches a shared scale and shift for the whole block. It alternates shift and scale searches, stopping when a complete sweep fails to reduce 
+
+Eb or the configured sweep limit is reached. With channel-granularity correction, the resulting shared parameters ini-tialize a subsequent per-channel search. The shift-search interval for channel j is 
+
+
+
+min {0, min  
+
+> p
+
+xp,j }, max {0, max  
+
+> p
+
+xp,j }
+
+
+
+.
+
+The shared-block search uses the corresponding extrema over all real channels in the block. The initial shift grid is uniformly spaced over this interval. The initial scale grid is n
+
+2r/G α : r = 0 , . . . , G α − 1
+
+o
+
+.
+
+Scale refinement is performed in log 2 α, within 0 ≤
+
+log 2 α < 1. Each grid includes the incumbent parameter by appending it and removing duplicates; the incumbent does not replace a grid point. After each grid evaluation, the search interval is narrowed to one preceding grid spac-ing on either side of the best parameter, clipped to the search domain. Each channel sweep starts with H = ∅ and visits every real channel once. Before each visit, priorities are recom-puted and the unvisited channel with the largest reconstruc-tion MSE is chosen: 
+
+i⋆ = arg max 
+
+> i∈Rb\H
+
+1
+
+P
+
+> P
+
+X
+
+> p=1
+
+(bxp,i − xp,i )2.
+
+Ties select the lowest channel index. The selected chan-nel’s shift and scale are searched in that order against the whole-block objective Eb, after which the channel is added to H. Accepted updates do not reset H within a sweep. An optional channel-priority metric uses 
+
+P
+
+> p
+
+(bxp,i − xp,i )2
+
+P 
+
+> p
+
+x2 
+
+> p,i
+
++ ϵFP32 
+
+,
+
+where ϵFP32 is FP32 machine epsilon; candidate acceptance still uses Eb.For this independent-block search, a candidate is ac-cepted only when its reconstruction MSE is strictly smaller than the incumbent’s. The final block transform is retained only if it improves on identity. The default configuration uses Gγ = 17 shift-grid points, Gα = 16 scale-grid points, two refinement rounds per search, at most eight shared-block sweeps, and one channel sweep with one shift–scale alternation per channel. These settings are configurable. For NVFP4, the dynamic tensor-level scale couples channel blocks. Its grid-search path therefore scores can-didate updates using full-tensor reconstruction error, pre-serving the original calibration-batch boundaries. Accep-tance uses a relative FP32 numerical tolerance rather than the independent-block strict comparison. Optional subset-certified and backpropagation-based calibration paths use separate configurations. The additive notation remains equivalent through βj =
+
+−αj γj , giving up,j = αj xp,j + βj ; however, the imple-mented grid search operates directly on (αj , γ j ).
+
+## B. Analysis 
+
+B.1. Second-Order Analysis of Weight Quantiza-tion 
+
+We follow the Taylor-expansion and Hessian-chain-rule structure of EPTQ [12], Appendices B.2 and C.1, while re-taining weight interactions. Define 
+
+Ltask (w) = Ex,y [ℓ(f (x; w), y)] .
+
+The expectation is over the task’s input–target distribution; for analysis of a single weight tensor, all other weights are held fixed. Suppose this expected loss is twice continuously differentiable near the float weights, and differentiation can be interchanged with expectation. With ϵw = w − wq and 
+
+gw = ∇wLtask (w), Taylor expansion yields 
+
+∆Ltask = − g⊤
+
+> w
+
+ϵw + 12 ϵ⊤
+
+> w
+
+Hwϵw + o(∥ϵw∥22). (17) At a stationary float solution, gw = 0 ; more generally, the linear contribution must be negligible on the perturbations considered to obtain Eq. (3). Pretraining alone does not en-sure exact stationarity. Large quantization errors or changes across nonsmooth activation boundaries can also invalidate this local approximation. 
+
+B.2. Block Scale Format Analysis 
+
+This appendix reports a staged diagnostic for MXFP4 block-scale format selection across ResNet-18 and ConvNeXt-Tiny. Each run evaluates ImageNet top-1 accuracy with group size 32, round-to-nearest quantization. The sweep changes only the unsigned exponent scale format while holding the remaining quantization setup fixed within each model and mode. Among the evaluated block-scale formats, UE5 achieves the highest weight-only accuracy for both ResNet-18 and ConvNeXt-Tiny. The preferred format differs in the activation-only settings. In Table 6, UE8M0 uses exponent-only powers of two with floor rounding. UE7M1 through UE1M7 use an expo-nent bias of 2E−1 − 1 and round the mantissa to the near-est code; their exponent and mantissa are clamped at the listed endpoints, with no subnormal scales emitted. UE0M8 14 (a) Weight-only (b) Activation-only 
+
+Figure 3. ResNet-18 MXFP4 block-scale diagnostic on ImageNet top-1 accuracy. Both runs use group size 32, RTN, no bias correction, and no AdaRound. In the weight-only setting, activations remain in floating point; in the activation-only setting, weights remain in floating point. The plots show UE8M0 through UE1M7.  
+
+> (a) Weight-only (b) Activation-only
+
+Figure 4. ConvNeXt-Tiny MXFP4 block-scale diagnostic on ImageNet top-1 accuracy. Both runs use group size 32, RTN, no bias correction, and no AdaRound. In the weight-only setting, activations remain in floating point; in the activation-only setting, weights remain in floating point. The plots show UE8M0 through UE1M7. Table 5. ImageNet top-1 accuracy for the block-scale diagnostic. W and A denote weight-only and activation-only settings. Best results are selected among the plotted formats UE8M0 through UE1M7; the ResNet-18 activation-only UE4M4 accuracy is esti-mated from the plotted point. UE8 is the MX-spec scale format. UE5 denotes UE5M3, with five exponent bits and three mantissa bits. 
+
+Model Mode Float UE8 Best ResNet-18 W 69.76 62.43 65.87 (UE5M3) ResNet-18 A 69.76 63.14 65 .8 (UE4M4) ConvNeXt-Tiny W 82.51 81.32 81.82 (UE5M3) ConvNeXt-Tiny A 82.51 78.69 80.29 (UE4M4) rounds to the nearest multiple of 1/255 after clipping at one. Values that round to the UE0M8 zero code are replaced by the minimum normal FP32 value, 2−126 . The diagnostic uses a group size of 32 and selects a max-based, no-clipping 
+
+Table 6. Unsigned eight-bit block-scale formats in the diagnostic sweep. The ranges list positive scale values before any optional global multiplier. 
+
+Format E/M bits Bias Positive scale range UE8M0 8/0 0 2−127 –2127 
+
+UE7M1 7/1 63 2−62 –1.5 · 264 
+
+UE6M2 6/2 31 2−30 –1.75 · 232 
+
+UE5M3 5/3 15 2−14 –1.875 · 216 
+
+UE4M4 4/4 7 2−6–1.9375 · 28
+
+UE3M5 3/5 3 2−2–1.96875 · 24
+
+UE2M6 2/6 1 1–1.984375 · 22
+
+UE1M7 1/7 0 2–3.984375 
+
+scale before applying each scale format. The format labels UE8 through UE1 in the plots abbreviate UE8M0 through UE1M7. Among the plotted formats UE8M0 through UE1M7, 15 ResNet-18 shows several scale formats above UE8M0, with the highest weight-only result at UE5M3 and the highest activation-only result at UE4M4. ConvNeXt-Tiny is less sensitive in weight-only mode but still improves from UE8 to UE5, while its activation-only sweep improves most at UE4. 
+
+## C. Weight Rounding Analysis 
+
+C.1. Proof of Theorem 4.1 
+
+Here, we prove Theorem 4.1. We begin by explicitly stating the diagonal-dominance assumption on the Hessian, which appears in the machine-learning optimization literature [24, 34, 40, 43]. 
+
+Assumption C.1 (Diagonal-dominance) . The task-loss Hessian at the float weights satisfies 
+
+Hw = (( Hw)ij )di,j =1 ≻ 0, (Hw)ii ≥ 2 X 
+
+> j̸=i
+
+|(Hw)ij |.
+
+In this work, we strengthen the usual row-diagonal-dominance condition by a factor of two to derive our round-ing results. 
+
+Proof. Let 
+
+w⋆q = arg min  
+
+> wq∈Q d
+> INT4
+
+∆Lapx (wq ; w)
+
+be the unique full-grid minimizer. Suppose, for contradic-tion, that w⋆q /∈ Q (UD) INT4 (w). Define ϵ = w − w⋆q and 
+
+E = ∥ϵ∥∞, and choose k such that |ϵk| = E. Since a coordinate outside its uniform-grid rounding up–down set has error magnitude at least ∆INT4 , we have E ≥ ∆INT4 .Let σ = sign( ϵk) and, for s > 0, set w′ 
+
+> q
+
+= w⋆q + σs ek,where ek is the k-th coordinate basis vector. For any feasi-ble such assignment, define 
+
+∆ = ∆ Lapx (w′ 
+
+> q
+
+; w) − ∆Lapx (w⋆q ; w).
+
+Expanding the quadratic gives 
+
+∆ = −σs (Hwϵ)k + 12 (Hw)kk s2(a) 
+
+≤ − sE 
+
+(Hw)kk − X 
+
+> j̸=k
+
+|(Hw)kj |
+
+ + 12 (Hw)kk s2(b) 
+
+≤ 12 (Hw)kk s(s − E). (18) Here, (a) uses σϵ k = E and |ϵj | ≤ E; (b) uses factor-two diagonal dominance. Take s = ∆ INT4 . Since E ≥ ∆INT4 , the updated coor-dinate lies between (w⋆q )k and wk, within the representable interval. Thus w′ 
+
+> q
+
+is a feasible grid assignment distinct from 
+
+w⋆q . Equation (18) gives a nonpositive loss change. A strict decrease contradicts optimality, while equality contradicts uniqueness. Hence w⋆q ∈ Q (UD) INT4 (w), so 
+
+min  
+
+> wq∈Q d
+> INT4
+
+∆Lapx (wq ; w) = min  
+
+> wq∈Q (UD) INT4 (w)
+
+∆Lapx (wq ; w).
+
+For FP4, the inclusion Q(UD) FP4 (w) ⊆ Q d 
+
+> FP4
+
+directly gives 
+
+min  
+
+> wq∈Q d
+> FP4
+
+∆Lapx (wq ; w) ≤ min   
+
+> wq∈Q (UD) FP4 (w)
+
+∆Lapx (wq ; w).
+
+C.2. Proof of Proposition 5.1 
+
+Proof. Let 
+
+w⋆q ∈ arg min  
+
+> wq∈Q d
+
+∆Lapx (wq ; w),
+
+and suppose, for contradiction, that w⋆q /∈ Qdi=1 Cδ (wi).Set ϵ = w − w⋆q and E = ∥ϵ∥∞, and choose k with |ϵk| =
+
+E. Since the candidate window contains every legal code within the closed radius δ/ 2, an excluded coordinate has error magnitude greater than δ/ 2. Thus 
+
+E > δ/ 2 ≥ gmax .
+
+Let σ = sign( ϵk), and let s be the gap to the next ad-jacent code toward the in-range weight wk. This code ex-ists because the selected coordinate has nonzero error and the reference weight lies within the representable interval. Therefore 
+
+w′ 
+
+> q
+
+= w⋆q + σs ek ∈ Q d, 0 < s ≤ gmax < E. 
+
+Applying Eq. (18) gives 
+
+∆Lapx (w′ 
+
+> q
+
+; w) − ∆Lapx (w⋆q ; w)
+
+≤ 12 (Hw)kk s(s − E) < 0,
+
+contradicting optimality. Hence every full-grid minimizer belongs to the candidate product. Since that product is a subset of the full grid, 
+
+min  
+
+> wq∈Q d
+
+∆Lapx (wq ; w) = min    
+
+> wq∈Qdi=1 Cδ(wi)
+
+∆Lapx (wq ; w).
+
+No uniqueness assumption is required. For unscaled E2M1 FP4, gmax = 2 , so every δ ≥ 4 suffices. 
+
+Corollary C.1 (Candidate-window sufficiency for fixed-s-cale MX quantization) . Let S be diagonal, with (S)ii =
+
+bsb > 0 for each coordinate i ∈ Ib, where bsb is the fixed representable scale shared by that MX block. Let 
+
+Q = {q0 < · · · < q m−1} be the element grid, and define 
+
+z = S−1w, Hz = S⊤HwS,gmax = max 
+
+> 0≤j<m −1
+
+(qj+1 − qj ).
+
+16 Assume that z ∈ [min Q, max Q]d, so normalization re-quires no clipping, and that 
+
+Hz ≻ 0, (Hz )ii ≥ 2 X 
+
+> j̸=i
+
+|(Hz )ij | for every i. 
+
+For normalized codes zq ∈ Q d, define 
+
+LS (zq ; w) = 12 (w − Szq )⊤Hw(w − Szq ).
+
+Then every δ ≥ 2gmax satisfies 
+
+min  
+
+> zq∈Q d
+
+LS (zq ; w) = min    
+
+> zq∈Qdi=1 Cδ(zi)
+
+LS (zq ; w).
+
+For E2M1 element codes, δ = 4 suffices in normalized co-ordinates. Proof. Since w = Sz,
+
+LS (zq ; w) = 12 (z − zq )⊤Hz (z − zq ).
+
+Apply the bounded-window argument of Proposition 5.1 to z and Hz . As shown above, this argument requires no uniqueness assumption. The Hessian condition must be checked after transfor-mation: unequal block scales need not preserve factor-two row diagonal dominance. The window width δ is measured in normalized element coordinates. 
+
+C.3. INT4–FP4 Reconstruction Example 
+
+We use w = (1 .4, 4.9) ⊤ and the illustrative quadratic task-loss Hessian in Eq. (4), with diagonal entries 1 and off-diagonal entries 0.5. Its eigenvalues are 0.5 and 1.5, and it satisfies the factor-two row condition at equality. FP4 uses unit scale and the distinct E2M1 values QFP4 =
+
+{0, ±0.5, ±1, ±1.5, ±2, ±3, ±4, ±6}. INT4 uses ∆INT4 =6/7, matching the positive endpoint 6; its negative endpoint is −48 /7. Both scales remain fixed. At unit scale, normal-ized and physical weights coincide. The figure loss label L
+
+denotes the surrogate ∆Lapx .For the FP4 window δ = 4 , the exact candidate sets are 
+
+C4(1 .4) = {− 0.5, 0, 0.5, 1, 1.5, 2, 3},
+
+C4(4 .9) = {3, 4, 6}.
+
+Their Cartesian product MFP4 (w) = Qdi=1 C4(wi), la-beled M4 in the figures, contains 21 legal pairs, shown in teal in Figure 6. The strict-neighbor rule is the same as in the method; δ is a window width, not a count of levels. For FP4, nearest rounding and best up–down coincide at 
+
+wq,B = (1 .5, 4) ⊤. The full-grid and window optima co-incide at wq,C = (2 , 4) ⊤. Moving from B to C increases squared weight error from 0.82 to 1.17 , but reduces recon-struction loss from 0.365 to 0.315 . INT4 nearest round-ing is a different assignment from its best up–down and 
+
+Table 7. Enumeration of all legal pairs and restricted candidate sets for w = (1 .4, 4.9) ⊤ and coupling 0.5. INT4 losses are rounded to six decimal places. 
+
+Format Assignment rule Weight pair Loss FP4 Best up–down (1 .5, 4) 0.365 FP4 Full grid (2 , 4) 0.315 INT4 Nearest (12 /7, 36 /7) 0.117041 INT4 Best up–down (6 /7, 36 /7) 0.110918 INT4 Full grid (6 /7, 36 /7) 0.110918 0.0 0.1 0.2 0.3 0.4 0.5 Input correlation ρ 
+
+> 0.03
+> 0.05
+> 0.1
+> 0.2
+> 0.4
+> Reconstruction  loss  
+> 7/18 FP4: full grid FP4: best up–down FP4: 4INT4: full grid INT4: best up–down
+
+Figure 5. Correlation sweep over the admissible interval [0 , 0.5] 
+
+for the fixed example, with one logarithmic loss axis. FP4 full-grid and window minima coincide, while INT4 full-grid and best up– down minima coincide. The vertical reference line marks the FP4 improvement threshold 7/18 . Minima are computed by exhaustive enumeration. 
+
+full-grid optimum, with respective losses 1147 /9800 and 
+
+1087 /9800 . INT4 has lower absolute loss here; the com-parison illustrates candidate-set sufficiency, rather than an FP4 accuracy advantage. 
+
+C.4. Effect of Input Correlation 
+
+We keep the weights and grids fixed and vary the off-diagonal entry ρ ∈ [0 , 0.5] , with unit diagonal entries. For a linear squared-error task with zero-mean, unit-variance in-puts, ρ is their correlation. Every matrix in this interval is positive definite and satisfies the factor-two row condi-tion. Figure 5 shows all losses on one logarithmic axis. We enumerate the full grids, rounding up–down sets, and FP4 window product at each plotted correlation. 17 −1 0 1 2 3 4Quantized weight ( )wq 123456Quantized  weight  ( )wq  20.75 366 w           
+
+> INT4
+> −101234Quantized weight ()wq 1234560.75 366
+> w
+> BCFP4
+> 0124812 16 Reconstruction  loss  
+> Other legal pair FP4 pair 4Rounding up–down set Float weights Nearest Best up–down Full-grid optimum
+
+Figure 6. INT4 and FP4 reconstruction for the same weights and matrix satisfying the factor-two row condition. The dashed blue rectangles enclose the rounding up–down candidates. In the FP4 panel, teal points mark all 21 candidates in MFP4 (w), including points beneath solution markers. Nested open markers indicate coincident assignments. The full-grid FP4 optimum is outside the rounding up–down set and inside the window; the INT4 full-grid optimum remains within the rounding up–down set. Both panels use the same axis limits and loss contours. 
+
+The FP4 rounding up–down pair wq,B = (1 .5, 4) ⊤
+
+has loss 0.41 − 0.09 ρ and is best among the four cor-ners throughout this interval. The additional pair wq,C =(2 , 4) ⊤ has loss 0.585 − 0.54 ρ, so 
+
+∆Lapx (wq,C ; w) − ∆Lapx (wq,B ; w)= 0 .175 − 0.45 ρ. (19) The outside pair improves on every rounding up–down as-signment when ρ > 7/18 . Enumeration confirms that the full-grid and window minima coincide throughout the sweep, as guaranteed by Proposition 5.1. For INT4, the loss of (6 /7, 36 /7) ⊤ minus that of the nearest pair (12 /7, 36 /7) ⊤ is ∆2INT4 (8 − 17 ρ)/60 . The two assignments tie at ρ = 8 /17 ; below this threshold the nearest pair is optimal, and above it the other pair is opti-mal. Full-grid and best up–down losses coincide through-out the enumerated sweep, including this tie. The theorem’s uniqueness hypothesis does not apply at the tie, which is verified directly by enumeration. Neither switching thresh-old is asserted to hold for other weight pairs. 
+
+## D. MX Block Drop 
+
+We adapt QDrop [44] to the MX block structure. Whereas QDrop samples an independent quantization-bypass deci-sion for each activation element, we sample one decision for all elements sharing a block scale: 
+
+exi = mb xi +  1 − mb
+
+ QMX (x)
+
+> i
+
+,i ∈ I b, mb ∼ Bernoulli(0 .5) . (20) Here, mb = 1 retains the floating-point values of the entire MX block. We apply this adaptation at the reconstruction-unit input and internal activation quantizers in both the QDrop baseline and VisionMX-BW; VisionMX-LW dis-ables it. Inference uses fully quantized activations. The red terms highlight the differences from elementwise QDrop. 18 E. Additional Results 
+
+E.1. Additional Results on Vision Transformers 
+
+Here we present additional ImageNet-1K classification results for vision transformers across three 4-bit block-scaled formats.   
+
+> Table 8. ImageNet-1K Top-1 classification accuracy (%) for ViT-family models. Values with uncertainty report the mean and sample standard deviation over seeds 0–4; RTN is deterministic and uses seed 0 only. MR-GPTQ (FP4 block32) and SpinQuant (FP4 full) are joint weight-and-activation results without reported seed variation. VisionMX results are retained from the original table. Within each format and network, darker blue marks the best result and light blue marks the second-best result.
+
+Format Method Tiny Middle Large DeiT-T ViT-S/16 Swin-T DeiT-B 22.90 MB 88.20 MB 114.30 MB 346.30 MB Float TBD 72.17 81.38 81.38 81.98 MXFP4 UE8M0 RTN 63.54 75.12 76.97 79.71 AdaRound 61.69 ± 0.06 73.07 ± 0.09 77.96 ± 0.07 78.99 ± 0.02 QDrop 66.50 ± 0.11 75.88 ± 0.08 79.40 ± 0.07 80.34 ± 0.03 MR-GPTQ 66.498 77.844 78.118 80.396 SpinQuant 66.396 77.902 78.292 80.490 
+
+VisionMX-LW (Ours) 61.88 ± 0.18 72.07 ± 0.08 77.96 ± 0.06 79.42 ± 0.08 
+
+VisionMX-BW (Ours) 67.37 ± 0.13 73.41 ± 0.20 79.45 ± 0.06 80.30 ± 0.05 MXFP4 UE5M3 RTN 67.29 78.13 78.87 80.62 AdaRound 65.82 ± 0.06 77.16 ± 0.10 79.14 ± 0.05 80.45 ± 0.04 QDrop 68.43 ± 0.08 78.10 ± 0.07 79.98 ± 0.07 80.85 ± 0.05 MR-GPTQ 67.952 79.162 79.310 80.752 SpinQuant 68.058 79.240 79.170 80.738 
+
+VisionMX-LW (Ours) 66.31 ± 0.16 76.09 ± 0.06 79.54 ± 0.05 80.90 ± 0.05 
+
+VisionMX-BW (Ours) 69.33 ± 0.10 76.87 ± 0.05 80.28 ± 0.04 80.89 ± 0.05 NVFP4 RTN 67.98 78.74 79.07 80.80 AdaRound 67.01 ± 0.11 77.76 ± 0.06 79.46 ± 0.03 80.62 ± 0.03 QDrop 69.15 ± 0.09 78.62 ± 0.09 80.14 ± 0.05 81.01 ± 0.05 
+
+VisionMX-LW (Ours) 67.04 ± 0.08 77.12 ± 0.02 79.68 ± 0.05 80.99 ± 0.06 
+
+VisionMX-BW (Ours) 69.74 ± 0.10 77.96 ± 0.04 80.31 ± 0.05 81.17 ± 0.05 Blockwise VisionMX achieves the highest reported accuracy on DeiT-T and Swin-T across all three formats. 
+
+E.2. Low-Light Image Enhancement Results 
+
+We evaluate RetinexFormer [5] and HVI-CIDNet [48] on all 100 test pairs of LOLv2-Real using MXFP4-UE8M0, MXFP4-UE5M3, and NVFP4. Table 9 reports RGB PSNR, RGB SSIM, and LPIPS-Alex. 
+
+E.3. Weight and Activation Analysis 
+
+Here we present weight-only and activation-only MXFP4 quantization results to examine their separate effects across vision models and tasks. 19 Table 9. W4A4 post-training quantization results on all 100 LOLv2-Real test pairs for RetinexFormer and HVI-CIDNet. Higher RGB PSNR and SSIM and lower LPIPS-Alex are better. SSIM and LPIPS-Alex values are multiplied by 100. Within each format, network, and metric, darker blue marks the best result and light blue marks the second-best result. 
+
+Format Method RetinexFormer HVI-CIDNet PSNR ↑ SSIM ×100 ↑ LPIPS ×100 ↓ PSNR ↑ SSIM ×100 ↑ LPIPS ×100 ↓
+
+Float – 22.80 85.43 17.08 23.89 87.92 12.24 MXFP4 UE8M0 RTN 22.36 76.39 22.51 20.48 73.02 26.76 AdaRound 22.59 77.52 22.70 23.09 ± 0.06 77.94 ± 0.21 24.92 ± 0.33 QDrop 22.55 ± 0.05 77.08 ± 0.12 22.67 ± 0.19 22.93 ± 0.06 78.12 ± 0.05 24.11 ± 0.13 
+
+VisionMX-LW 22.45 79.98 21.38 23.33 ± 0.03 82.39 ± 0.06 18.24 ± 0.19 
+
+VisionMX-BW 22.50 ± 0.05 79.57 ± 0.16 21.28 ± 0.20 23.44 ± 0.09 81.85 ± 0.10 18.83 ± 0.06 MXFP4 UE5M3 RTN 22.42 78.37 21.03 23.32 79.87 20.05 AdaRound 22.70 80.27 20.36 23.57 ± 0.08 82.76 ± 0.09 18.63 ± 0.11 QDrop 22.53 ± 0.04 79.43 ± 0.05 20.43 ± 0.08 23.43 ± 0.06 82.16 ± 0.08 19.24 ± 0.17 
+
+VisionMX-LW 22.74 81.52 20.11 23.72 ± 0.05 85.59 ± 0.06 13.93 ± 0.06 
+
+VisionMX-BW 22.67 ± 0.03 80.77 ± 0.05 20.12 ± 0.04 23.68 ± 0.03 85.40 ± 0.05 13.72 ± 0.09 NVFP4 RTN 22.51 79.95 20.13 23.38 82.59 17.68 AdaRound 22.66 80.79 19.84 23.58 ± 0.02 83.37 ± 0.07 17.66 ± 0.11 QDrop 22.55 ± 0.03 79.91 ± 0.01 20.01 ± 0.04 23.59 ± 0.09 82.91 ± 0.17 18.34 ± 0.17 
+
+VisionMX-LW 22.65 82.04 19.22 23.74 ± 0.01 85.03 ± 0.03 14.67 ± 0.07 
+
+VisionMX-BW 22.49 ± 0.02 81.27 ± 0.11 19.84 ± 0.17 23.61 ± 0.06 84.50 ± 0.14 15.02 ± 0.16 
+
+> Table 10. RTN single-side ablation using MXFP4-UE8M0. Higher is better for all metrics.
+
+Task Model Metric Float Weight-only Activation-only Classification MobileNetV2 Top-1 (%) 72.15 1.86 34.43 Classification DeiT-T Top-1 (%) 72.17 69.00 67.08 Classification ResNet-18 Top-1 (%) 69.76 63.14 63.29 Classification CaiT-XXS24 Top-1 (%) 78.39 74.85 74.04 Classification ConvNeXt-Tiny Top-1 (%) 82.52 81.30 78.63 Classification EfficientFormer-L3 Top-1 (%) 82.55 75.46 76.85 Classification ViT-S/16 Top-1 (%) 81.38 79.07 78.39 Classification Swin-T Top-1 (%) 81.38 79.40 78.69 Classification ResNeXt-101 32 ×8d Top-1 (%) 82.83 75.30 73.78 Classification EfficientViT-L2 Top-1 (%) 85.06 0.10 0.10 Classification DeiT-B Top-1 (%) 81.98 81.31 80.39 Object detection Faster R-CNN R50-FPN bbox mAP (%) 36.92 31.35 27.94 Object detection RetinaNet R50-FPN bbox mAP (%) 36.35 30.56 27.38 Object detection FCOS R50-FPN bbox mAP (%) 39.11 32.37 29.94 Object detection YOLOv8-s bbox mAP (%) 39.62 7.47 19.77 Segmentation DeepLabV3 R50 mIoU (%) 66.22 64.06 59.46 Segmentation DeepLabV3 MobileNetV3 mIoU (%) 60.04 6.35 19.62 Low light RetinexFormer SSIM 0.8543 0.8493 0.7651 Low light HVI-CIDNet SSIM 0.8792 0.8605 0.7520 Weight-only quantization causes greater degradation than activation-only quantization in MobileNetV2 and DeepLabV3-MobileNetV3. The opposite pattern holds for the evaluated low-light models, showing that the dominant source of degrada-tion depends on the model and task. 20 E.4. MXFP8 Results 
+
+Here we present MXFP8 results using UE5M3 and UE8M0 block scales, with and without bias correction. 
+
+> Table 11. MXFP8 E4M3 RTN results using UE5M3 and UE8M0 scales. The metrics are top-1 accuracy (%) for classification, bounding-box mAP (%) for detection, mIoU (%) for segmentation, and PSNR (dB) for low-light enhancement.
+
+UE5M3 scale UE8M0 scale Task Model Float RTN w/o BC RTN w/ BC RTN w/o BC RTN w/ BC Classification MobileNetV2 72.15 69.44 70.95 64.60 69.81 Classification DeiT-T 72.17 71.87 71.84 71.79 71.78 Classification ResNet-18 69.76 69.16 69.24 69.17 69.35 Classification CaiT-XXS24 78.39 78.18 78.17 77.97 77.95 Classification ConvNeXt-Tiny 82.52 82.23 82.28 82.17 82.20 Classification EfficientFormer-L3 82.55 82.33 82.35 82.12 82.14 Classification ViT-S/16 81.38 81.30 81.33 81.28 81.31 Classification Swin-T 81.38 81.16 81.15 81.05 81.08 Classification ResNeXt-101-32x8d 82.83 82.27 82.37 82.29 82.27 Classification EfficientViT-L2 85.06 56.44 76.49 0.41 2.36 Classification DeiT-B 81.98 81.83 81.85 81.73 81.80 Object detection Faster R-CNN ResNet50-FPN 36.92 36.26 36.24 36.14 36.27 Object detection RetinaNet ResNet50-FPN 36.35 35.69 35.74 35.55 35.63 Object detection FCOS ResNet50-FPN 39.11 38.44 38.51 38.30 38.27 Object detection YOLOv8s 39.62 38.25 38.29 36.50 37.52 Segmentation DeepLabV3 ResNet50 66.22 66.04 66.13 65.63 65.74 Segmentation DeepLabV3 MobileNet-V3-Large 60.04 58.35 58.18 56.38 57.35 Low-light RetinexFormer 22.80 22.79 22.81 22.85 22.81 Low-light HVI-CIDNet 23.89 23.78 23.86 23.61 23.73 MXFP8 retains near-floating-point performance for many evaluated models, while EfficientViT-L2 remains highly sensi-tive to the scale format. Bias correction improves some sensitive configurations, but its benefits are not consistent across all models. Applying VisionMX-BW MXFP8-UE8M0 and MXFP8-UE5M3 on EfficientViT-L2 gets 84.93% and 84.94% top-1 accuracy, respectively (with δ = 0 .7). 
+
+E.5. Layerwise Ablation without QDrop 
+
+Here we present a layerwise ablation of RangeRound, learned bias updates, and AAC without QDrop. Its optimization settings differ from the main-text blockwise ablation, so the two tables do not provide a matched comparison of reconstruction strategies. 21 Table 12. AdaRound → VisionMX-LW ablation with MXFP4-UE8M0. All rows use layerwise optimization without QDrop, 20,000 steps, 2,048 calibration samples, warmup 0.20 , MSE loss, and ϵ = 10 −8. MobileNetV2 uses rounding LR 3 × 10 −3, rounding regularization 
+
+1.00 , bias LR 10 −3, bias regularization 0, and RangeRound δ = 3 .00 . CaiT-XXS24 uses rounding LR 10 −3, rounding regularization 0.01 ,bias LR 10 −3, bias regularization 0, and RangeRound δ = 2 .00 . Top-1 accuracy is reported in percent. 
+
+RR Bias AAC MobileNetV2 CaiT-XXS24 
+
+✗ ✗ ✗ 41.80 53.86 
+
+✗ ✗ ✓ 64.07 60.90 
+
+✗ ✓ ✗ 49.47 55.45 
+
+✗ ✓ ✓ 65.46 63.89 
+
+✓ ✗ ✗ 47.34 59.18 
+
+✓ ✗ ✓ 64.25 62.49 
+
+✓ ✓ ✗ 50.06 60.67 
+
+✓ ✓ ✓ 65.11 66.21 Combining all three components yields 65.11% on MobileNetV2 and 66.21% on CaiT-XXS24. This is the highest reported accuracy for CaiT-XXS24; for MobileNetV2, the highest accuracy is 65.46%, obtained with bias updates and AAC but without RangeRound. 22

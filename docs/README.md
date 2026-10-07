@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-06</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-07</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 20 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 16 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
-    <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>2 次</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>14</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>10</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-06 23:17:06 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-07 23:46:38 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,10 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>2026-10-06 日报精选 20 篇（精读 6、速读 14），聚焦视觉-语言-动作模型与视觉 Transformer 的低比特量化。最值得看的是 CHASE-VLA 的 chunk-aware 量化后训练框架和 RPFQ-ViT 的旋转相位帧极低比特权重方案，两者均获 8.0 分。普通读者可先读这两篇精读，再按兴趣浏览 KV-Cache 剪枝与多尺度 patch 剪枝等速读方向。</p>
+<p>今日共生成 16 篇推荐（精读 6 篇，速读 10 篇）</p>
+<p>精读：《Align, Then Correct: Training-Free Two-Stage Low-Rank Compensation for Extremely Quantized Large Language Models》（9.0/10）, 《SoloQ: Calibration-Free Quantization for Diffusion Language Models》（8.0/10）</p>
+<p>速读：《DIPrune: Task-Aware Token Pruning with Dual Importance for Efficient Multimodal Language Models》（8.0/10）, 《Activation Denoising: A Robustness View on Parallel vs Sequential LLM Quantization》（7.0/10）, 《VisionWeave: Weaving Elastic Visual Representations as a Native Capability of MLLMs》（7.0/10）</p>
+<p>这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -74,7 +77,7 @@
     <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="CHASE-VLA: Post-Training Quantization Framework for Vision-Language-Action Models with Chunk-Aware Scale Estimation">CHASE-VLA: Post-Training Quantization Framework for Vision-Language-Action Models with Chunk-Aware Scale Estimation</span></li><li><span class="dpr-home-dashboard-paper-title" title="RPFQ-ViT: Rotated Phase-Frame Quantization for Extremely Low-Bit Weights in Vision Transformers">RPFQ-ViT: Rotated Phase-Frame Quantization for Extremely Low-Bit Weights in Vision Transformers</span></li><li><span class="dpr-home-dashboard-paper-title" title="Loopy: Low-Bit Quantization Framework for Looped Language Models">Loopy: Low-Bit Quantization Framework for Looped Language Models</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Align, Then Correct: Training-Free Two-Stage Low-Rank Compensation for Extremely Quantized Large Language Models">Align, Then Correct: Training-Free Two-Stage Low-Rank Compensation for Extremely Quantized Large Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="SoloQ: Calibration-Free Quantization for Diffusion Language Models">SoloQ: Calibration-Free Quantization for Diffusion Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="AlignQuant: Tile-Aligned Mixed-Precision Quantization for Efficient LLM Generation">AlignQuant: Tile-Aligned Mixed-Precision Quantization for Efficient LLM Generation</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>6</strong></span></div>
 </section>
@@ -84,12 +87,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">14 篇</strong>
+    <strong class="dpr-home-dashboard-count">10 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="DeCoPrune: Efficient KV-Cache Pruning for Autoregressive Video Diffusion via Denoising Consistency">DeCoPrune: Efficient KV-Cache Pruning for Autoregressive Video Diffusion via Denoising Consistency</span></li><li><span class="dpr-home-dashboard-paper-title" title="From Patching to Pruning Visual Computation in Vision Language Models">From Patching to Pruning Visual Computation in Vision Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="FlashGaze: Training-Free Multi-Scale Patch Pruning For Efficient Video Understanding">FlashGaze: Training-Free Multi-Scale Patch Pruning For Efficient Video Understanding</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="DIPrune: Task-Aware Token Pruning with Dual Importance for Efficient Multimodal Language Models">DIPrune: Task-Aware Token Pruning with Dual Importance for Efficient Multimodal Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="Activation Denoising: A Robustness View on Parallel vs Sequential LLM Quantization">Activation Denoising: A Robustness View on Parallel vs Sequential LLM Quantization</span></li><li><span class="dpr-home-dashboard-paper-title" title="VisionWeave: Weaving Elastic Visual Representations as a Native Capability of MLLMs">VisionWeave: Weaving Elastic Visual Representations as a Native Capability of MLLMs</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>14</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>10</strong></span></div>
 </section>
 </div>
 

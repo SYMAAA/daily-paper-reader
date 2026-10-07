@@ -1,0 +1,2719 @@
+Title: OSFP4: Joint Optimization of Diagonal Smoothing and Block Scales for NVFP4 Quantization
+
+URL Source: https://arxiv.org/pdf/2610.08231v1
+
+Published Time: Wed, 07 Oct 2026 01:24:06 GMT
+
+Number of Pages: 29
+
+Markdown Content:
+# OSFP4: JOINT OPTIMIZATION OF DIAGONAL 
+
+# SMOOTHING AND BLOCK SCALES FOR NVFP4 Q UAN -
+
+# TIZATION 
+
+Neriah Ben David, Ori Meir & Or Ordentlich ∗
+
+School of Computer Science and Engineering Hebrew University of Jerusalem Jerusalem, Israel 
+
+{neriah.bendavid,ori.meir,or.ordentlich}@mail.huji.ac.il 
+
+## ABSTRACT 
+
+NVFP4 is an attractive datatype for large language model (LLM) inference, of-fering compact storage and native tensor-core acceleration. However, preserving accuracy using NVFP4 requires careful quantization. In this work we develop a novel quantization scheme called Optimized Smoothing and Scaling for NVFP4 (OSFP4). For each linear projection it uses a diagonal smoothing matrix whose entries are optimized to minimize the squared matrix-product quantization error under NVFP4, taking into account the rounding procedure that is used (either round-to-nearest, or GPTQ-style successive interference cancellation). This re-quires performing joint optimization on the smoothing entries as well as the block scales, which is facilitated by analyzing a multiplicative-dither FP4 quantizer in-stead of the fixed deterministic one. Experiments show that OSFP4 achieves the highest average accuracy among the evaluated competitors in the corresponding quantization settings, while retaining approximately 94-97% of vendor NVFP4 prefill throughput on the measured workloads. Our code is available here. 
+
+## 1 INTRODUCTION 
+
+Low-bit data formats are gaining much popularity for large language models (LLMs) inference, as they require less memory for storing and running the model, decrease the traffic from and to memory, and allow to execute matrix multiplication (MatMul) faster through optimized hardware. The FP4 datatype stands out as a prominent representative of such formats which is heavily used in models running on NVIDIA’s Blackwell series and its subsequent generations. Unfortunately, using FP4 instead of higher resolution formats such as FP8 often comes with the cost of reduced accuracy. The goal of this paper is to develop a quantization scheme for NVFP4 that jointly optimizes a diagonal smoothing transformation, as well as the weight block scales in order to maintain maximal accuracy. At first thought, it is not at all clear that diagonal smoothing is useful for FP4 quantization. Tradi-tionally, the main differentiator between INT constellations and FP constellations was the dynamic range. An INT-R constellation has fixed spacing between constellation points, and its dynamic range is therefore proportional to 2R. Absmax scaling is often used to make sure the input fits within the dynamic range, and the corresponding per-entry mean-squared error (MSE) in representing x ∈ Rn
+
+in INT-R is consequently proportional to ∥x∥2 
+
+> ∞
+
+· 2−2R Ordentlich & Polyanskiy (2026a). For this reason, one of the key aspects in INT-based quantization techniques is controlling the infinity norm of the quantizer’s input. Diagonal scaling can help balance the infinity norms of vectors participating in MatMul, and indeed one of the simplest and most efficient techniques for INT-quantized MatMul is SmoothQuant Xiao et al. (2023). For FP constellations with E exponent bits, the dynamic range is proportional to 22E
+
+, and can be made “essentially unbounded” with as few as E = 4 exponent bits, as in the standard E4M3 FP8 datatype. The MSE in representing the ith entry xi of x ∈ Rn is therefore proportional to 
+
+> ∗
+
+The authors are listed in alphabetical order. 
+
+1arXiv:2610.08231v1 [cs.AI] 6 Oct 2026 |xi|2 · 2−2M , where M is the number of mantissa bits, provided that xi is inside the constellation’s dynamic range Ordentlich & Polyanskiy (2026a). For this reason, quantization to FP is typically considered simpler, and requires less pre and post processing than quantization to INT constella-tions. In particular, whenever E is large enough so that dynamic range is not a limiting factor, SmoothQuant-style diagonal scaling is quite useless, as E[( QFP (Xi · α)QFP (Yi/α ) − XiYi)2] is proportional to E[|Xi|2|Yi|2]2 −2M for all α > 0 provided that the distribution of (Xi, Y i) is “suffi-ciently smooth” and Xi · α and Yi/α are within the quantizer’s dynamic range with high probability. The picture is different for the FP4 E2M1 format since with E = 2 the dynamic range is too small to be ignored. To combat the effect of limited dynamic range, FP4 is usually applied with microscaling as in MXFP4 or NVFP4, where a group of g entries are also given a common scale γ. In MXFP4 
+
+g = 32 and γ is represented in E8M0 format, whereas in NVFP4 g = 16 and γ is represented in E4M3 format. Here we focus on NVFP4, which is becoming a common choice for models running on NVIDIA hardware, though some of the techniques we develop may also be useful for MXFP4 as well. The scale γ can be used to ensure that the input to the FP4 quantizer never exceeds 6, which is the largest value in the FP4 constellation. In particular, for x ∈ R16 the default absmax-to-6 rule sets γ ≈ ∥ x∥∞/6 such that ∥γ−1x∥∞ ≈ 6. This rule takes care of the upper limit of the dynamic range: it ensures that no entry of γ−1x is large enough to saturate the quantizer. However, with this rule all entries with magnitude 24 times smaller than ∥x∥∞ will be quantized to 0, so that the total distortion can be quite large when x is largely unbalanced. Furthermore, even for balanced vectors, there are multiple choices of γ for which all entries of γ−1x are within the dynamic range of the FP4 constellation, and careful optimization of γ may yield significant reduction of MSE over the absmax-to-6 rule. This work develops an NVFP4 quantization method that utilizes a diagonal matrix A ∈ Rn×n for “smoothing” the weight matrix W ∈ Rm×n to W A −1 and the activation matrix X ∈ Rn×k to AX ,as in SmoothQuant. The clear advantage of diagonal A with respect to more general structures for 
+
+A, e.g. block-rotation Egiazarian et al. (2026), PCA directions aligning Chen et al. (2025), tensor of dense small matrices Sun et al. (2025), is that diagonal pre-processing is cheap and can easily be done in runtime for the activations. In fact, in some layers it can be fused into the LayerNorm or RMSnorm. In contrast to SmoothQuant where A is used for balancing infinity norms, the role of the matrix A
+
+here is more intricate. It should balance the distribution of all entries within the same groups ( 16 
+
+consecutive entries) in the rows of W and in the columns of X, so that the corresponding E4M3 scales can then be used to minimize the MSE. Developing a mathematical formulation that accu-rately captures this objective is one of the main challenges addressed in this work. This is achieved by analyzing a randomized multiplicatively dithered FP4 quantizer instead of the deterministic one, which is actually used by our scheme. The distortion incurred by the randomized quantizer admits a relatively simple form using the function ϕ(·) introduced below (See Figure 1), and is closely related to the distortion incurred by the deterministic quantizer (Lemma 1). This in turn enables to jointly optimize the smoothing weight matrix and the block scales. Using the fixed weights and calibration activations, we optimize the diagonal entries of A and the block scales offline in two stages. In the first stage we jointly optimize the diagonal entries of A and the block scales with respect to a dithered FP4 quantizer, whose corresponding MSE loss is smooth and amenable to optimization. Crucially, the loss takes into account whether round-to-nearest (RTN) or successive-interference-cancellation (SIC) will be used for the actual weight quantization. The resulting A is retained, while the weight scales are finely optimized over the E4M3 grid in the second stage. Activation scales must instead be determined in real time; our default is absmax-to-6. Our main contributions are: • We develop an expression that approximates the expected squared Frobenius norm of the matrix-product error under randomized FP4 quantization for diagonally smoothed NVFP4 quantization, as a function of the smoothing parameters and the group scales. This ex-pression takes into account the rounding procedure (RTN/SIC) for W , and is amenable to efficient joint optimization of all participating parameters. 2• Relying on this approximation, we develop a quantization scheme called Optimized Smoothing and Scaling for NVFP4 (OSFP4) quantization. This scheme uses the approxi-mation to perform joint continuous optimization of diagonal smoothing and block scales, followed by discrete E4M3 weight-scale selection. The optimization criterion for the dis-crete weight-scale depends on the calibration second-moments as well as on the rounding method (RTN/SIC). The activation group scales are set using absmax-to-6. • Experiments show that OSFP4 achieves the highest average accuracy among the evaluated competitors in the corresponding quantization settings, while retaining approximately 94-97% of vendor NVFP4 prefill throughput on the measured workloads. • We provide an add-on package for LLM Compressor AI & vLLM Project (2024) that im-plements our OSFP4 compression method and exports quantized models as vLLM check-points, together with a vLLM plugin that support the additional diagonal smoothing layers. 1.1 RELATED WORK 
+
+Calibration and error compensation. Post-training quantization uses calibration data to preserve layer outputs without retraining the original model. GPTQ (Frantar et al., 2023) uses second-order information to compensate quantization errors through updates to unquantized weights. This method has demonstrated empirical benefits for various quantization codebooks, including for FP and in particular NVFP4 constellations Egiazarian et al. (2026). Diagonal scaling has proved useful for INT constellations: SmoothQuant (Xiao et al., 2023) balances the quantization difficulty of weights and activations by redistributing their magnitudes, while AWQ (Lin et al., 2024) uses activation statistics to scale and protect important weight channels. OmniQuant (Shao et al., 2024) learns such scalings as part of a broader family of equivalent transformations, jointly with clipping parameters, through reconstruction objectives. These methods establish the value of calibration, scaling, and feedback. WaterSIC (Lifar et al., 2026) combines all three and finds a diagonal smoothing matrix which, when combined with GPTQ/SIC, obtains near-information-theoretic optimal weight-only entropy coded integer quantization. Another recent work (Avisdris et al., 2027) addresses optimal diagonal smoothing for weights and activations INT quantization using GPTQ is. It turns out that NVFP4 requires a markedly different criterion for choosing the diagonal smoothing matrix. OSFP4 jointly adapts smoothing and block scales to the NVFP4 grid and the chosen rounding procedure. 
+
+Transforms for low-bit inference. Prior work demonstrated the value of randomized rotations for low-bit quantization (Chee et al., 2023; Ashkboos et al., 2024; Liu et al., 2025). For NVFP4, however, full-dimensional rotations were found less beneficial and can even hurt RTN accuracy, whereas MR-GPTQ (Egiazarian et al., 2026) benefits from rotations within quantization groups together with format-specific GPTQ optimizations. OSFP4 avoids rotations and instead uses cheaper diagonal transformations, jointly optimized (offline) with the block scales. Despite this simpler transformation, our W-SIC/X-RTN configuration achieves higher average W4A4 accuracy than MR-GPTQ under the common evaluation protocol in Table 1. 
+
+NVFP4 scale selection. Recent work shows that absmax scaling leaves substantial room for im-provement. Four Over Six (4/6) (Cook et al., 2026) adaptively selects between absmax-to-4 and absmax-to-6 scaling for each block. ScaleSearch (Gupta et al., 2026) searches block scales to re-duce reconstruction error, and ScaleSweep (Lin & Wan, 2026) derives bounded search ranges for MSE and weighted MSE objectives. SOAR (Bao et al., 2026) combines joint global/block-scale op-timization with decoupled encoding and decoding scales. H-Scale (Yu et al., 2026) uses calibration activation second moments to select E4M3 block scales by minimizing a weighted-mean-squared weight reconstruction error. OSFP4 combines accurate scale selection with diagonal smoothing, jointly optimizing both while accounting for the applied rounding procedure (RTN/SIC). Online activation-scale search is complementary to this procedure; our default uses absmax activation scal-ing. 
+
+Quantization-error models. Our analysis builds on high-rate models of floating-point error and covariance-aware quantized matrix multiplication (Ordentlich & Polyanskiy, 2026a;b). We use mul-tiplicative randomization to obtain a smooth FP4 error function that retains finite-range effects, and derive distinct objectives for RTN and SIC, with or without activation quantization. This makes the 3intended feedback procedure part of the smoothing optimization and connects the randomized loss to the subsequent deterministic scale search. 
+
+## 2 LOSS FUNCTIONS 
+
+2.1 SMOOTHED FP4 QUANTIZATION ERROR 
+
+Denote by 
+
+CFP4 =
+
+
+
+0, ± 12 , ±1, ± 32 , ±2, ±3, ±4, ±6
+
+
+
+(1) the points in the FP4 E2M1 constellation, and for x ∈ R let 
+
+QFP4 (x) = argmin 
+
+> ˆx∈C FP4
+
+|x − ˆx| (2) be the deterministic nearest-neighbor quantizer of x to FP4. Inspired by the dithered absmax FP quantizer from Ordentlich & Polyanskiy (2026a) we consider the following randomized FP4 quan-tizer 
+
+˜QFP4 (x) = 2 U QFP4 
+
+ 2−U x , (3) where U ∼ Uniform([0 , 1)) is statistically independent of x, and its corresponding normalized MSE function is 
+
+ϕ(x) = 1
+
+x2 E
+
+
+
+x − ˜QFP4 (x)
+
+2
+
+. (4) We set ϕ(0) = 1 by continuous extension. The following lemma provides two key properties of 
+
+˜QFP4 (x) and ϕ(x).
+
+Lemma 1 1. For any x ∈ Rn there exists a fixed β ∈ [1 , 2) such that 
+
+∥x − β · QFP4 (β−1x)∥2 ≤
+
+> n
+
+X
+
+> i=1
+
+x2 
+
+> i
+
+ϕ(xi). (5) 
+
+2. ϕ(x) is an even function. Its minimum is ϕmin = E[(1 − 2−(U +1) round(2 U +1 )) 2] ≈
+
+0.010723 and it attains this minimum on the entire interval IFP4 = [7 /4, 7] .
+
+A proof is given in Appendix A. Figure 1 plots ϕ(x) as well as the non-smoothed ϕexact (x) =  
+
+> 1
+> x2
+
+E (x − QFP4 (x)) 2. The plateau in IFP4 is visibly clear. 
+
+Figure 1: Normalized mean-squared error of randomized FP4 quantization, ϕ(x) = E[( x− ˜QFP4 (x)) 2] 
+
+> x2
+
+,and its deterministic counterpart, ϕexact (x) = (x−QFP4 (x)) 2 
+
+> x2
+
+.42.2 MATRIX -PRODUCT ERROR UNDER RTN AND SIC Let W ∈ Rm×n and X ∈ Rn×k, where the columns of X are calibration activations, and define 
+
+ΣX = XX ⊤/k . We partition the inner dimension into L = n/ 16 groups: Wℓ = W (: , 1+16( ℓ−1) : 16 ℓ) and Xℓ = X(1+16( ℓ−1) : 16 ℓ, :) , with Aℓ = diag( α(1)  
+
+> ℓ
+
+, . . . , α (16)  
+
+> ℓ
+
+). Write ΓWℓ =
+
+n
+
+γ(i)
+
+> Wℓ
+
+omi=1 
+
+and ΓXℓ =
+
+n
+
+γ(j)
+
+> Xℓ
+
+okj=1 
+
+for the row and column scales. The matrices entering the FP4 quantizers are 
+
+W ′ 
+
+> ℓ
+
+= diag(Γ Wℓ )−1WℓA−1 
+
+> ℓ
+
+, X′ 
+
+> ℓ
+
+= AℓXℓ diag(Γ Xℓ )−1. (6) For either deterministic or randomized quantization, let the dequantized matrices ˆWℓ and ˆXℓ ap-proximate WℓA−1 
+
+> ℓ
+
+and AℓXℓ, respectively. Denote their errors by eWℓ and eXℓ and concatenate them into eW and eX . The matrix-product error is 
+
+e = ˆW ˆX − W X = eW AX + W A −1eX + eW eX ≈ eW AX + W A −1eX . (7) Here we neglect the second-order term eW eX .To construct the optimization loss, we now analyze the randomized quantizer ˜QFP4 from (3); the final quantization procedure, however, uses the deterministic quantizer QFP4 , as described in Sec-tion 3. We will optimize A, ΓW , ΓX in order to optimize the distortion of the randomized quan-tizer, then fix the obtained A, and afterwards refine ΓW with respect to the deterministic quantizer. Since the randomized quantizer’s relative MSE ϕ is minimized on IFP4 , the rough goal is to choose 
+
+A, ΓW , ΓX so that as many entries as possible of the matrices in (6) have magnitudes in this interval. In accordance with Lemma 1, we model the randomized FP4 errors as 
+
+˜QFP4 (y) = y + py2ϕ(y)Z, (8) where Z has zero mean and unit variance, with independent noise across entries and blocks. These are modeling assumptions, rather than exact unbiasedness and independence properties of the quan-tization errors. The complete derivations are given in Appendix I. 
+
+Round to nearest (RTN) quantization: To analyze RTN, we apply the randomized quantizer to the scaled signal without feedback, and multiply the output by the inverse scaling. Specifically, given 
+
+A, ΓW under RTN quantization the entries of the weight matrix W are quantized to 
+
+ˆW FP4  
+
+> ℓ
+
+= ˜QFP4 
+
+ diag(Γ Wℓ )−1WℓA−1
+
+> ℓ
+
+ , so that ˆWℓ = diag(Γ Wℓ ) ˜QFP4 
+
+ diag(Γ Wℓ )−1WℓA−1
+
+> ℓ
+
+ .
+
+(9) With the block scales 
+
+n
+
+γ(i)
+
+> Wℓ
+
+omi=1 
+
+and smoothing coefficients 
+
+n
+
+α(r)
+
+> ℓ
+
+o16 
+
+> r=1
+
+defined above, we obtain 
+
+eWℓ (i, r ) = ˆWℓ(i, r ) − Wℓ(i, r )
+
+α(r)
+
+> ℓ
+
+=
+
+vuut Wℓ(i, r )
+
+α(r)
+
+> ℓ
+
+!2
+
+ϕ Wℓ(i, r )
+
+γ(i) 
+
+> Wℓ
+
+α(r)
+
+> ℓ
+
+!
+
+Zℓ(i, r ), (10) where {Zℓ(i, r )} are iid zero-mean, unit-variance random variables. Let 
+
+LRTN  
+
+> Wℓ
+
+(Γ Wℓ , A ℓ) = E∥eWℓ AℓXℓ∥2 
+
+> F
+
+, (11) where Xℓ, W ℓ, ΓWℓ , A ℓ are assumed fixed and the expectation is only with respect to the randomiza-tion of ˜QFP4 (·), that is, with respect to the iid random variables {Zℓ(i, r )}. It immediately follows that 
+
+LRTN  
+
+> Wℓ
+
+(Γ Wℓ , A ℓ) = 
+
+> k
+
+X
+
+> j=1
+> m
+
+X
+
+> i=1 16
+
+X
+
+> r=1
+
+W 2 
+
+> ℓ
+
+(i, r )X2 
+
+> ℓ
+
+(r, j ) · ϕ Wℓ(i, r )
+
+γ(i) 
+
+> Wℓ
+
+α(r)
+
+> ℓ
+
+!
+
+= k
+
+> 16
+
+X
+
+> r=1
+
+σ2 
+
+> Xℓ
+
+(r)
+
+> m
+
+X
+
+> i=1
+
+W 2 
+
+> ℓ
+
+(i, r ) · ϕ Wℓ(i, r )
+
+γ(i) 
+
+> Wℓ
+
+α(r)
+
+> ℓ
+
+!
+
+, (12) 5where σ2 
+
+> Xℓ
+
+(r) = 1
+
+> k
+
+Pkj=1 X2 
+
+> ℓ
+
+(r, j ) (we also have σ2 
+
+> Xℓ
+
+(r) = Σ X (r + 16( ℓ − 1) , r + 16( ℓ − 1)) ). We assume that the random variables {Zℓ(·, ·)} corresponding to different blocks are also indepen-dent. This implies 
+
+LRTN  
+
+> W
+
+= E∥eW AX ∥2 
+
+> F
+
+=
+
+> L
+
+X
+
+> ℓ=1
+
+LRTN  
+
+> Wℓ
+
+(Γ Wℓ , A ℓ). (13) If activations are also quantized, applying RTN with the randomized FP4 quantizer gives 
+
+ˆXFP4  
+
+> ℓ
+
+= ˜QFP4 
+
+ AℓXℓ diag(Γ Xℓ )−1 , so that ˆXℓ = ˜QFP4 
+
+ AℓXℓ diag(Γ Xℓ )−1 diag(Γ Xℓ ),
+
+(14) and 
+
+eXℓ (r, j ) = ˆXℓ(r, j ) − α(r) 
+
+> ℓ
+
+Xℓ(r, j ) = 
+
+vuut
+
+α(r) 
+
+> ℓ
+
+Xℓ(r, j )
+
+2
+
+ϕ α(r)
+
+> ℓ
+
+γ(j)
+
+> Xℓ
+
+Xℓ(r, j )
+
+!
+
+˜Zℓ(r, j ), (15) where 
+
+n
+
+γ(j)
+
+> Xℓ
+
+okj=1 
+
+denote the activation block scales, and { ˜Zℓ(r, j )} are iid zero-mean unit-variance random variables statistically independent of everything. Similar to the derivation above, we obtain 
+
+LRTN  
+
+> Xℓ
+
+(Γ Xℓ , A ℓ) = E∥WℓA−1 
+
+> ℓ
+
+eXℓ ∥2 
+
+> F
+
+= m
+
+> 16
+
+X
+
+> r=1
+
+σ2 
+
+> Wℓ
+
+(r)
+
+> k
+
+X
+
+> j=1
+
+X2 
+
+> ℓ
+
+(r, j ) · ϕ α(r)
+
+> ℓ
+
+γ(j)
+
+> Xℓ
+
+Xℓ(r, j )
+
+!
+
+, (16) where σ2 
+
+> Wℓ
+
+(r) = 1
+
+> m
+
+Pmi=1 W 2 
+
+> ℓ
+
+(i, r ). We also have 
+
+LRTN  
+
+> X
+
+= E∥W A −1eX ∥2 
+
+> F
+
+=
+
+> L
+
+X
+
+> ℓ=1
+
+LRTN  
+
+> Xℓ
+
+(Γ Xℓ , A ℓ). (17) 
+
+Successive interference cancellation (SIC): Note that 
+
+∥eW AX ∥2 
+
+> F
+
+= tr  (eW AX )( eW AX )⊤ = k tr  eW AΣX A⊤e⊤
+
+> W
+
+ . (18) Let U ∈ Rn×n be an upper triangular matrix such that ΣX = U ⊤U , and denote 
+
+Y = U A ⊤(W A −1)⊤ = U W ⊤ ∈ Rn×m. (19) We have 
+
+∥eW AX ∥2 
+
+> F
+
+= k∥U A ⊤e⊤ 
+
+> W
+
+∥2 
+
+> F
+
+= k∥Y − U A ˆW ⊤∥2 
+
+> F
+
+. (20) Even when A and the E4M3 scaling matrices {ΓWℓ }Lℓ=1 are fixed, the problem of choosing 
+
+ˆW FP4 ∈ C m×n 
+
+> FP4
+
+such as to minimize (20) is computationally difficult due to the coupling the matrix 
+
+U A introduces between different columns of ˆW (equivalently, rows of ˆW ⊤). As common in the literature, instead of attempting an optimal solution, we resort to the SIC/GPTQ approach. Tak-ing into account the structure of the NVFP4 constellation, this boils down to quantizing the weight columns successively, starting from the last, and feeding the error back to the remaining columns, as in Algorithm 2 in Appendix I. The analysis of LSIC  
+
+> W
+
+= kE∥Y − U A ˆW ⊤∥2 
+
+> F
+
+under the SIC algorithm is a bit complicated, even under the randomized FP4 quantization error model (8). The reason is that Z entries from time 
+
+t affect Y (t′) for t′ < t due to the feedback nature of the quantization process. We therefore make a high-resolution quantization assumption and assume the energy of the (filtered) quantization noise is negligible next to the signal (entries of Y ) energy. Under this assumption we have that 
+
+Y (t)(t, :) ≈ U (t, t ) · (W (: , t )) ⊤. Under this additional approximation, 
+
+LSIC  
+
+> Wℓ
+
+(Γ Wℓ , A ℓ) = k
+
+> 16
+
+X
+
+> r=1
+
+U 2 
+
+> ℓ
+
+(r)
+
+> m
+
+X
+
+> i=1
+
+W 2 
+
+> ℓ
+
+(i, r )ϕ Wℓ(i, r )
+
+γ(i) 
+
+> Wℓ
+
+α(r)
+
+> ℓ
+
+!
+
+, (21) 6where Uℓ(r) = U (16( ℓ − 1) + r, 16( ℓ − 1) + r). The only difference from LRTN  
+
+> Wℓ
+
+(Γ Wℓ , A ℓ) is replacing σ2 
+
+> Xℓ
+
+(r) by U 2 
+
+> ℓ
+
+(r). The latter is the variance of the optimal prediction error of coordinate 
+
+t = 16( ℓ − 1) + r from coordinates t + 1 : n of a Gaussian vector with covariance ΣX , and hence 
+
+U 2 
+
+> ℓ
+
+(r) ≤ σ2 
+
+> Xℓ
+
+(r). This distinction allows us to optimize A taking into account that SIC will be used for the actual quantization. 
+
+Total quadratic Distortion: Using (12) (16) and (21) we obtain the following loss functions for randomized NVFP4 quantization, as a function of A and the E4M3 scales, under the various quan-tization setups: 
+
+LW −RTN =
+
+> L
+
+X
+
+> ℓ=1
+
+LRTN  
+
+> Wℓ
+
+(Γ Wℓ , A ℓ) (22) 
+
+LW −SIC =
+
+> L
+
+X
+
+> ℓ=1
+
+LSIC  
+
+> Wℓ
+
+(Γ Wℓ , A ℓ) (23) 
+
+LW −RTN ,X −RTN =
+
+> L
+
+X
+
+> ℓ=1
+
+LRTN  
+
+> Wℓ
+
+(Γ Wℓ , A ℓ) + LRTN  
+
+> Xℓ
+
+(Γ Xℓ , A ℓ) (24) 
+
+LW −SIC ,X −RTN =
+
+> L
+
+X
+
+> ℓ=1
+
+LSIC  
+
+> Wℓ
+
+(Γ Wℓ , A ℓ) + LRTN  
+
+> Xℓ
+
+(Γ Xℓ , A ℓ) . (25) Note that in all expressions the dependency on A and the E4M3 scales completely decouples to L different functions, that depend on different parameters . Therefore, the optimization on 
+
+{Aℓ, ΓWℓ , ΓXℓ } decouples to L independent optimization problems. 
+
+## 3 THE OSFP4 Q UANTIZATION ALGORITHM 
+
+We are now ready to describe how the Optimized Smoothing and Scaling for NVFP4 (OSFP4) quantization algorithm works. This algorithm has four different configurations: W − RTN , W −
+
+SIC , W − RTN /X − RTN or W − SIC /X − RTN , corresponding to either W4A16 or W4A4, and to whether W is quantized using RTN or using SIC. The parameters for each linear projection W X are optimized independently. We describe the pro-cedure for a single projection operation. Our quantization pipeline is as follows. 
+
+Calibration set: For all 4 configurations we first collect k1 activation vectors x1, . . . , x k1 and set ΣX = 1
+
+> k1
+
+Pk1 
+
+> j=1
+
+xj x⊤ 
+
+> j
+
+. Since computing ΣX does not require many resources even when k1
+
+is large, we typically use large k1, as is standard in calibration based quantization. The terms 
+
+LW −RTN , L W −SIC depend on the calibration set only through ΣX , and for weight-only quanti-zation we therefore keep only ΣX and set k = k1.In the setups involving activations quantization, the term LX−RTN also participates in the loss func-tion, and the complexity of optimizing this term grows with k. Even though the optimization is performed offline, we will limit k to modest values, such that the quantization procedure will not require too many resources. We therefore take k < k 1 and select a random subset J = {j1, . . . , j k}
+
+of k calibration vectors and set X = [ xj1 | · · · | xjk ] ∈ Rn×k.
+
+Optimization of A (and initial guess for ΓW ): Depending on the configuration W − RTN , W −
+
+SIC , W − RTN /X − RTN or W − SIC /X − RTN we construct the relevant loss function from (22)-(25) (note that the first two depend only on ΣX , whereas the last two also depend on X). Then, for every ℓ = 1 , . . . , L we perform joint optimization on Aℓ, ΓWℓ and also ΓXℓ whenever relevant. As described above, all loss functions (22)-(25) decouple to L independent terms, so optimizing for each ℓ separately is optimal. The optimization is iterative and is initialized with A = In and the 
+
+ΓW , ΓX corresponding to absmax-to-6 scaling. The precise details of the optimization iterations are given in Appendix B. To illustrate the benefit of this optimization over the standard initialization values, Figure 3 in Appendix B shows how much LW −SIC ,X −RTN improved from its initial value along the different layers of Llama-3.1-8B-Instruct. 7The value of A found by optimization is the final value used for quantization. The value found for 
+
+ΓW will be used to dictate the search space for the next step. Even in the setups W −RTN /X −RTN 
+
+or W −SIC /X −RTN The value of ΓX is irrelevant for the actual quantization of the activations, and will be determined in real-time based on the values of the actual activations computed in inference. 
+
+Optimization of ΓW : The value of ΓW found in the previous step was optimized assuming the randomized quantizer ˜QFP4 is used, whose output is generally not in CFP4 . Since in practice we are restricted to output ˆW FP4 ∈ C m×n 
+
+> FP4
+
+, the randomized quantizer is not applicable, and we should use 
+
+QFP4 (·) instead. Nevertheless, using part 1 of Lemma 1, for any fixed y ∈ R16 and γ(i) 
+
+> Wℓ
+
+there must be some β(i) 
+
+> Wℓ
+
+∈ [1 , 2) such that the distortion for the deterministic γ(i) 
+
+> Wℓ
+
+β(i) 
+
+> Wℓ
+
+QFP4 
+
+ yγ(i) 
+
+> Wℓβ(i)
+> Wℓ
+
+
+
+is no larger than the expected distortion of the randomized quantizer γ(i)
+
+> Wℓ
+
+˜QFP4 
+
+ yγ(i)
+
+> Wℓ
+
+
+
+. In other words, the effective deterministic scale γ′ = γ(i) 
+
+> Wℓ
+
+β(i) 
+
+> Wℓ
+
+lies in [γ(i) 
+
+> Wℓ
+
+, 2γ(i) 
+
+> Wℓ
+
+], and the deterministic quantizer 
+
+γ′QFP4 
+
+ yγ′
+
+
+
+attains no larger distortion than the expected distortion of the randomized quantizer 
+
+γ(i)
+
+> Wℓ
+
+˜QFP4 
+
+ yγ(i)
+
+> Wℓ
+
+
+
+. In fact, the distortion for the optimal γ′ may be substantially smaller than that of the randomized quantizer, as it can always place at least one of the entries of y on a point in CFP4 ,cancelling its quantization error completely. Consequently, for each ℓ = 1 , . . . , L and i = 1 , . . . , m we determine the final scale by trying all valid scale values in an interval containing [γ(i) 
+
+> Wℓ
+
+, 2γ(i) 
+
+> Wℓ
+
+]. We can only use scales in Cscale , the set of positive E4M3 numbers. Consequently, not all values in [γ(i) 
+
+> Wℓ
+
+, 2γ(i) 
+
+> Wℓ
+
+] can be used, and we therefore choose the best scale in C+scale (γ(i) 
+
+> Wℓ
+
+) = Cscale ∩
+
+ γ(i) 
+
+> Wℓ
+> 1.2
+
+, γ(i)
+
+> Wℓ
+> 0.3
+
+
+
+. The fine-grained scale-selection procedure is described in Appendix C. Projection-level comparisons of the predicted loss, randomized quantization, and final deterministic scale selection for all four configurations are given in Appendix E. 
+
+Optimization of ΓX : We first need to multiply the activation X by the diagonal matrix A. This is handled in the LayerNorm whenever it exists, or via an additional diagonal scaling layer when there is no LayerNorm. Under W − RTN and W − SIC the activation X is not quantized, whereas under 
+
+W − RTN /X − RTN and W − SIC /X − RTN the activations also need to be quantized. Unlike the quantization of W which is done offline, the quantization of X is done in inference time and should therefore be sufficiently fast. Our default is to compute a global scale for X based on the calibration set, and then quantize each 16 consecutive entries using absmax-to-6. The fixed global scale allows to perform this quantization online, even before the entire tensor of activations was computed. This is the default choice in our experimental results. We nevertheless mention that recent work Gupta et al. (2026); Lin & Wan (2026) advocates searching a small bank of E4M3 values around the absmax-to-6 value even for the activations, and shows that the overhead this search incurs on the quantization time is quite reasonable (Gupta et al., 2026, Table 6). This optimization is referred to as ScaleSearch/ScaleSweep. 
+
+## 4 EXPERIMENTAL RESULTS 
+
+We evaluate whether OSFP4 improves NVFP4 accuracy, how its components contribute, and whether these gains retain the efficiency of native FP4 inference. We focus here on Llama-3.1-8B-Instruct; Appendix F contains results for additional models. Locally prepared models share the same source checkpoint and calibration set; all models are evaluated through vLLM on an RTX 5090. We report W4A4 and W4A16 separately and distinguish absmax activation scaling from methods that search activation scales during inference, which typically incur larger overhead. Full task results, calibration settings, and implementation details are given in Appendix D. 
+
+Accuracy under a common evaluation protocol. Table 1 summarizes the mean accuracy on MMLU-CoT, GSM8K, HellaSwag, and WinoGrande. With absmax activation scaling, OSFP4 W-SIC/X-RTN achieves 77 .03% , compared with 76 .34% for FP-Quant GPTQ and 76 .18% for MR-8Table 1: Mean accuracy (%) on Llama-3.1-8B-Instruct. Full scores: Table 3. 
+
+Method Avg. 
+
+BF16 baseline 
+
+BF16 79.22 
+
+W4A4: absmax activation scaling 
+
+RTN (FP-Quant) 75.65 GPTQ (FP-Quant) 76.34 MR-GPTQ (FP-Quant) 76.18 SOAR 76.60 H-Scale (W4A4 extension) 76.67 NVIDIA released checkpoint † 76.11 OSFP4 W-RTN / X-RTN 76.36 OSFP4 W-SIC / X-RTN 77.03 
+
+W4A4: online activation-scale search 
+
+ScaleSweepMSE 76.62 ScaleSweepMSE + GPTQ 76.69 4over6 76.34 OSFP4 W-RTN / X-ScaleSweepMSE 76.96 OSFP4 W-SIC / X-ScaleSweepMSE 77.09 
+
+W4A16: weights only 
+
+RTN 77.67 H-Scale 78.00 OSFP4 W-RTN 78.15 OSFP4 W-SIC 78.42 
+
+> †
+
+Separately released checkpoint; preparation is uncon-trolled. Bold: best quantized average in each group. Table 2: WikiText-2 perplexity ( ↓). W4A4 uses abs-max activation scales. 
+
+Configuration W4A16 W4A4 
+
+BF16 reference 7.22 7.22 Absmax RTN ( A = I) 7.55 7.88 MSE scales ( A = I) 7.52 7.85 OSFP4 W-RTN 7.42 7.77 SIC ( A = I, absmax) 7.45 7.77 OSFP4 W-SIC 7.39 7.67 0.0 2.5 5.0 7.5 Per-token output MSE ×10 −4
+
+> 0.00 0.05 0.10 0.15 Fraction of activations OSFP4 absmax-to-6 ̃
+> QFP4
+> predicted
+
+Figure 2: Layer 12:value, W-RTN/W4A16. Full three-projection comparison: Figure 4. 
+
+GPTQ, and has the highest average among the evaluated methods in this group. The weight-only configuration reaches 78 .42% , versus 78 .00% for H-Scale and 79 .22% for BF16. Thus, the accuracy improvement is present both with and without activation quantization. Online activation-scale search is complementary to OSFP4, and was evaluated mainly for enabling a fair comparison with ScaleSweep Lin & Wan (2026). Note that even with absmax activation scaling OSFP4 W-SIC/X-RTN scores better than ScaleSweepMSE+GPTQ, whereas the latter does optimize the activation scale online. 
+
+Contribution of smoothing, scale selection, and SIC. Table 2 compares the full procedure with simpler configurations. Optimizing only the weight scales by unweighted MSE provides a modest perplexity improvement over absmax. OSFP4 W-RTN optimizes A and selects the weight scales using weighted MSE yielding a more significant improvement. Combining the optimized transfor-mation and scale selection with SIC gives the lowest perplexity among the NVFP4 configurations in both precision settings. In W4A4, perplexity decreases from 7.88 for absmax RTN to 7.67 for OSFP4 W-SIC, compared with 7.77 for SIC using A = I and absmax scales. Appendix H further details an ablation study of the MSE for projection-output error across all seven projections, for all variants. The full method (optimized A, scales and SIC) attains the smallest MSE across all layers and compared schemes. These configurations assess the combined procedure rather than isolating the contribution of A alone. Figure 3 in Appendix B shows the reduction in the joint optimization objective across projections. 
+
+From predicted loss to deterministic quantization. Figure 2 examines the two-stage procedure on the value projection in layer 12 . For W-RTN/W4A16, the mean error of the randomized quantizer agrees with the predicted loss LW −RTN (A∗, Γ∗ 
+
+> W
+
+) to within 1% . The final deterministic E4M3 scale search reduces mean error to approximately half the prediction and improves over absmax weight scaling at the same optimized A. This supports using the smoothed loss to guide optimization, fol-lowed by fine-grained deterministic scale selection. Appendix E provides details and more extensive results in this line. 9Inference efficiency. On an NVIDIA B200, OSFP4 retains approximately 94 –97% of the vendor NVFP4 prefill throughput across the measured workloads. This modest gap is primarily attributable to the explicit diagonal smoothing required before the attention output and MLP down projections, where the transformation cannot be absorbed into a preceding LayerNorm. Consistent with this explanation, a control that sets A = I while retaining the same runtime path achieves essentially the same throughput as OSFP4. Appendix G reports the full workload sweep and timing protocol. AI USE STATEMENT 
+
+In this work, we used generative AI tools for assistance with writing and exposition, for writing code and running experiments, and for assistance in implementation of the scale optimization algo-rithm, as described in Appendix B. We have not used generative AI tools for any original idea. The conceptualization of this project, the idea to use the dithered quantizer for developing a convenient loss function, and the mathematical development of the loss function are solely due to the human authors. We take responsibility for the final content of this work, including text, claims or artifacts produced with the aid of generative AI. REPRODUCIBILITY STATEMENT 
+
+We provide a complete reproduction package for the OSFP4 experiments reported in this paper. It contains the experiment scripts, configurations, software dependency versions, GPU specifications, saved measurements, and commands for regenerating the reported tables and figures. The package is available in an OSFP4 reproduction repository. 
+
+## REFERENCES 
+
+Red Hat AI and vLLM Project. LLM Compressor, 8 2024. URL https://github.com/ vllm-project/llm-compressor .Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L. Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. QuaRot: Outlier-free 4-bit inference in rotated LLMs. In Advances in Neural Information Processing Systems , 2024. URL https: //arxiv.org/abs/2404.00456 .Netanell Avisdris, Erez Badash, Yoray Herzberg, and Or Ordentlich. SmoothGPTQ: Optimizing diagonal scaling for GPTQ weight-activation quantization. Submitted, 2027. Chengzhu Bao, Xianglong Yan, Zhiteng Li, Guangshuo Qin, Guanghua Yu, and Yulun Zhang. SOAR: Scale optimization for accurate reconstruction in NVFP4 quantization. arXiv preprint arXiv:2605.12245 , 2026. URL https://arxiv.org/abs/2605.12245 .Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and Christopher De Sa. QuIP: 2-bit quantization of large language models with guarantees. In Advances in Neural Information Processing Systems ,2023. URL https://arxiv.org/abs/2307.13304 .Jiale Chen, Vage Egiazarian, Roberto L Castro, Torsten Hoefler, and Dan Alistarh. Wush: Near-optimal adaptive transforms for llm quantization. arXiv preprint arXiv:2512.00956 , 2025. Jack Cook, Junxian Guo, Guangxuan Xiao, Yujun Lin, Keith Wyss, Mahdi Nazemi, Asit Mishra, Carlo del Mundo, Tijmen Blankevoort, and Song Han. Four over six: More accurate NVFP4 quantization with adaptive block scaling. arXiv preprint arXiv:2512.02010 , 2026. URL https: //arxiv.org/abs/2512.02010 .Vage Egiazarian, Roberto Castro, Denis Kuznedelev, Andrei Panferov, Eldar Kurtic, Shubhra Pandit, Alexandre Marques, Mark Kurtz, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. Bridging the gap between promise and performance for microscaling fp4 quantization. In International Conference on Learning Representations , volume 2026, pp. 113529–113563, 2026. Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. GPTQ: Accurate post-training quantization for generative pre-trained transformers. In International Conference on Learning Representations , 2023. URL https://arxiv.org/abs/2210.17323 .10 Tanmaey Gupta, Hayden Prairie, Xiaoxia Wu, Reyna Abhyankar, Qingyang Wu, Austin Silveria, Pragaash Ponnusamy, Jue Wang, Ben Athiwaratkun, Leon Song, Tri Dao, Daniel Y. Fu, and Chris De Sa. Search your block floating point scales! Proceedings of Machine Learning and Systems ,8:1383–1398, 2026. URL https://arxiv.org/abs/2605.12464 .Egor Lifar, Semyon Savkin, Or Ordentlich, and Yury Polyanskiy. WaterSIC: Information-theoretically (near) optimal linear layer quantization. arXiv preprint arXiv:2603.04956 , 2026. URL https://arxiv.org/abs/2603.04956 .Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. AWQ: Activation-aware weight quantization for LLM compression and acceleration. In Proceedings of Machine Learning and Systems , 2024. URL https://arxiv.org/abs/2306.00978 .Li Lin and Xiaojun Wan. ScaleSweep: Accurate NVFP4 post-training quantization of LLMs via block scale initialization. arXiv preprint arXiv:2606.07618 , 2026. URL https://arxiv. org/abs/2606.07618 .Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghuraman Krish-namoorthi, Vikas Chandra, Yuandong Tian, and Tijmen Blankevoort. SpinQuant: LLM quanti-zation with learned rotations. In International Conference on Learning Representations , 2025. URL https://arxiv.org/abs/2405.16406 .Or Ordentlich and Yury Polyanskiy. High-rate quantized matrix multiplication i. IEEE BITS the Information Theory Magazine , 2026a. Or Ordentlich and Yury Polyanskiy. High-rate quantized matrix multiplication II. arXiv preprint arXiv:2605.13768 , 2026b. URL https://arxiv.org/abs/2605.13768 .Semyon Savkin, Eitan Porat, Or Ordentlich, and Yury Polyanskiy. Nestquant: Nested lattice quan-tization for matrix products and llms. arXiv preprint arXiv:2502.09720 , 2025. Wenqi Shao, Mengzhao Chen, Zhaoyang Zhang, Peng Xu, Lirui Zhao, Zhiqian Li, Kaipeng Zhang, Peng Gao, Yu Qiao, and Ping Luo. OmniQuant: Omnidirectionally calibrated quantization for large language models. In International Conference on Learning Representations , 2024. URL 
+
+https://arxiv.org/abs/2308.13137 .Yuxuan Sun, Ruikang Liu, Haoli Bai, Han Bao, Kang Zhao, Yuening Li, Jiaxin Hu, Xianzhi Yu, Lu Hou, Chun Yuan, Xin Jiang, Wulong Liu, and Jun Yao. FlatQuant: Flatness matters for LLM quantization. In Proceedings of the 42nd International Conference on Machine Learning , 2025. URL https://arxiv.org/abs/2410.09426 .Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. Smoothquant: Accurate and efficient post-training quantization for large language models. In International conference on machine learning , pp. 38087–38099. PMLR, 2023. Hao Yu, Zheng Li, Dayiheng Liu, and Jianwei Zhang. H-Scale: Hessian-guided scale refinement for NVFP4 sub-byte LLM inference. arXiv preprint arXiv:2608.28113 , 2026. URL https: //arxiv.org/abs/2608.28113 .
+
+## A PROOF OF LEMMA 1
+
+We first express the smoothed relative error as an integral over a unit interval in logarithmic coordi-nates. 
+
+Proposition 1 (Integral representation of the smoothed relative error) For every t ∈ R,
+
+ϕ(2 t) = 
+
+Z tt−1
+
+g(v) dv, g(v) =  1 − 2−v QFP4 (2 v )2 . (26) 11 Proof. Substituting (3) into the definition of ϕ and using U ∼ Uniform([0 , 1)) gives 
+
+ϕ(2 t) = EU
+
+h 1 − 2U −tQFP4 (2 t−U )2i
+
+=
+
+Z 10
+
+ 1 − 2u−tQFP4 (2 t−u)2 du. (27) The substitution v = t − u, with du = −dv , yields (26). 
+
+Proof of Lemma 1. The first part follows since the minimum is upper bounded by the expectation, taking β = 2 U . The fact that ϕ(−x) = ϕ(x) follows immediately from QFP4 (−x) = −QFP4 (x). It remains to show that ϕ(x) ≥ ϕmin and that this minimum is attained for all x ∈ I FP4 . To that end, we first resort to the infinite exponent model of Ordentlich & Polyanskiy (2026a, Section III.B). In particular, define the “ E∞M 1” constellation 
+
+CE∞M 1 = {0} ∪ ±2k, ± 32 2k : k ∈ Z , (28) which is clearly a superset of CFP4 . Defining 
+
+Q∞(x) = argmin  
+
+> ˆx∈C E∞M1
+
+|x − ˆx|, (29) it therefore follows that 
+
+g∞(v) ≜  1 − 2−v Q∞(2 v )2 = 2 −2v (2 v − Q∞(2 v )) 2
+
+≤ 2−2v (2 v − QFP4 (2 v )) 2 = g(v), ∀v ∈ R. (30) Consequently 
+
+ϕ(2 t) = 
+
+Z tt−1
+
+g(v) dv ≥
+
+Z tt−1
+
+g∞(v) dv (a)
+
+=
+
+Z 21
+
+g∞(v) dv (b)
+
+= ϕmin , (31) where in (a) we have used the fact that 2−(v+z)Q∞(2 (v+z)) = 2 −v Q∞(2 v ) for all v ∈ R and z ∈ Z
+
+(since 2z CE∞M 1 = CE∞M 1). We now establish equality (b) above . This follows since for any 
+
+x ∈ [2 , 4) we have that Q∞(x) = round( x), which implies also that for any 1 ≤ v < 2 it holds that 
+
+g∞(v) = (1 − 2−v round(2 v )) 2. Consequently 
+
+Z 21
+
+g∞(v) dv =
+
+Z 21
+
+(1 − 2−v round(2 v )) 2 dv =
+
+Z 10
+
+(1 − 2−(u+1) round(2 (u+1) )) 2 du = ϕmin 
+
+(32) as required. The bound (31) holds with equality whenever (30) holds with equality. Equality in (30) in turn holds for all v for which Q∞(2 v ) = QFP4 (2 v ). Noting that 
+
+CE∞M 1 = {. . . , 34 , 1, 32 , 2, 3, 4, 6, 8, . . . } (33) we see that 
+
+Q∞(y) = QFP4 (y) ∀y ∈ [7 /8, 7] . (34) In particular, for any x ∈ I FP = [7 /4, 7] we have that Q∞(x) = QFP4 (x) on the entire interval 
+
+[x/ 2, x ]. Consequently, setting tx = log 2(x) we see that for any x ∈ I FP = [7 /4, 7] it holds that 
+
+g(v) = g∞(v) for all v ∈ [tx − 1, t x] and therefore (30) holds with equality for all x ∈ I FP =[7 /4, 7] , as claimed. 
+
+## B IMPLEMENTATION OF THE SCALE OPTIMIZATION 
+
+This appendix specifies the continuous optimization of A, ΓW , and, when activations are quantized, 
+
+ΓX . It also describes how the resulting parameters determine the FP32 tensor scales used for de-ployment. The continuous optimization and the subsequent selection of E4M3 weight scales are separate steps: the former uses the smoothed loss ϕ, whereas the latter evaluates deterministic FP4 quantization error. 12 Calibration statistics and parameterization. For a weight matrix W ∈ Rm×n, let k1 be the number of calibration activation vectors used to estimate ΣX . For W4A4, the activation term uses a fixed subset of k ≤ k1 complete activation vectors, sampled uniformly without replacement. This subset is selected once for the mapping and reused in every optimization iteration. Weight-only optimization requires ΣX but does not retain an activation matrix in its objective. When several projections share one smoothing transformation, their weight matrices are stacked along the output dimension and optimized as one mapping; m then denotes the combined number of output rows. For each group ℓ, the trainable parameters are the natural logarithms 
+
+aℓr = log α(r) 
+
+> ℓ
+
+, r = 1 , . . . , 16 ,bℓi = log γ(i) 
+
+> Wℓ
+
+, i = 1 , . . . , m, cℓj = log γ(j) 
+
+> Xℓ
+
+, j = 1 , . . . , k. (35) The cℓj parameters are omitted for W4A16. Scales are reconstructed by exponentiation, ensuring positivity. We initialize α(r) 
+
+> ℓ
+
+= 1 , γ(i) 
+
+> Wℓ
+
+= max r |Wℓ(i, r )|/6, and γ(j) 
+
+> Xℓ
+
+= max r |Xℓ(r, j )|/6, with positive numerical floors for zero-valued blocks. The weights, calibration activations, and second-moment statistics are held fixed throughout this optimization. The loss and trainable log parameters use FP32 arithmetic. 
+
+Objective and normalization. Define the fixed weight metric 
+
+dℓr =
+
+ΣX (t, t ), for weight RTN ,U (t, t )2, for weight SIC , t = 16( ℓ − 1) + r. (36) For robustness, the implementation computes the SIC factor from the damped second moment, 
+
+U ⊤U = Σ X + λI n, λ = 0 .01 tr(Σ X )
+
+n , (37) as is common in GPTQ. The per-group losses evaluated in the implementation are 
+
+JWℓ = 1
+
+m
+
+> 16
+
+X
+
+> r=1
+> m
+
+X
+
+> i=1
+
+dℓr Wℓ(i, r )2ϕ Wℓ(i, r )
+
+α(r) 
+
+> ℓ
+
+γ(i)
+
+> Wℓ
+
+!
+
+, (38) 
+
+JXℓ = 1
+
+mk 
+
+> 16
+
+X
+
+> r=1
+> k
+
+X
+
+> j=1
+> m
+
+X
+
+> i=1
+
+Wℓ(i, r )2
+
+!
+
+Xℓ(r, j )2ϕ α(r) 
+
+> ℓ
+
+Xℓ(r, j )
+
+γ(j)
+
+> Xℓ
+
+!
+
+. (39) Thus, the scalar objective is J = P 
+
+> ℓ
+
+JWℓ for W4A16 and J = P
+
+> ℓ
+
+(JWℓ + JXℓ ) for W4A4. These are the corresponding losses in Section 2, normalized by mk , with {dℓr } in the weight metric esti-mated using all k1 calibration vectors and the activation term averaged over the selected k vectors. The coefficients dℓr Wℓ(i, r )2 and Xℓ(r, j )2 P 
+
+> i
+
+Wℓ(i, r )2 are computed once. All groups are eval-uated together in a batched computation; their parameters are disjoint, so summing their objectives introduces no coupling between groups. 
+
+Differentiable evaluation of ϕ. We evaluate the smoothed relative error through a lookup table indexed by t = log 2 |x|. The table has spacing h = 2 −12 on [−4, 8] , with entries ϕ(2 tq ) at tq = −4+ 
+
+qh . Each entry is computed using the identity proved in Proposition 1, by analytically integrating 
+
+ϕ(2 t) = 
+
+Z tt−1
+
+ 1 − 2−v QFP4 (2 v )2 dv, (40) splitting the integral at the FP4 decision boundaries. Table construction uses double precision and the cached table used by the optimizer is FP32. Values between adjacent entries are obtained by linear interpolation in t. Recall that the trainable variables are the log-scales a, b, c in (35). For nonzero inputs, t is affine in these variables, so their gradients follow directly from the interpolation slope with respect to t via the chain rule, with a factor of 1/ ln 2 converting natural logarithms to base two. Automatic differentiation treats the integer cell index as fixed and differentiates through the interpolation fraction, the logarithm of the magnitude, and the exponential scale parameterization. Consequently, optimization uses the derivative of the interpolated surrogate, without sampling the randomized quantizer or differentiating through deterministic FP4 rounding. The implementation clamps the logarithmic argument to [−4, 8 − h] before interpolation; outside this interval the lookup contribution has zero derivative with respect to its argument. At x = 0 the lookup is finite and its loss coefficient is zero. 13 Adam iterations. We jointly update all the log parameters using Adam for 80 iterations with a fixed learning rate η = 0 .12 , moment coefficients (β1, β 2) = (0 .9, 0.999) , and ϵ = 10 −8. Weight decay is zero and AMSGrad is disabled. Let θs collect the log parameters a, b, c after iteration s, with 
+
+c omitted for weight-only quantization, and let gs = ∇θ J (θs−1). Adam maintains exponentially weighted moving averages ps of the gradients and vs of their elementwise squares. The updates are 
+
+ps = β1ps−1 + (1 − β1)gs, vs = β2vs−1 + (1 − β2)g⊙2 
+
+> s
+
+,
+
+bps = ps/(1 − βs 
+
+> 1
+
+), bvs = vs/(1 − βs 
+
+> 2
+
+),θs,j = θs−1,j − η bps,j 
+
+pbvs,j + ϵ , j = 1 , . . . , dim( θ), (41) where j indexes the trainable log parameters, p0 = v0 = 0 , and all operations are elementwise. The quantities bps and bvs correct the moving averages for their zero initialization. Each iteration clears the previous gradients, evaluates the entire fixed objective, backpropagates, and updates the parameters simultaneously. There is no alternating minimization, learning-rate schedule, gradient clipping, or early stopping. The final iterate is retained, rather than the iterate with the smallest observed loss. The procedure seeks a low-loss solution of the nonconvex surrogate and does not impose monotonic descent. 
+
+Scale normalization and deployment precision. The objective is invariant under a common rescaling within each group. After the last Adam update, we exploit this freedom by setting 
+
+sℓ = exp 1
+
+m
+
+> m
+
+X
+
+> i=1
+
+log γ(i)
+
+> Wℓ
+
+!
+
+,α(r) 
+
+> ℓ
+
+← sℓα(r) 
+
+> ℓ
+
+, γ(i) 
+
+> Wℓ
+
+← γ(i) 
+
+> Wℓ
+
+/s ℓ, γ(j) 
+
+> Xℓ
+
+← sℓγ(j) 
+
+> Xℓ
+
+. (42) This sets the geometric mean of the continuous weight scales to one while preserving both 
+
+Wℓ(i, r )/(α(r) 
+
+> ℓ
+
+γ(i) 
+
+> Wℓ
+
+) and α(r) 
+
+> ℓ
+
+Xℓ(r, j )/γ (j) 
+
+> Xℓ
+
+. The normalization is applied once, after optimization. We then round the diagonal entries of A to the weight dtype when the transformation is folded into a preceding normalization layer, or to BF16 when explicit runtime smoothing is required. The subse-quent deterministic E4M3 weight-scale selection uses this rounded A. Rounding and discrete scale selection are not part of the Adam iterations. 
+
+FP32 tensor scales. The global tensor scales are distinct from the block scales optimized above and are not additional Adam parameters. For weights, the saved FP32 global scale is explicitly set to one. After the normalization in (42), the weight-scale search selects E4M3 values directly, with the compensating scale already incorporated into A.For W4A4 activations, the optimized ΓX is used only to guide the choice of A and is discarded for deployment. After applying the final rounded diagonal transformation A⋆, we recompute the calibration maximum 
+
+MX = max 
+
+> 1≤j≤k1
+
+∥A⋆xj ∥∞. (43) This uses the full calibration statistics, not only the subset used in the activation loss. The maximum can be recovered exactly from stored per-channel absolute maxima, since the diagonal scaling is fixed. The saved FP32 global quantization multiplier is 
+
+gX = 448 · 6
+
+MX
+
+, sX = g−1 
+
+> X
+
+= MX
+
+448 · 6 , (44) where 448 and 6 are the maximum positive E4M3 and E2M1 values, respectively, and sX denotes the corresponding dequantization scale. Numerical safeguards replace nonfinite multipliers by one. This global scale remains fixed during inference. The E4M3 block scales are computed dynamically from each actual group of 16 smoothed activation entries using absmax-to-6 with this global multiplier. Weight-only configurations do not require activation quantization scales. 14 (a) Loss improvement for attention projections. 
+
+(b) Loss improvement for MLP projections 
+
+Figure 3: Ratio between LW −SIC ,X −RTN with default initialized values, and the optimized value, along the 32 layers of Llama-3.1-8B-instruct. The ratio is plotted for each one of the 7 projections. 
+
+## C DETAILED FINE -G RAINED E4M3 S CALE -S ELECTION PROCEDURE 
+
+After the continuous optimization and scale normalization in Appendix B, we choose the final weight scales from the candidate sets C+scale (γ(i) 
+
+> Wℓ
+
+) defined in the main text. For each normalized continuous scale γ = γ(i) 
+
+> Wℓ
+
+, the implementation searches representable E4M3 candidate scales γ′ in 
+
+[γ/ 1.2, γ/ 0.3] . The rounded smoothing coefficients α(r) 
+
+> ℓ
+
+are held fixed throughout the search. 15 Denote by Γfinal  
+
+> Wℓ
+
+= diag( γfinal ,(1)  
+
+> Wℓ
+
+, ...., γ final ,(m) 
+
+> Wℓ
+
+) the final E4M3 scales used for representing Wℓ in NVFP4 format. For the W − RTN and W − RTN /X − RTN setups we set 
+
+γfinal ,(i) 
+
+> Wℓ
+
+= argmin  
+
+> γ∈C +scale (γ(i)
+> Wℓ)16
+
+X
+
+> r=1
+
+σ2 
+
+> Xℓ
+
+(r) Wℓ(i, r ) − γ · α(r) 
+
+> ℓ
+
+· QFP4 
+
+Wℓ(i, r )
+
+γ · α(r)
+
+> ℓ
+
+!! 2
+
+, ∀i = 1 , . . . , m, 
+
+(45) and then set 
+
+ˆW FP4  
+
+> ℓ
+
+(i, :) = QFP4 
+
+Wℓ(i, :) A−1
+
+> ℓ
+
+γfinal ,(i)
+
+> Wℓ
+
+!
+
+. (46) In the W − SIC and W − SIC /X − RTN setups the dependence of the MSE on Γfinal  
+
+> Wℓ
+
+is more involved because of the feedback nature of the SIC quantization algorithm. Under RTN, the choice of γ affects the quantization errors corresponding to 16 entries in the corresponding block in an independent manner, and is therefore optimized by (45). On the other hand, under SIC, errors in quantizing earlier coordinates propagate to the quantization of future coordinates by the SIC feedback loop. Consequently, optimizing Γfinal  
+
+> Wℓ
+> Lℓ=1
+
+is less straightforward. We use Algorithm 1 in order to choose Γfinal 
+
+> Wℓ
+> Lℓ=1
+
+, and quantize W in the same run. The main challenge in choosing 
+
+γ is that we do not know what will be the input to the quantizer before the feedback quantization procedure was executed. Algorithm 1 chooses the scale γ block by block, and relies on the decisions on ˆW that were already committed in the previous blocks. When optimizing the scale for block ℓ, it further estimates the effect of intra-block feedback-filtered quantization by approximating ˆWℓ = Wℓ
+
+only for the current block. 
+
+Algorithm 1 NVFP4 SIC with Optimized E4M3 
+
+Inputs: Y ∈ Rn×m, upper triangular U ∈ Rn×n, diagonal matrices {Aℓ}L=n/ 16  
+
+> ℓ=1
+
+with 
+
+Aℓ = diag 
+
+
+
+α(1)  
+
+> ℓ
+
+, . . . , α (16) 
+
+> ℓ
+
+
+
+, and initial diagonal scaling matrices {ΓWℓ }L=n/ 16  
+
+> ℓ=1
+
+with ΓWℓ =diag 
+
+
+
+γ(1)  
+
+> Wℓ
+
+, . . . , γ (m)
+
+> Wℓ
+
+
+
+Outputs: WSIC ∈ C n×m 
+
+> FP4
+
+and scale matrices {Γfinal  
+
+> Wℓ
+
+}L=n/ 16 
+
+> ℓ=1
+
+Y (n) ← Y
+
+for ℓ = L : 1 do 
+
+Iℓ = {1 + 16( ℓ − 1) , . . . , 16 ℓ} ▷ The set of 16 indices participating in ℓth block 
+
+Ublock = U (Iℓ, Iℓ) ▷ The ℓth 16 × 16 block in the diagonal of UU causal block = Ublock − diag( Ublock ) ▷ Making Ublock strictly upper triangular 
+
+Yblock ← Y (16 ℓ)(Iℓ, :) 
+
+Y approx block ← Yblock − U causal block W ⊤ 
+
+> ℓ
+
+▷ Approximating input to the quantizer before applying feedback iteration 
+
+for i = 1 : m do 
+
+γfinal ,(i) 
+
+> Wℓ
+
+← argmin γ∈C +scale (γ(i) 
+
+> Wℓ)
+
+P16 
+
+> a=1
+
+
+
+Y approx block (a, i ) − γα (a) 
+
+> ℓ
+
+Ublock (a, a ) · QFP4 
+
+ Y approx block (a,i ) 
+
+> γα (a)
+> ℓUblock (a,a )
+
+ 2
+
+end for 
+
+Γfinal  
+
+> Wℓ
+
+= diag( γfinal ,(1)  
+
+> Wℓ
+
+, ...., γ final ,(m) 
+
+> Wℓ
+
+)
+
+for r = 16 : 1 do 
+
+t ← 16( ℓ − 1) + rWSIC (t, :) ← QFP4 
+
+ Y (t)(t, :) (Γfinal  
+
+> Wℓ
+
+)−1  
+
+> α(r)
+> ℓU(t,t )
+
+
+
+▷ For optimization use ˜QFP4 , for actual quantization use QFP4 
+
+Y (t−1) ← Y (t) − α(r) 
+
+> ℓ
+
+U (: , t ) · WSIC (t, :)Γ final  
+
+> Wℓ
+
+▷ U (: , t ) is the tth column of U
+
+end for end for 
+
+16 D NATIVE NVFP4 C OMPARISON : E XPERIMENTAL SETUP 
+
+Table 3 gives the full task results underlying Table 1. All 18 rows share one evaluation protocol. We distinguish W4A4 methods using absmax activation scaling, W4A4 methods searching activation scales online, and weight-only W4A16 methods. Bold entries indicate the best score within each group. Table 3: Native NVFP4 accuracy on Llama-3.1-8B-Instruct under the common protocol in Ap-pendix D. All entries are percentages; recovery is relative to the measured BF16 baseline. Bold indicates the best score within each group. FP-Quant rows use author-provided quantization with our native serving adapter; H-Scale W4A4 is our extension. †NVIDIA’s separately released check-point has uncontrolled preparation. The online-search group includes 4over6, which selects activa-tion scales by reconstruction error during inference. OSFP4 activation-ScaleSweep rows retain their corresponding X-RTN weights, A, and tensor scales.                                                                                                                                   
+
+> Precision Method MMLU-CoT GSM8K HellaSwag WinoGrande Avg. Recovery %
+> Baseline BF16 72.77 85.97 80.41 77.74 79.22 100.00
+> Weights and activations: absmax activation scaling
+> W4A4 RTN (FP-Quant) 68.61 80.29 78.87 74.82 75.65 95.48 W4A4 GPTQ (FP-Quant) 68.86 80.67 78.78 77.03 76.34 96.35 W4A4 MR-GPTQ (FP-Quant) 69.84 81.20 78.16 75.53 76.18 96.16 W4A4 SOAR 69.14 82.11 78.85 76.32 76.60 96.69 W4A4 H-Scale (W4A4 extension) 69.74 81.35 79.03 76.56 76.67 96.78 W4A4 NVIDIA released checkpoint †68.49 80.89 78.75 76.32 76.11 96.07 W4A4 OSFP4 W-RTN / X-RTN 69.21 82.03 78.83 75.37 76.36 96.39 W4A4 OSFP4 W-SIC / X-RTN 69.73 82.34 79.09 76.95 77.03 97.23
+> Weights and activations: online activation-scale search
+> W4A4 ScaleSweepMSE 68.99 82.18 78.92 76.40 76.62 96.72 W4A4 ScaleSweepMSE + GPTQ 69.53 82.94 78.51 75.77 76.69 96.80 W4A4 4over6 69.56 82.11 78.56 75.14 76.34 96.36 W4A4 OSFP4 W-RTN / X-ScaleSweepMSE 69.72 83.55 79.36 75.22 76.96 97.14 W4A4 OSFP4 W-SIC / X-ScaleSweepMSE 69.56 83.40 79.10 76.32 77.09 97.31
+> Weights only
+> W4A16 RTN 70.69 83.85 79.36 76.80 77.67 98.04 W4A16 H-Scale 71.06 83.85 79.88 77.19 78.00 98.45 W4A16 OSFP4 W-RTN 71.13 83.47 79.77 78.22 78.15 98.64 W4A16 OSFP4 W-SIC 71.53 84.15 80.01 77.98 78.42 98.98
+
+D.1 MODEL AND CALIBRATION 
+
+All locally prepared models start from the same BF16 Llama-3.1-8B-Instruct checkpoint and use the same calibration set: 1024 sequences of 2048 tokens sampled from FineWeb-Edu. All seven linear projections in each decoder layer are quantized. Embeddings, normalization parameters, the language-model head, and KV caches remain in BF16. NVFP4 uses E2M1 values with one E4M3 block scale per 16 input channels and an FP32 tensor scale. W4A4 also quantizes activations in groups of 16, whereas W4A16 retains BF16 activations. No fine-tuning or distillation is performed for the locally prepared models. D.2 METHODS AND IMPLEMENTATION PROVENANCE 
+
+Author-provided implementations. The rows labeled RTN (FP-Quant), GPTQ (FP-Quant), and MR-GPTQ (FP-Quant) use the authors’ quantization implementation (Egiazarian et al., 2026), run on our common checkpoint and calibration data. We convert the resulting models for native vLLM evaluation, preserving their quantized weights, scales, and transforms. These rows therefore use author-provided quantization with our serving integration, rather than the original paper’s PyTorch evaluation backend. MR-GPTQ includes block Hadamard transforms and activation-based col-umn ordering; GPTQ uses the original column order. All three use absmax activation scaling. SmoothQuant is omitted because the corresponding implementation from the FP-Quant authors was unavailable. 17 Our implementations of competing methods. The weight-only RTN control, ScaleSweepMSE, ScaleSweepMSE+GPTQ, 4over6, SOAR, and H-Scale rows use our own implementations of the re-spective procedures. ScaleSweepMSE (Lin & Wan, 2026) searches weight and activation block scales by reconstruction MSE; ScaleSweepMSE+GPTQ selects weight scales before the GPTQ feedback pass and holds them fixed during feedback. 4over6 (Cook et al., 2026) chooses between absmax-to-4 and absmax-to-6 scales for both weights and activations. SOAR (Bao et al., 2026) jointly refines tensor and block scales with separate encoding and decoding scales. H-Scale (Yu et al., 2026) selects weight scales using activation-weighted reconstruction error. SOAR and the H-Scale W4A4 extension use absmax activation scaling. H-Scale is originally a weight-only method; its W4A4 row is our extension, not a result reported by its authors. These independently imple-mented competitors use no rotations or column reordering. 
+
+OSFP4 and activation-scale ablations. The four OSFP4 configurations use the optimization and deterministic scale selection described in Appendices B and C. The diagonal transformation is folded into preceding normalization layers where possible and applied explicitly before the attention output and MLP down projections otherwise. The two activation-ScaleSweepMSE ablations reuse the cor-responding OSFP4 W4A4 checkpoints, changing only the online activation block-scale rule. Their weights, diagonal transformations, and tensor scales remain fixed, so these rows isolate the effect of activation-scale selection. 
+
+Released NVIDIA checkpoint. We also evaluate the separately released 
+
+nvidia/Llama-3.1-8B-Instruct-NVFP4 checkpoint under the same task protocol. Its calibration and preparation are outside our controlled procedure, so it serves as a released-model reference rather than an isolated comparison of quantization algorithms. The publishable code package contains the exact asset identities, calibration sampling procedure, software environments, method settings, conversion and validation procedures, and saved results needed to reproduce the table. 
+
+## E PROJECTION -L EVEL DISTORTION AND DETERMINISTIC SCALE 
+
+## SELECTION 
+
+We compare the predicted randomized loss with measured projection errors for four configurations: 
+
+W -RTN, W -SIC, W -RTN/ X-RTN, and W -SIC/ X-RTN. The first two retain unquantized activa-tions (W4A16); the last two quantize both operands (W4A4). We use three fixed projections of Llama-3.1-8B-Instruct: the value projection in layer 12 , the attention output projection in layer 
+
+26 , and the MLP up-projection in layer 5, with zero-based layer indices. Each configuration and projection is optimized independently. The measurements concern local projection error on inputs captured from the BF16 model, rather than error propagated through an end-to-end quantized model. 
+
+Empirical activation distribution. We use the checkpoint and FineWeb-Edu calibration-token cache specified in Appendix D. From the 1024 cached document windows of length 2048 , we select 
+
+128 distinct windows uniformly without replacement and 256 distinct token positions within each window. Causal BF16 forward passes, without a chat template or generated-token decoding, provide 
+
+N = 32768 activation vectors xt ∈ Rn for each projection. Here n = 4096 and the output dimensions are m = 1024 , 4096 , and 14336 for 12 v, 26 o, and 5up , respectively. The prompt/token pairs are identical across all configurations and projections. We regard x as uniform on this empirical population and use the same population for optimization and measurement; this is a calibration diagnostic, not a held-out generalization test. 
+
+Fitted parameters and comparisons. For each projection and configuration, we apply OSFP4 as described in Section 3 to obtain A, ΓW and, for W4A4, ΓX . We then keep these fitted parameters fixed and compare one predicted-loss reference with three measured error distributions. 
+
+Predicted loss (dashed line). For each configuration we plot 
+
+L = L(A, ΓW , ΓX )
+
+N m , (47) 18 where L is the corresponding loss from (22)–(25), with ΓX omitted for W4A16. This prediction uses the optimized continuous scales, before deterministic E4M3 scale selection, and is the same reference for all curves in a panel. 
+
+Deterministic quantization (blue and orange). Writing cW for the reconstruction of W A −1 and 
+
+bxt for that of Ax t, each histogram contains the per-activation output MSE 
+
+dt = 1
+
+m ∥cW bxt − W x t∥22. (48) The two curves test different scale-selection rules: • W4A16: Blue uses OSFP4’s deterministic weight-scale selection; orange replaces it with absmax-to-6 weight scales. Both retain the same fitted A, tensor scale, and RTN or SIC rounding procedure, with bxt = Ax t. For SIC, both curves use Algorithm 1, with its scale-selection step replaced by absmax-to-6 for the orange curve. • W4A4: Both deterministic curves use the same OSFP4-quantized weights, including the fi-nal E4M3 weight scales selected by the RTN or SIC procedure. Blue uses ScaleSweepMSE activation block scales, whereas orange uses absmax-to-6. The diagonal transformation A
+
+and all tensor scales remain fixed, so the comparison isolates activation block-scale selec-tion. 
+
+Randomized pseudo-MSE (green). Using the fitted continuous scales, we apply the random-ized quantizer to weights and, in W4A4, activations, retaining SIC feedback where applicable. To estimate the expectation over the random dither, we repeat this procedure 32 times with fresh in-dependent dithers, sharing each randomized weight matrix across all activation samples. For each activation, we average the output MSE over these repetitions. The green histogram shows the distri-bution of these averages across activations. The full W-RTN/W4A16 comparison is shown in Figure 4; its layer 12 value projection is shown separately in Figure 2 in the main text. The remaining configurations follow. Table 4 shows that the mean randomized pseudo-MSE closely matches the predicted loss across all configurations and pro-jections, with ratios of 0.96 –1.01 . Deterministic OSFP4 achieves approximately half the predicted loss, with ratios of 0.48 –0.53 (using ScaleSweepMSE activation scales in W4A4). 0.0 2.5 5.0 7.5                  
+
+> ×10 −4
+> 0.00 0.05 0.10 0.15
+> Fraction of sampled activations  (a) Layer 12: value
+> OSFP4
+> μ= 3.122×10 −4
+> Absmax-to-6 W ( fi xed A)
+> μ= 4.363×10 −4̃
+> QFP4
+> μ= 6.208×10 −4
+> Predicted: 6.156×10 −4
+> 024
+> ×10 −4
+> 0.000 0.025 0.050 0.075
+> (b) Layer 26: output
+> OSFP4
+> μ= 2.593×10 −5
+> Absmax-to-6 W ( fi xed A)
+> μ= 3.808×10 −5̃
+> QFP4
+> μ= 5.157×10 −5
+> Predicted: 5.122×10 −5
+> 024
+> ×10 −4
+> 0.000 0.025 0.050 0.075
+> (c) Layer 5: up
+> OSFP4
+> μ= 1.830×10 −4
+> Absmax-to-6 W ( fi xed A)
+> μ= 2.542×10 −4̃
+> QFP4
+> μ= 3.486×10 −4
+> Predicted: 3.473×10 −4
+> Per-token output MSE, ‖(̂Weff −W)x‖22/m
+
+Figure 4: W -RTN (W4A16). Blue/orange: OSFP4/absmax-to-6 weight scales at fixed A. Green: randomized pseudo-MSE; dashed: predicted loss. 19 0 2 4 6
+
+×10 −4
+
+0.000 0.025 0.050 0.075 
+
+> Fraction of sampled activations
+
+(a) Layer 12: value 
+
+OSFP4 
+
+μ = 1.821×10 −4
+
+Absmax-to-6 W ( fi xed A) 
+
+μ = 2.503×10 −4̃
+
+QFP4 
+
+μ = 3.468×10 −4
+
+Predicted: 3.536×10 −4
+
+0.0 0.5 1.0 
+
+×10 −4
+
+0.00 0.02 0.04 0.06 
+
+(b) Layer 26: output 
+
+OSFP4 
+
+μ = 8.894×10 −6
+
+Absmax-to-6 W ( fi xed A) 
+
+μ = 1.228×10 −5̃
+
+QFP4 
+
+μ = 1.677×10 −5
+
+Predicted: 1.748×10 −5
+
+0 2 4
+
+×10 −4
+
+0.00 0.02 0.04 
+
+(c) Layer 5: up 
+
+OSFP4 
+
+μ = 1.131×10 −4
+
+Absmax-to-6 W ( fi xed A) 
+
+μ = 1.548×10 −4̃
+
+QFP4 
+
+μ = 2.107×10 −4
+
+Predicted: 2.125×10 −4
+
+Per-token output MSE, ‖(̂ Weff − W)x‖22/mFigure 5: W -SIC (W4A16). Blue/orange: OSFP4/absmax-to-6 weight scales at fixed A. Green: randomized pseudo-MSE; dashed: predicted loss. 0.0 0.5 1.0 1.5 
+
+×10 −3
+
+0.00 0.05 0.10 0.15 
+
+> Fraction of sampled activations
+
+(a) Layer 12: value 
+
+OSFP4 W / ScaleSweepMSE X 
+
+μ = 6.373×10 −4
+
+OSFP4 W / Absmax-to-6 X 
+
+μ = 7.457×10 −4̃
+
+QFP4 
+
+μ = 1.275×10 −3
+
+Predicted: 1.266×10 −3
+
+0.0 0.5 1.0 
+
+×10 −3
+
+0.000 0.025 0.050 0.075 
+
+(b) Layer 26: output 
+
+OSFP4 W / ScaleSweepMSE X 
+
+μ = 5.294×10 −5
+
+OSFP4 W / Absmax-to-6 X 
+
+μ = 6.242×10 −5̃
+
+QFP4 
+
+μ = 1.104×10 −4
+
+Predicted: 1.103×10 −4
+
+0.0 0.5 1.0 
+
+×10 −3
+
+0.00 0.05 0.10 
+
+(c) Layer 5: up 
+
+OSFP4 W / ScaleSweepMSE X 
+
+μ = 3.690×10 −4
+
+OSFP4 W / Absmax-to-6 X 
+
+μ = 4.344×10 −4̃
+
+QFP4 
+
+μ = 7.348×10 −4
+
+Predicted: 7.352×10 −4
+
+Per-token output MSE, ‖̂Ŵ x − Wx ‖22/m
+
+Figure 6: W -RTN/ X-RTN (W4A4). Blue/orange: ScaleSweepMSE/absmax-to-6 activation scales with identical OSFP4 weights. Green: randomized pseudo-MSE; dashed: predicted loss. 20 0.0 0.5 1.0 1.5 
+
+×10 −3
+
+0.00 0.05 0.10 
+
+> Fraction of sampled activations
+
+(a) Layer 12: value    
+
+> OSFP4 W / ScaleSweepMSE X
+> μ= 5.087×10 −4
+> OSFP4 W / Absmax-to-6 X
+> μ= 6.175×10 −4̃
+> QFP4
+> μ= 9.996×10 −4
+> Predicted: 1.005×10 −3
+
+0 2 4
+
+×10 −4
+
+0.000 0.025 0.050 0.075 
+
+(b) Layer 26: output    
+
+> OSFP4 W / ScaleSweepMSE X
+> μ= 3.616×10 −5
+> OSFP4 W / Absmax-to-6 X
+> μ= 4.550×10 −5̃
+> QFP4
+> μ= 7.286×10 −5
+> Predicted: 7.377×10 −5
+
+0.0 0.5 1.0 
+
+×10 −3
+
+0.00 0.02 0.04 0.06 
+
+(c) Layer 5: up    
+
+> OSFP4 W / ScaleSweepMSE X
+> μ= 3.015×10 −4
+> OSFP4 W / Absmax-to-6 X
+> μ= 3.667×10 −4̃
+> QFP4
+> μ= 5.901×10 −4
+> Predicted: 5.941×10 −4
+
+Per-token output MSE, ‖̂Ŵ x − Wx ‖22/mFigure 7: W -SIC/ X-RTN (W4A4). Blue/orange: ScaleSweepMSE/absmax-to-6 activation scales with identical OSFP4 weights. Green: randomized pseudo-MSE; dashed: predicted loss. Table 4: Mean measured MSE relative to predicted loss. OSFP4 W4A4 uses ScaleSweepMSE activation scales. 
+
+Randomized mean / prediction OSFP4 mean / prediction Configuration 12v 26o 5up 12v 26o 5up W-RTN 1.0085 1.0068 1.0038 0.5072 0.5062 0.5267 W-SIC 0.9807 0.9595 0.9913 0.5149 0.5088 0.5320 W-RTN/X-RTN 1.0075 1.0008 0.9994 0.5035 0.4798 0.5019 W-SIC/X-RTN 0.9950 0.9876 0.9932 0.5063 0.4902 0.5076 
+
+21 F ADDITIONAL MODELS 
+
+This appendix reports additional model results. F.1 LLAMA -3-8B PERPLEXITY 
+
+Published comparison results are taken from Table 2 of Savkin et al. (2025). The OSFP4, GPTQ and RTN results are added here. Table 5: WikiText-2 perplexity comparison for Llama-3-8B. 
+
+Precision Method Llama-3-8B 
+
+Baseline BF16 6.14 W4A16 NestQuant 6.31 
+
+NestQuantM 6.35 RTN 6.54 GPTQ 6.37 
+
+W -RTN 6.43 
+
+W -SIC 6.31 
+
+W4A4 SpinQuant 7.10 OstQuant 7.24 DuQuant 8.06 RTN 6.88 GPTQ 6.68 
+
+W -RTN/ X-RTN 6.74 
+
+W -SIC/ X-RTN 6.59 
+
+W4A4KV4 NestQuant 6.63 
+
+NestQuantM 6.82 
+
+F.2 QWEN 3-8B ACCURACY 
+
+Table 6: Evaluation comparison on Qwen3-8B. All quantized configurations use the NVFP4 format. 
+
+Precision Method MMLU-CoT GSM8K HellaSwag WinoGrande Avg. Recovery % 
+
+Baseline BF16 71.64 90.98 76.60 70.64 77.46 100.00 
+
+Weights and activations 
+
+W4A4 RTN (FP-Quant) 67.72 89.31 74.68 69.46 75.29 97.20 W4A4 GPTQ (FP-Quant) 70.94 89.92 74.63 69.61 76.28 98.48 W4A4 MR-GPTQ (FP-Quant) 73.60 89.76 74.92 68.43 76.68 98.99 W4A4 QAT+Had16 (FP-Quant) 71.29 89.16 74.63 70.32 76.35 98.57 W4A4 OSFP4 W-RTN / X-RTN 73.22 90.14 74.69 69.30 76.84 99.20 
+
+W4A4 OSFP4 W-SIC / X-RTN 70.49 89.61 75.24 70.01 76.34 98.55 
+
+Weights only 
+
+W4A16 OSFP4 W-RTN 72.28 90.75 75.76 70.96 77.44 99.97 
+
+W4A16 OSFP4 W-SIC 69.87 90.07 76.05 70.09 76.52 98.79 
+
+22 F.3 QWEN 3-30B-A3B-I NSTRUCT ACCURACY 
+
+For each MoE layer, we use expert-specific diagonal smoothing matrices rather than sharing a single transformation across experts. During calibration, we preserve the model’s natural MoE routing, so each expert is calibrated only on the tokens routed to it. At runtime, after routing, Agate /up is applied to the shared input activations of the selected expert’s gate and up projections, while Adown 
+
+is applied to the input activations of its down projection. For OSFP4 W4A4, activation global scales would need to be computed from smoothed calibration activations separately for each expert’s shared gate/up input and down input. Inference would then require a vLLM plugin that selects the appropriate scale after routing. Because this route-aware serving path was not implemented in our experiments, we report only W4A16 results for this model. For this evaluation, we measure every row once using the same seven-task protocol. We evalu-ate C-Eval, LiveBench, MMLU-Redux, AIME 2025, ARC-Challenge, BBH, and GPQA Diamond. Generation uses temperature 0.7, top-p 0.8, top-k 20, repetition penalty 1.0, presence penalty 1.5, and at most 32,768 output tokens. AIME 2025 uses 16 independent generations per problem. We report the unweighted mean of the seven task scores. Table 7: Evaluation comparison on Qwen3-30B-A3B-Instruct.                                                                                 
+
+> Precision Method C-Eval LiveBench MMLU-R AIME 2025 ARC-C BBH GPQA-D Avg. Recovery %
+> Baseline BF16 86.97 70.41 88.19 63.96 95.14 90.77 55.05 78.64 100.00
+> Weights only
+> W4A16 RTN 86.57 67.11 87.63 57.71 95.56 89.42 61.11 77.87 99.02 W4A16 RTN + H-Scale 86.37 68.22 87.67 61.46 95.56 89.54 57.07 77.98 99.16 W4A16 GPTQ + H-Scale 86.22 67.93 87.72 59.58 95.22 90.06 55.56 77.47 98.51 W4A16 MR-GPTQ + H-Scale 86.51 67.24 87.82 60.42 95.14 89.71 54.04 77.27 98.26 W4A16 OSFP4 W-RTN 86.70 69.44 87.61 60.21 95.14 90.08 58.08 78.18 99.42
+> W4A16 OSFP4 W-SIC 86.39 67.77 87.77 57.92 94.71 89.96 57.58 77.44 98.47
+
+F.4 GEMMA -4-31B-IT ACCURACY 
+
+For this evaluation, we use the no-thinking setting and seed counts described in Red Hat AI’s Gemma-4-31B-IT-NVFP4 model card on Hugging Face as a reference for our local measurements. Every row uses zero-shot, text-only prompts and the Gemma chat template with thinking disabled. We generate responses with vLLM using a 32,768-token context, temperature 1.0, top-p 0.95, and top-k 64. We score GPQA Diamond (GPQA-D), MATH-500, and AIME 2025 with LightEval, and IFEval with lm-eval’s prompt-level strict metric. Scores are averaged over three seeds for GPQA-D, MATH-500, and IFEval, and eight seeds for AIME 2025. The RTN (RedHatAI) row uses Red-HatAI’s publicly released NVFP4 checkpoint. All table entries, including BF16, are our local mea-surements. Table 8: Evaluation comparison on Gemma-4-31B-IT. 
+
+Precision Method GPQA-D MATH-500 IFEval strict AIME 2025 Avg. Recovery % 
+
+Baseline BF16 78.28 89.20 90.94 67.92 81.59 100.00 
+
+Weights and activations 
+
+W4A4 RTN (RedHatAI) 76.60 88.07 90.14 64.17 79.74 97.74 W4A4 MR-GPTQ (FP-Quant) 74.58 88.20 91.00 63.75 79.38 97.30 W4A4 OSFP4 W-RTN / X-RTN 75.76 90.40 90.51 63.75 80.11 98.19 W4A4 OSFP4 W-SIC / X-RTN 78.28 91.87 90.76 62.08 80.75 98.97 
+
+23 G INFERENCE EFFICIENCY 
+
+Table 9 compares the inference throughput of OSFP4, the vendor NVFP4 RTN baseline, NVFP4 with unit smoothing, and BF16 on Llama-3.1-8B-Instruct (NVIDIA B200, vLLM 0.28.0). Each workload uses a fixed synthetic batch of random-token prompts. Prefill emits one token and mea-sures time to first token. Decode is measured with 256 output tokens and with one output token; subtracting the two durations removes the common prefill contribution. For each method and work-load, we perform three independent timing repetitions, each consisting of 30 inference runs. The smoothing transformation A is applied at runtime only on o_proj and down_proj .End-to-end inference includes attention with a BF16 KV cache, activation quantization, output writes, and scheduling overhead in addition to FP4 matrix multiplication. The measured gains therefore depend on the workload. OSFP4 closely matches the unit-smoothing control across the sweep, suggesting that its gap to the vendor NVFP4 path primarily reflects the runtime smoothing implementation rather than the values of A.Table 9: Inference throughput on Llama-3.1-8B-Instruct (NVIDIA B200).                                                               
+
+> Workload Throughput Batch Prompt Out BF16 NVFP4 NVFP4 A=IOSFP4
+> Prefill: input throughput (thousand tokens/s), measured to first output token
+> 1512 160.2 81.0 78.1 78.4 8512 182.5 177.0 165.4 166.5 32 512 186.5 192.4 180.8 180.6 12048 177.0 153.1 145.0 144.9 82048 185.0 183.9 173.7 174.0 18192 175.0 144.6 137.8 138.0
+> Decode: output throughput across the batch (tokens/s), excluding prefill
+> 1128 256 274 321 312 312 8128 256 2183 2627 2548 2547 32 128 256 8448 9936 9664 9642
+
+24 H COMPONENT ABLATION 
+
+We conduct an ablation study on Llama-3.1-8B-Instruct under W4A16 and W4A4 quantization. All configurations are calibrated on 1,024 FineWeb sequences of 2,048 tokens. Perplexity and projection-output errors are evaluated on the WikiText-2 test set. For W4A16, we compare AbsMax , optimal E4M3 scale according to unweighted MSE , our W -RTN method , W -SIC with A = I and standard AbsMax weight scales , and our W -SIC method .For W4A4, we compare AbsMax , optimal E4M3 scale for W , with A = I and standard AbsMax scaling for X, our W -RTN method , W -SIC with A = I and standard AbsMax weight and activation scales , and our W -SIC method .For each method, we report the relative MatMul MSE for the seven projection types p ∈{q, k, v, o, gate , up , down }. Let Yt,p denote the full-precision output of projection p in Transformer layer t, and let ˆY method  
+
+> t,p
+
+and ˆY FP8 RTN  
+
+> t,p
+
+denote the corresponding outputs produced by the evaluated method and the FP8 RTN reference, respectively. We compute the squared Frobenius-error ratio independently in each Transformer layer and report its mean over all 32 layers: 
+
+Rp = 132 
+
+> 32
+
+X
+
+> t=1
+
+ˆY method  
+
+> t,p
+
+− Yt,p 
+
+> 2
+> F
+
+ˆY FP8 RTN  
+
+> t,p
+
+− Yt,p 
+
+> 2
+> F
+
+, for p ∈ { q, k, v, o, gate , up , down }. (49) The W4A16 configurations use a W8A16 FP8 RTN reference, whereas the W4A4 configurations use a W8A8 FP8 RTN reference. The table reports the seven relative MatMul MSE values and WikiText-2 perplexity for each configuration. Table 10: NVFP4 component ablation on Llama-3.1-8B-Instruct: relative projection MSE and WikiText-2 perplexity. 
+
+Precision Method Relative MMSE ↓ PPL ↓
+
+q k v o gate up down 
+
+Baseline BF16 0.00 0.00 0.00 0.00 0.00 0.00 0.00 7.22 
+
+Weights only 
+
+W8A16 RTN 1.00 1.00 1.00 1.00 1.00 1.00 1.00 7.24 
+
+W4A16 RTN 10.27 8.68 14.30 12.59 12.22 12.64 12.52 7.55 W4A16 MSE 8.12 6.93 12.01 9.28 9.08 9.39 9.43 7.52 W4A16 W -RTN 5.29 4.42 8.53 8.16 8.48 8.95 8.10 7.42 W4A16 SIC 5.88 4.73 9.05 5.82 9.00 9.53 9.19 7.45 W4A16 W -SIC 3.63 2.89 6.08 4.02 6.45 6.86 6.29 7.39 
+
+Weights and activations 
+
+W8A8 RTN 1.00 1.00 1.00 1.00 1.00 1.00 1.00 7.27 
+
+W4A4 RTN 10.86 8.97 16.18 12.67 12.41 12.85 12.45 7.88 W4A4 MSE 9.76 8.09 15.00 10.96 10.80 11.20 10.81 7.85 W4A4 W -RTN/ X-RTN 7.05 6.19 10.12 10.12 10.38 10.75 9.77 7.77 W4A4 SIC 8.52 6.88 13.54 9.25 10.75 11.28 10.68 7.77 W4A4 W -SIC/ X-RTN 6.17 5.38 8.94 8.03 9.33 9.72 8.82 7.67 
+
+25 I DETAILED LOSS DERIVATIONS AND SIC P ROCEDURE 
+
+Denote by Cscale all the positive points in the FP8 E4M3 constellation, and recall the definition of 
+
+CFP4 from (1). Let W ∈ Rm×n and X ∈ Rn×k. We generally think of X as a random vector with k = 1 , but for optimization of the diagonal scaling matrix A, we will denote by X the matrix holding k calibration activations in Rn, so that k > 1. We also define ΣX = 1 
+
+> k
+
+XX ⊤ ∈ Rn×n. Let L = n/ 16 and assume for simplicity that L is an integer. We partition W to L matrices of shape m × 16 so that 
+
+W = [ W1| · · · | WL], Wℓ = W (: , 1 + 16( ℓ − 1) : 16 ℓ) for ℓ = 1 , . . . , L. (50) Under NVFP4 quantization we represent each Wℓ as 
+
+ˆWℓ = diag(Γ Wℓ ) · ˆW FP4  
+
+> ℓ
+
+, where ΓWℓ ∈ C m
+
+> scale
+
+, ˆW FP4  
+
+> ℓ
+
+∈ C m×16 FP4 . (51) Similarly, 
+
+X =
+
+
+
+X1
+
+...
+
+XL
+
+ , Xℓ = X(1 + 16( ℓ − 1) : 16 ℓ, :) for ℓ = 1 , . . . , L. (52) When activations are also quantized, we represent each Xℓ as 
+
+ˆXℓ = ˆXFP4  
+
+> ℓ
+
+· diag(Γ Xℓ ), where ΓXℓ ∈ C k
+
+> scale
+
+, ˆXFP4  
+
+> ℓ
+
+∈ C 16 ×k 
+
+> FP4
+
+. (53) In this work we use a diagonal smoothing matrix A ∈ Rn×n so that we actually quantize W A −1
+
+and (possibly) AX . We keep using the notation { ˆWℓ} and { ˆXℓ} for the corresponding NVFP4 representation even when A̸ = In, in which case ˆWℓ can be very far from Wℓ, and same for X. We also express the matrix A as a block diagonal matrix with blocks of size 16 × 16 so that 
+
+A =
+
+
+
+A1 0 · · · 00 A2 · · · 0
+
+... ... . . . ...
+
+0 0 · · · AL
+
+ . (54) 
+
+The MatMul Quantization Error: Let 
+
+e = ˆW ˆX − W X =
+
+> L
+
+X
+
+> ℓ=1
+
+ ˆWℓ ˆXℓ − (WℓA−1 
+
+> ℓ
+
+)( AℓXℓ)
+
+
+
+(55) 
+
+=
+
+> L
+
+X
+
+> ℓ=1
+
+(WℓA−1 
+
+> ℓ
+
++ eWℓ )( AℓXℓ + eXℓ ) −  (WℓA−1 
+
+> ℓ
+
+)( AℓXℓ) (56) 
+
+=
+
+> L
+
+X
+
+> ℓ=1
+
+eWℓ AℓXℓ + WℓA−1 
+
+> ℓ
+
+eXℓ + eWℓ eXℓ (57) where eWℓ = ˆWℓ − (WℓA−1 
+
+> ℓ
+
+) and eXℓ = ˆXℓ − (AℓXℓ). Setting 
+
+eW = [ eW1 | · · · | eWL ], eX =
+
+
+
+eX1
+
+...
+
+eXL
+
+ , (58) we obtain 
+
+e = eW AX + W A −1eX + eW eX . (59) We further neglect the third term which has much smaller energy than the sum of the first two under NVFP4 quantization, and approximate 
+
+e ≈ eW AX + W A −1eX . (60) 26 Randomized FP4 quantization error: We assume the randomized quantizer ˜QFP4 (·) from (3) is used. We model it as a channel with input y ∈ R and output ˜QFP4 (y) ∈ R satisfying 
+
+˜QFP4 (y) = y + py2ϕ(y)Z, (61) where Z is a random variable with zero mean and unit variance, statistically independent of every-thing. For a matrix F ∈ Rk1×k2 the notation ˜QFP4 (F ) corresponds to applying the randomized quantizer ˜QFP4 (·) on each component of F .
+
+Round to nearest (RTN) quantization: The simplest way to use the randomized quantizer is to feed to it the scaled signal, and multiply the output by the inverse scaling. This is referred to as RTN quantization. Specifically, given A, ΓW under RTN quantization the entries of the weight matrix W
+
+are quantized to 
+
+ˆW FP4  
+
+> ℓ
+
+= ˜QFP4 
+
+ diag(Γ Wℓ )−1WℓA−1
+
+> ℓ
+
+ , so that ˆWℓ = diag(Γ Wℓ ) ˜QFP4 
+
+ diag(Γ Wℓ )−1WℓA−1
+
+> ℓ
+
+ .
+
+(62) Denoting {γ(i) 
+
+> Wℓ
+
+}mi=1 and {α(r) 
+
+> ℓ
+
+}16  
+
+> r=1
+
+for the diagonal entries of ΓWℓ and Aℓ, respectively, we obtain 
+
+eWℓ (i, r ) = ˆWℓ(i, r ) − Wℓ(i, r )
+
+α(r)
+
+> ℓ
+
+=
+
+vuut Wℓ(i, r )
+
+α(r)
+
+> ℓ
+
+!2
+
+ϕ Wℓ(i, r )
+
+γ(i) 
+
+> Wℓ
+
+α(r)
+
+> ℓ
+
+!
+
+Zℓ(i, r ), (63) where {Zℓ(i, r )} are iid zero-mean, unit-variance random variables. Let 
+
+LRTN  
+
+> Wℓ
+
+(Γ Wℓ , A ℓ) = E∥eWℓ AℓXℓ∥2 
+
+> F
+
+, (64) where Xℓ, W ℓ, ΓWℓ , A ℓ are assumed fixed and the expectation is only with respect to the randomiza-tion of ˜QFP4 (·), that is, with respect to the iid random variables {Zℓ(i, r )}. It immediately follows that 
+
+LRTN  
+
+> Wℓ
+
+(Γ Wℓ , A ℓ) = 
+
+> m
+
+X
+
+> i=1
+> k
+
+X
+
+> j=1 16
+
+X
+
+> r=1
+
+W 2 
+
+> ℓ
+
+(i, r )X2 
+
+> ℓ
+
+(r, j ) · ϕ Wℓ(i, r )
+
+γ(i) 
+
+> Wℓ
+
+α(r)
+
+> ℓ
+
+!
+
+= k
+
+> 16
+
+X
+
+> r=1
+
+σ2 
+
+> Xℓ
+
+(r)
+
+> m
+
+X
+
+> i=1
+
+W 2 
+
+> ℓ
+
+(i, r ) · ϕ Wℓ(i, r )
+
+γ(i) 
+
+> Wℓ
+
+α(r)
+
+> ℓ
+
+!
+
+, (65) where σ2 
+
+> Xℓ
+
+(r) = 1
+
+> k
+
+Pkj=1 X2 
+
+> ℓ
+
+(r, j ) (we also have σ2 
+
+> Xℓ
+
+(r) = Σ X (r + 16( ℓ − 1) , r + 16( ℓ − 1)) ). We assume that the random variables {Zℓ(·, ·)} corresponding to different blocks are also indepen-dent. This implies 
+
+LRTN  
+
+> W
+
+= E∥eW AX ∥2 
+
+> F
+
+=
+
+> L
+
+X
+
+> ℓ=1
+
+LRTN  
+
+> Wℓ
+
+(Γ Wℓ , A ℓ). (66) If activations are also quantized, applying RTN with the randomized FP4 quantizer gives 
+
+ˆXFP4  
+
+> ℓ
+
+= ˜QFP4 
+
+ AℓXℓ diag(Γ Xℓ )−1 , so that ˆXℓ = ˜QFP4 
+
+ AℓXℓ diag(Γ Xℓ )−1 diag(Γ Xℓ ),
+
+(67) and 
+
+eXℓ (r, j ) = ˆXℓ(r, j ) − α(r) 
+
+> ℓ
+
+Xℓ(r, j ) = 
+
+vuut
+
+α(r) 
+
+> ℓ
+
+Xℓ(r, j )
+
+2
+
+ϕ α(r)
+
+> ℓ
+
+γ(j)
+
+> Xℓ
+
+Xℓ(r, j )
+
+!
+
+˜Zℓ(r, j ), (68) where {γ(j) 
+
+> Xℓ
+
+}kj=1 denote the diagonal entries of ΓXℓ , and { ˜Zℓ(r, j )} are iid zero-mean unit-variance random variables statistically independent of everything. Similar to the derivation above, we obtain 27 LRTN  
+
+> Xℓ
+
+(Γ Xℓ , A ℓ) = E∥WℓA−1 
+
+> ℓ
+
+eXℓ ∥2 
+
+> F
+
+= m
+
+> 16
+
+X
+
+> r=1
+
+σ2 
+
+> Wℓ
+
+(r)
+
+> k
+
+X
+
+> j=1
+
+X2 
+
+> ℓ
+
+(r, j ) · ϕ α(r)
+
+> ℓ
+
+γ(j)
+
+> Xℓ
+
+Xℓ(r, j )
+
+!
+
+, (69) where σ2 
+
+> Wℓ
+
+(r) = 1
+
+> m
+
+Pmi=1 W 2 
+
+> ℓ
+
+(i, r ). We also have 
+
+LRTN  
+
+> X
+
+= E∥W A −1eX ∥2 
+
+> F
+
+=
+
+> L
+
+X
+
+> ℓ=1
+
+LRTN  
+
+> Xℓ
+
+(Γ Xℓ , A ℓ). (70) 
+
+Successive interference cancellation (SIC): Note that 
+
+∥eW AX ∥2 
+
+> F
+
+= tr  (eW AX )( eW AX )⊤ = k tr  eW AΣX A⊤e⊤
+
+> W
+
+ . (71) Let U ∈ Rn×n be an upper triangular matrix such that ΣX = U ⊤U , and denote 
+
+Y = U A ⊤(W A −1)⊤ = U W ⊤ ∈ Rn×m. (72) We have 
+
+∥eW AX ∥2 
+
+> F
+
+= k∥U A ⊤e⊤ 
+
+> W
+
+∥2 
+
+> F
+
+= k∥Y − U A ˆW ⊤∥2 
+
+> F
+
+. (73) Even when A and the E4M3 scaling matrices {ΓWℓ }Lℓ=1 are fixed, the problem of choosing 
+
+ˆW FP4 ∈ C m×n 
+
+> FP4
+
+such as to minimize (73) is computationally difficult due to the coupling the matrix 
+
+U A introduces between different columns of ˆW (equivalently, rows of ˆW ⊤). As common in the literature, instead of attempting an optimal solution, we resort to the SIC/GPTQ approach. Taking into account the structure of the NVFP4 constellation, this boils down to choosing WSIC ∈ C n×m
+
+> FP4
+
+as in Algorithm 2, and then setting ˆW FP4 = W ⊤ 
+
+> SIC
+
+and ˆWℓ = Γ Wℓ
+
+ˆW FP4  
+
+> ℓ
+
+.
+
+Algorithm 2 NVFP4 SIC 
+
+Inputs: Y ∈ Rn×m, upper triangular U ∈ Rn×n, diagonal matrices {Aℓ}L=n/ 16  
+
+> ℓ=1
+
+with 
+
+Aℓ = diag 
+
+
+
+α(1)  
+
+> ℓ
+
+, . . . , α (16) 
+
+> ℓ
+
+
+
+, and E4M3 diagonal scaling matrices {ΓWℓ }L=n/ 16  
+
+> ℓ=1
+
+with ΓWℓ =diag 
+
+
+
+γ(1)  
+
+> Wℓ
+
+, . . . , γ (m)
+
+> Wℓ
+
+
+
+Outputs: WSIC ∈ C n×m
+
+> FP4
+
+Y (n) ← Y
+
+for ℓ = L : 1 do for r = 16 : 1 do 
+
+t ← 16( ℓ − 1) + rWSIC (t, :) ← QFP4 
+
+ Y (t)(t, :)Γ −1  
+
+> Wℓ
+> α(r)
+> ℓU(t,t )
+
+
+
+▷ For optimization use ˜QFP4 , for actual quantization use QFP4 
+
+Y (t−1) ← Y (t) − α(r) 
+
+> ℓ
+
+U (: , t ) · WSIC (t, :)Γ Wℓ ▷ U (: , t ) is the tth column of U
+
+end for end for 
+
+The analysis of LSIC  
+
+> W
+
+= kE∥Y − U A ˆW ⊤∥2 
+
+> F
+
+under the SIC algorithm is a bit complicated, even under the randomized FP4 quantization error model (61). The reason is that Z entries from time t
+
+affect Y (t′) for t′ < t due to the feedback nature of the quantization process. We therefore make a high-resolution quantization assumption and assume the energy of the (filtered) quantization noise is negligible next to the signal (entries of Y ) energy. Under this assumption we have that 
+
+Y (t)(t, :) ≈ U (t, t ) · (W (: , t )) ⊤. (74) With this assumption a straightforward calculation gives (under the randomized FP4 quantization error model (61)) for fixed {Aℓ} and {ΓWℓ }
+
+LSIC  
+
+> W
+
+= k
+
+> L
+
+X
+
+> ℓ=1 16
+
+X
+
+> r=1
+
+U 2 
+
+> ℓ
+
+(r)
+
+> m
+
+X
+
+> i=1
+
+W 2 
+
+> ℓ
+
+(i, r )ϕ Wℓ(i, r )
+
+γ(i) 
+
+> Wℓ
+
+α(r)
+
+> ℓ
+
+!
+
+=
+
+> L
+
+X
+
+> ℓ=1
+
+LSIC  
+
+> W
+
+(Γ Wℓ , A ℓ), (75) 28 where Uℓ(r) = U (16( ℓ − 1) + r, 16( ℓ − 1) + r) and 
+
+LSIC  
+
+> W
+
+(Γ Wℓ , A ℓ) = k
+
+> 16
+
+X
+
+> r=1
+
+U 2 
+
+> ℓ
+
+(r)
+
+> m
+
+X
+
+> i=1
+
+W 2 
+
+> ℓ
+
+(i, r )ϕ Wℓ(i, r )
+
+γ(i) 
+
+> Wℓ
+
+α(r)
+
+> ℓ
+
+!
+
+. (76) Note that the only difference between LSIC  
+
+> W
+
+(Γ Wℓ , A ℓ) and LRTN  
+
+> W
+
+(Γ Wℓ , A ℓ) is replacing σ2 
+
+> Xℓ
+
+(r) in the latter with U 2 
+
+> ℓ
+
+(r) in the former. Since U 2 
+
+> ℓ
+
+(r) is the variance of the optimal prediction error of 
+
+X(t) - the tth coordinate of X ∼ N (0 , ΣX ), t = 16( ℓ − 1) + r - from X(t + 1 : n) and σ2 
+
+> Xℓ
+
+(r) is the variance of X(t), we have U 2 
+
+> ℓ
+
+(r) ≤ σ2 
+
+> Xℓ
+
+(r) for all ℓ, r .
+
+Total quadratic Distortion: Using (65) (69) and (76) we obtain the following loss functions for randomized NVFP4 quantization, as a function of A and the E4M3 scales, under the various quan-tization setups: 
+
+LW −RTN =
+
+> L
+
+X
+
+> ℓ=1
+
+LRTN  
+
+> Wℓ
+
+(Γ Wℓ , A ℓ) (77) 
+
+LW −SIC =
+
+> L
+
+X
+
+> ℓ=1
+
+LSIC  
+
+> Wℓ
+
+(Γ Wℓ , A ℓ) (78) 
+
+LW −RTN ,X −RTN =
+
+> L
+
+X
+
+> ℓ=1
+
+LRTN  
+
+> Wℓ
+
+(Γ Wℓ , A ℓ) + LRTN  
+
+> Xℓ
+
+(Γ Xℓ , A ℓ) (79) 
+
+LW −SIC ,X −RTN =
+
+> L
+
+X
+
+> ℓ=1
+
+LSIC  
+
+> Wℓ
+
+(Γ Wℓ , A ℓ) + LRTN  
+
+> Xℓ
+
+(Γ Xℓ , A ℓ) . (80) Note that in all expressions the dependency on A and the E4M3 scales completely decouples to L different functions, that depend on different parameters . Therefore, the optimization on 
+
+{Aℓ, ΓWℓ , ΓXℓ } decouples to L independent optimization problems. 29
