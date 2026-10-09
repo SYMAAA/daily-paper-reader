@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-07</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-09</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 16 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 9 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>10</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>3</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-07 23:46:38 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-09 00:20:31 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,10 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日共生成 16 篇推荐（精读 6 篇，速读 10 篇）</p>
-<p>精读：《Align, Then Correct: Training-Free Two-Stage Low-Rank Compensation for Extremely Quantized Large Language Models》（9.0/10）, 《SoloQ: Calibration-Free Quantization for Diffusion Language Models》（8.0/10）</p>
-<p>速读：《DIPrune: Task-Aware Token Pruning with Dual Importance for Efficient Multimodal Language Models》（8.0/10）, 《Activation Denoising: A Robustness View on Parallel vs Sequential LLM Quantization》（7.0/10）, 《VisionWeave: Weaving Elastic Visual Representations as a Native Capability of MLLMs》（7.0/10）</p>
-<p>这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。</p>
+<p>今天筛读 9 篇论文（精读 6、速读 3），主线集中在 LLM 权重量化与低比特部署。</p>
+<p>最值得看的是两篇 8.0 分精读：CurveTQ 用曲率加权搜索做免旋转的 Trellis 量化，以及 Few Bits, One Law 探索 W2A4KV2 极低比特配置；速读中 LoRA 条件门控（7.0）也值得留意。</p>
+<p>普通读者可先读这两篇精读的摘要与方法图，建立对低比特量化路线的整体印象，再按兴趣挑速读补细节。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -77,7 +76,7 @@
     <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Align, Then Correct: Training-Free Two-Stage Low-Rank Compensation for Extremely Quantized Large Language Models">Align, Then Correct: Training-Free Two-Stage Low-Rank Compensation for Extremely Quantized Large Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="SoloQ: Calibration-Free Quantization for Diffusion Language Models">SoloQ: Calibration-Free Quantization for Diffusion Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="AlignQuant: Tile-Aligned Mixed-Precision Quantization for Efficient LLM Generation">AlignQuant: Tile-Aligned Mixed-Precision Quantization for Efficient LLM Generation</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Few Bits, One Law: Toward W2A4KV2">Few Bits, One Law: Toward W2A4KV2</span></li><li><span class="dpr-home-dashboard-paper-title" title="CurveTQ: Rotation-Free Trellis Quantization of LLM Weights via Curvature-Weighted Search">CurveTQ: Rotation-Free Trellis Quantization of LLM Weights via Curvature-Weighted Search</span></li><li><span class="dpr-home-dashboard-paper-title" title="Adaptive Visual Token Reduction for Accelerated Image Understanding">Adaptive Visual Token Reduction for Accelerated Image Understanding</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>6</strong></span></div>
 </section>
@@ -87,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">10 篇</strong>
+    <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="DIPrune: Task-Aware Token Pruning with Dual Importance for Efficient Multimodal Language Models">DIPrune: Task-Aware Token Pruning with Dual Importance for Efficient Multimodal Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="Activation Denoising: A Robustness View on Parallel vs Sequential LLM Quantization">Activation Denoising: A Robustness View on Parallel vs Sequential LLM Quantization</span></li><li><span class="dpr-home-dashboard-paper-title" title="VisionWeave: Weaving Elastic Visual Representations as a Native Capability of MLLMs">VisionWeave: Weaving Elastic Visual Representations as a Native Capability of MLLMs</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Adaptive Utilization of Low-Rank Adaptation via Conditioned Gating">Adaptive Utilization of Low-Rank Adaptation via Conditioned Gating</span></li><li><span class="dpr-home-dashboard-paper-title" title="Quantize by Drift: Label-Free Mixed-Precision Post-Training Quantization for Text Embedders">Quantize by Drift: Label-Free Mixed-Precision Post-Training Quantization for Text Embedders</span></li><li><span class="dpr-home-dashboard-paper-title" title="Layerwise Error Attribution for Fast and Robust Mixed-Precision Post-Training Quantization">Layerwise Error Attribution for Fast and Robust Mixed-Precision Post-Training Quantization</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>10</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>3</strong></span></div>
 </section>
 </div>
 
