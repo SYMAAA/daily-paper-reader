@@ -1064,6 +1064,10 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    paper_date = os.getenv("DPR_PAPER_DATE", "")
+    if paper_date:
+        args.preserve_carryover = True
+
     input_path = args.input
     if not os.path.isabs(input_path):
         input_path = os.path.abspath(os.path.join(ROOT_DIR, input_path))
@@ -1119,6 +1123,9 @@ def main() -> None:
     group_start(f"Step 5 - select {os.path.basename(input_path)}")
     log_substep("5.2", "构建评分论文列表", "START")
     try:
+        if paper_date:
+            from paper_date import papers_on_date
+            papers = papers_on_date(papers, paper_date)
         scored_papers = build_scored_papers(papers, llm_ranked)
         log(f"[INFO] scored_papers={len(scored_papers)}")
     finally:
@@ -1131,15 +1138,18 @@ def main() -> None:
         if ignore_seen_ids:
             log("[INFO] skims/backfill 模式：已关闭历史 seen_ids 过滤（输出数量更完整）。")
     else:
-        seen_ids = collect_seen_ids(archive_root, TODAY_STR, active_tags=active_carryover_tags)
+        seen_ids = collect_seen_ids(archive_root, TODAY_STR, active_tags=None if paper_date else active_carryover_tags)
     log_substep("5.3", "加载 carryover 并构建候选集", "START")
     try:
-        carryover_items, _delta = load_recent_carryover(
-            CARRYOVER_PATH,
-            today_date,
-            carryover_days,
-            active_tags=active_carryover_tags,
-        )
+        if paper_date:
+            carryover_items, _delta = [], 0
+        else:
+            carryover_items, _delta = load_recent_carryover(
+                CARRYOVER_PATH,
+                today_date,
+                carryover_days,
+                active_tags=active_carryover_tags,
+            )
         if args.carryover_only:
             candidate_by_key: Dict[str, Dict[str, Any]] = {}
             for item in carryover_items:
@@ -1194,7 +1204,8 @@ def main() -> None:
             carryover_days=carryover_days,
             updated_date=TODAY_STR,
         )
-        save_json(carryover_payload, CARRYOVER_PATH)
+        if not args.preserve_carryover:
+            save_json(carryover_payload, CARRYOVER_PATH)
         group_end()
         return
 
@@ -1255,3 +1266,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

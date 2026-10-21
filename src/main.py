@@ -565,12 +565,44 @@ def main() -> None:
         action="store_false",
         help="强制执行 Step 1（全量数据拉取），即使 Supabase 已启用。",
     )
+    parser.add_argument("--paper-date", help="Recover one UTC publication day (YYYY-MM-DD); requires Supabase.")
     args = parser.parse_args()
 
     python = sys.executable
 
-    sidebar_date_label = resolve_sidebar_date_label(args.fetch_days)
-    run_date_token = resolve_run_date_token(args.fetch_days)
+    if args.paper_date:
+        from paper_date import publication_window
+        try:
+            start, end = publication_window(args.paper_date)
+        except ValueError as exc:
+            parser.error(str(exc))
+        if end > datetime.now(timezone.utc):
+            parser.error("paper-date must be a completed UTC day")
+        if args.run_enrich or args.fetch_mode == "skims" or args.fetch_days not in (None, 1):
+            parser.error("paper-date requires standard mode, no enrichment, and fetch-days absent or 1")
+        if args.skip_fetch is False or not should_skip_fetch():
+            parser.error("paper-date requires existing Supabase BM25 and vector recall; local fetch is unsupported")
+        from paper_date import require_source_day
+        try:
+            require_source_day(get_source_backend(_load_full_config(), "arxiv"), args.paper_date)
+        except Exception as exc:
+            parser.error(f"source preflight failed: {exc}")
+        run_date_token = start.strftime("%Y%m%d")
+        docs_root = load_arxiv_paper_setting().get("docs_dir") or "docs"
+        for target in (
+            os.path.join(ROOT_DIR, "archive", run_date_token),
+            os.path.join(ROOT_DIR, docs_root, run_date_token[:6], run_date_token[6:]),
+            os.path.join(ROOT_DIR, docs_root, run_date_token),
+        ):
+            if os.path.exists(target):
+                parser.error(f"refusing to overwrite existing recovery target: {target}")
+        os.environ["DPR_PAPER_DATE"] = args.paper_date
+        args.skip_fetch = True
+        sidebar_date_label = args.paper_date
+    else:
+        os.environ.pop("DPR_PAPER_DATE", None)
+        sidebar_date_label = resolve_sidebar_date_label(args.fetch_days)
+        run_date_token = resolve_run_date_token(args.fetch_days)
     os.environ["DPR_RUN_DATE"] = run_date_token
     print(f"[INFO] DPR_RUN_DATE={run_date_token}", flush=True)
     profile_tag = str(args.profile_tag or os.getenv("DPR_FILTER_PROFILE_TAG") or "").strip()
@@ -717,3 +749,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

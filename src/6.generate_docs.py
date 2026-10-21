@@ -2832,7 +2832,7 @@ def main() -> None:
         mode = mode.split(",", 1)[0].strip()
 
     docs_dir = args.docs_dir or resolve_docs_dir()
-    created_reports = backfill_history_day_reports(docs_dir)
+    created_reports = 0 if os.getenv("DPR_PAPER_DATE") else backfill_history_day_reports(docs_dir)
     if created_reports > 0:
         log(f"[INFO] 已补齐历史日报 README：{created_reports} 个")
 
@@ -3120,3 +3120,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

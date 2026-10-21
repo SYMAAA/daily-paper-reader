@@ -64,6 +64,9 @@ def log(message: str) -> None:
 
 
 def resolve_supabase_recall_window(config: Dict[str, Any], end_dt: datetime | None = None) -> tuple[datetime, datetime]:
+  if os.getenv("DPR_PAPER_DATE"):
+    from paper_date import publication_window
+    return publication_window(os.environ["DPR_PAPER_DATE"])
   paper_setting = (config or {}).get("arxiv_paper_setting") or {}
   try:
     days = int(paper_setting.get("days_window") or 9)
@@ -1242,3 +1245,4 @@ def main() -> None:
 
 if __name__ == "__main__":
   main()
+
