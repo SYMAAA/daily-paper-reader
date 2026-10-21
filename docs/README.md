@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-09</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-10</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 9 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 4 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>3</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>2</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-09 00:20:31 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-21 08:23:11 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今天筛读 9 篇论文（精读 6、速读 3），主线集中在 LLM 权重量化与低比特部署。</p>
-<p>最值得看的是两篇 8.0 分精读：CurveTQ 用曲率加权搜索做免旋转的 Trellis 量化，以及 Few Bits, One Law 探索 W2A4KV2 极低比特配置；速读中 LoRA 条件门控（7.0）也值得留意。</p>
-<p>普通读者可先读这两篇精读的摘要与方法图，建立对低比特量化路线的整体印象，再按兴趣挑速读补细节。</p>
+<p>今日精读2篇、速读2篇，重点考察超低比特量化如何保住模型预测保真度，以及2-Bit向量量化LLM的实用性提升。最值得看的是《FidelityQ》的9.0分保真度方案和《SAGE》的8.0分2-Bit落地路径。普通读者可先读这两篇精读文章，速读文章中的INT4 KV Cache和变长编码可作为补充参考。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Few Bits, One Law: Toward W2A4KV2">Few Bits, One Law: Toward W2A4KV2</span></li><li><span class="dpr-home-dashboard-paper-title" title="CurveTQ: Rotation-Free Trellis Quantization of LLM Weights via Curvature-Weighted Search">CurveTQ: Rotation-Free Trellis Quantization of LLM Weights via Curvature-Weighted Search</span></li><li><span class="dpr-home-dashboard-paper-title" title="Adaptive Visual Token Reduction for Accelerated Image Understanding">Adaptive Visual Token Reduction for Accelerated Image Understanding</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="FidelityQ: Preserving Predictive Fidelity in Ultra-Low-Bit Language Model Quantization">FidelityQ: Preserving Predictive Fidelity in Ultra-Low-Bit Language Model Quantization</span></li><li><span class="dpr-home-dashboard-paper-title" title="SAGE: Pushing 2-Bit Vector-Quantized LLMs toward Real-World Usability">SAGE: Pushing 2-Bit Vector-Quantized LLMs toward Real-World Usability</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>6</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>2</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">3 篇</strong>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Adaptive Utilization of Low-Rank Adaptation via Conditioned Gating">Adaptive Utilization of Low-Rank Adaptation via Conditioned Gating</span></li><li><span class="dpr-home-dashboard-paper-title" title="Quantize by Drift: Label-Free Mixed-Precision Post-Training Quantization for Text Embedders">Quantize by Drift: Label-Free Mixed-Precision Post-Training Quantization for Text Embedders</span></li><li><span class="dpr-home-dashboard-paper-title" title="Layerwise Error Attribution for Fast and Robust Mixed-Precision Post-Training Quantization">Layerwise Error Attribution for Fast and Robust Mixed-Precision Post-Training Quantization</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="KV4-RL: Unlocking Faster Asynchronous Rollouts for RLVR with INT4 KV Cache Quantization">KV4-RL: Unlocking Faster Asynchronous Rollouts for RLVR with INT4 KV Cache Quantization</span></li><li><span class="dpr-home-dashboard-paper-title" title="VLCQ: Post-training quantization for deep neural networks using variable length coding">VLCQ: Post-training quantization for deep neural networks using variable length coding</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>3</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>2</strong></span></div>
 </section>
 </div>
 
