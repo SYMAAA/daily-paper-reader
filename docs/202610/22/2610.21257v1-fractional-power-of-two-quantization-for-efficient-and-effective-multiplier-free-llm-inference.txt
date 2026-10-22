@@ -1,0 +1,1520 @@
+Title: Fractional Power-of-Two Quantization for Efficient and Effective Multiplier-Free LLM Inference
+
+URL Source: https://arxiv.org/pdf/2610.21257v1
+
+Published Time: Fri, 16 Oct 2026 00:43:56 GMT
+
+Number of Pages: 37
+
+Markdown Content:
+# Fractional Power-of-Two Quantization for Efficient and Effective Multiplier-Free LLM Inference ∗
+
+Sunghyun Wee 
+
+Seoul National University LG Electronics 
+
+wsh05@snu.ac.kr 
+
+Geunjae Choi †
+
+LG Electronics 
+
+cgj.choi@lge.com 
+
+Hyeonjin Kim †
+
+Seoul National University 
+
+peaceful1@snu.ac.kr 
+
+Suyoung Kim †
+
+Seoul National University 
+
+ksyo96@snu.ac.kr 
+
+Nojun Kwak ‡
+
+Seoul National University 
+
+nojunk@snu.ac.kr 
+
+Abstract 
+
+Large Language Models (LLMs) demand efficient inference, where the multiply-accumulate (MAC) operations in linear projections dominate compute and energy cost. Post-training quantization (PTQ) reduces this cost by mapping weights and activations to low-bit integers. Power-of-Two (PoT) weight quantization promises efficient multiplier-free LLM inference via shift-add logic, but suffers significant accuracy degradation at low bitwidths due to its coarse base-2 quantization grid. We introduce Fractional PoT (FPoT) , a base-√2 (half-octave) fractional PoT grid that achieves practical 4-bit weight quantization while preserving a fully integer shift-add datapath. The method combines (i) the base-√2 weight grid with uniform integer activations, (ii) a calibration-time grid-alignment refinement absorbed into the static per-channel scale, and (iii) a lightweight 1-adder √2
+
+approximation whose error is absorbed during weight calibration via approximate-grid quantization, yielding a processing element (PE) with significantly fewer gates than a 4-bit integer multiplier. On Llama-3-8B with 4-bit weight and activation quantization, FPoT improves zero-shot commonsense reasoning performance by 
+
+8.72% relative to the PoT baseline, while maintaining performance close to the uniform integer baseline, with only a negligible 0.4% p degradation. These results hold across various configurations spanning seven models and three bit-widths. Furthermore, FPoT can be integrated with state-of-the-art LLM PTQ methods, demonstrating framework-agnostic applicability. 
+
+1 Introduction 
+
+The rapid proliferation of Large Language Models (LLMs) [Touvron et al., 2023, Grattafiori et al., 2024, Yang et al., 2024, Jiang et al., 2023] has transformed natural language processing, yet their deployment on resource-constrained edge devices remains challenging. One of the dominant costs in LLM inference is the multiply-accumulate (MAC) operation within Transformer [Vaswani et al., 2017] linear projections, which account for virtually all parameters and a majority of inference energy [Wang et al., 2020, Sze et al., 2017]. Recent post-training quantization (PTQ) [Ashkboos et al., 2024, Liu et al., 2025, Hu et al., 2025, Lin et al., 2024a] has pushed integer (INT) quantization 
+
+> ∗Accepted at NeurIPS 2026
+> †Equal contribution
+> ‡Corresponding author Preprint. arXiv:2610.21257v1 [cs.LG] 15 Oct 2026
+
+to 4-bit weights, activations, and key-value (KV) cache at near-lossless accuracy, making 4-bit the practical operating point: 8-bit pays with costly multipliers, while lower bits collapse LLM accuracy. Power-of-Two (PoT) quantization, also known as logarithmic quantization [Elhoushi et al., 2021, Li et al., 2020], offers a multiplier-free pathway and further reduces computation: constraining weights to ±2n allows MAC operations to be substituted with bit-wise shifts and an integer addition, substantially reducing the per-MAC energy. Register-Transfer Level (RTL) synthesis on Samsung 5 nm shows a PoT weight MAC at 0.42 × the energy of an equivalent INT MAC [Przewlocka-Rus et al., 2022]. Though efficient, accuracy remains the central obstacle of PoT quantization. Standard PoT places representable levels at geometric intervals of factor 2 (one octave), yielding a worst-case rounding error of 41 .4% (21/2 −1) at the midpoint under a 4-bit round-to-nearest strategy. While this coarseness is tolerable for Convolutional Neural Networks (CNNs) [Elhoushi et al., 2021, Li et al., 2020, 2023], it causes catastrophic degradation in LLMs: perplexity (PPL) degradation of +9 .5 to +107 .5 when PoT is applied to both weights and activations, or +1 .43 when restricted to weights alone. Standard PoT is not a viable drop-in replacement for multiplication operations in LLMs. 
+
+In this work, we show that the accuracy barriers of 4-bit PoT stem from a grid mismatch with the LLM weight statistics, and introduce Fractional PoT (FPoT) to address this. On Llama-3-8B at 4-bit, applying FPoT to weights reaches on-par performance with the uniform INT baseline (only 
+
+0.4% p 0-shot degradation), while delivering an 8.72% relative gain over standard PoT. Throughout this paper, we use near-lossless to denote configurations whose perplexity increase remains within 
+
++0 .5 and whose downstream accuracy drop remains within 1.0%p of the uniform INT baseline. Our contributions are as follows. • Theoretically grounded base-√2 grid for 4-bit LLMs : We conduct a Gaussian-proxy analysis to identify base-√2 as the optimal integer-resolution PoT grid at 4-bit, halving the worst-case relative error of standard PoT (41.4% →18.9%). • Approximate-grid quantization with low computational overhead : FPoT quantizes weights to the actual hardware grid using a 1-adder √2 approximation. The resulting processing element (PE) requires significantly fewer gates than a 4-bit integer multiplier. • Near-lossless performance over uniform INT baselines : FPoT integrates with state-of-the-art LLM PTQ frameworks at comparable overhead (Appendix J), achieving performance on par with uniform INT baselines. 
+
+2 Related Work 
+
+2.1 Post-Training Quantization (PTQ) for LLMs 
+
+Uniform INT weight quantization methods such as GPTQ [Frantar et al., 2023] and AWQ [Lin et al., 2024b] achieve competitive accuracy at 4-bit via Hessian-weighted error compensation and activation-aware weight scaling. Based on these works, a line of research on quantizing activations to low-bits emerged for more efficient calculation. However, activation quantization is more challenging due to the high-magnitude outliers concentrated in a small subset of channels [Dettmers et al., 2022]. Extreme outliers cause uniform INT4 activation quantization to collapse most activations to zero under a per-tensor scale dominated by the outlier channels. Gradually, attempts to mitigate such outliers emerged. Early approaches such as SmoothQuant [Xiao et al., 2023] migrate the quantization difficulty from activations to weights via per-channel scaling. Recent methods resolve this via rotation-based preprocessing that redistributes outliers across dimensions: QuaRot [Ashkboos et al., 2024] applies randomized Hadamard rotations, SpinQuant [Liu et al., 2025] learns globally optimal rotations, OSTQuant [Hu et al., 2025] jointly trains rotation with per-channel smooth scales for tighter control, and DuQuant [Lin et al., 2024a] adds dual block-diagonal transforms and channel permutation. These approaches collectively enable 4-bit weights, 4-bit activations, 4-bit KV cache (W4A4KV4) uniform quantization at near-lossless accuracy. While the aforementioned methods enable practical 4-bit activation quantization, they mainly focus on uniform quantization grids. In this work, we apply logarithmic weight quantization to the SoTA quantization methods and demonstrate that it can reach comparable performance with better efficiency. 22.2 Power-of-Two (PoT) and Shift-based Quantization 
+
+PoT quantization [Elhoushi et al., 2021] is a family of methods that constrains weights to ±2n values and replaces multipliers with barrel shifters. Prior works on CNN include DeepShift [Elhoushi et al., 2021], APoT [Li et al., 2020], and DenseShift [Li et al., 2023]. These methods are either not directly applicable to LLMs, or represents weights as sums of multiple PoT terms, requiring n sequential shift-adds per MAC. For LLMs, PoT-PTQ [Wang et al., 2025] is a base-2 quantization that achieves 2–3-bit via data-agnostic scale initialization plus residual fine-tuning. Concurrent with our work, LogART [Xu et al., 2026] extends logarithmic PTQ with learnable rounding and dynamic base allocation between base-2 and base-√2. However, both methods retain floating-point (FP) activations at 16-bit precision (FP16). Since the activations are stored in high bitwidths, the main operation of the previous works is 
+
+FP16 × PoT , requiring FP16 accumulators that cannot be simplified to an integer shift-add unit. Our FPoT pairs a fixed half-octave grid with uniform INT activations, enabling a fully integer shift-add PE. 
+
+Position of this work. Between the two distinct lines of work—activation quantization, which enables fully INT-only arithmetic, and PoT quantization, which replaces multipliers with shift-add PE—a gap remains. Our method, FPoT, aims to address this gap: a multiplier-free LLM quantization method that retains uniform INT activations and composes with recent PTQ frameworks. State-of-the-art uniform INT quantization methods [Ashkboos et al., 2024, Liu et al., 2025, Hu et al., 2025, Lin et al., 2024a] achieve near-lossless W4A4 but retains integer multipliers. PoT-based methods are either CNN-targeted [Elhoushi et al., 2021, Li et al., 2020, 2023], or retain FP activations [Wang et al., 2025, Xu et al., 2026]. FPoT can pair base-√2 weight quantization with SoTA uniform INT activation quantization to achieve efficient and effective W4A4 quantization. √2 is approximated with 1-adder, where the approximation cost is absorbed via approximate-grid quantization (§3). FPoT realizes a fully integer shift-add PE at near-lossless W4A4KV4 accuracy. 
+
+3 Methodology 
+
+Our method applies base-√2 quantization to all linear projection weights of each Transformer block while maintaining uniform INT quantization for activations and the key-value (KV) cache. This design isolates the logarithmic grid to static weights, where calibration can absorb quantization error, while preserving hardware-friendly uniform INT formats for dynamic activations and KV-cache. Weight distributions are redistributed by state-of-the-art LLM PTQ preprocessing (Appendix A) prior to GPTQ calibration, and a calibration-time weight grid-alignment further refines the per-channel scale. In brief, such methods apply learned rotations and per-channel scaling to redistribute channel-concentrated outliers, producing smoother distributions amenable to the logarithmic grid. The transform adds negligible overhead ( ≈0.02% of weight MACs). 
+
+Grid resolution and formulation. Standard PoT quantization places representable levels at geometric intervals of factor 2 (one octave), yielding a worst-case relative quantization error of 
+
+21/2 − 1 ≈ 41 .4% at the midpoint between adjacent levels. This coarse resolution is a fundamental accuracy bottleneck for LLM weight quantization using PoT. We introduce fractional exponent resolution parameter k ∈ Z>0 (FPoT), an extension of the PoT grid. For a per-channel scale s > 0 and n levels per sign, the FPoT quantized value is: 
+
+QFPoT (w; s, n, k ) = sgn( w) · s · 2 clip  
+
+> 
+> k·log 2
+> |w|
+> s
+> 
+> ,0, n −1
+> 
+> /k
+
+, (1) where ⌊·⌉ denotes rounding to the nearest integer, and the exponent index is clipped to [0 , n −1] before division by k. For k=1 , Eq. (1) reduces to standard PoT. For k=2 (half-octave grid), representable values are spaced at intervals of 21/2 ≈ 1.414 , reducing the worst-case relative error to 21/4 − 1 ≈
+
+18 .9% —roughly a 2.2× improvement in grid resolution. We analyze the optimality of k=2 for 4-bit LLM weight quantization in §4.1. 
+
+Signed quantization with k-adaptive zero threshold. The zero threshold follows naturally from the grid geometry. For a FPoT grid with minimum exponent index e=0 , the log-domain decision 3xact                     
+
+> (INT4)
+> w
+> (INT4)
+> 4×4 MUL
+> ACC
+> 1.00× cost
+> (a) INT4 MAC
+> xact
+> (INT4) exp e
+> (PoT)
+> Barrel Shifter
+> ACC
+> 0.38× cost
+> (b) PoT
+> xact
+> (INT4) exp e
+> (FPoT)
+> Barrel Shifter
+> × 2
+> (1-add)
+> ACC
+> even eodd e
+> see (d)
+> ~0.50× cost
+> (c) FPoT (Ours)
+> y=xe/2
+> yy1
+> ADD
+> =y+y1 = 1.5 × y
+> (6.1% error vs 2, absorbed by ApproxGrid)
+> (d) 2Approx. Detail (1-adder)
+
+Figure 1: PE architecture: INT4 multiplier, PoT barrel shifter, and FPoT (ours). FPoT adds one adder and a MUX; √2 ≈ y + y≫1 = 1 .5 (6.1% error, absorbed by approximate-grid quantization, §3). boundary between “round to e=0 ” and “round to zero” yields: 
+
+τk = 2 −1/(2 k), (2) so that |w|/s < τ k maps to zero. At k=2 , τ2 ≈ 0.841 ; the resulting fraction of weights mapped to zero and its accuracy implications are analyzed in §4.1. The complete FPoT quantization procedure, including signed representation, k-adaptive zero thresh-olding, and the inference-time hardware decomposition, is given in the pseudocode in Appendix F. 
+
+Hardware implications. The stored weight is encoded as b bits with one sign bit and a magnitude code m ∈ { 0, . . . , 2b−1−1}. When m=0 the MAC is skipped (zero-gating); otherwise the exponent index e = m−1 yields the dequantized value ˆw = sgn( w) · s · 2e/k . For k=2 , ⌊e/ 2⌋ and e mod 2 are direct wire selections from the magnitude bits (Appendix F). Combining FPoT weights with uniform INT activations, the shift-accumulate MAC becomes: 
+
+y = X
+
+> i
+
+sgn( wi) · (xi · 2⌊ei/2⌋) · (√2) ei mod 2 , (3) which replaces integer multipliers with barrel shifters plus a lightweight ×√2 unit for odd exponents (∼50% of MACs). Activations remain in uniform INT format (Appendix D provides the supporting per-projection analysis). The entire FPoT compute unit shares a single barrel shifter with PoT; the only additional logic is a 1-adder √2 approximation unit and a multiplexer (MUX) selected by the least significant bit (LSB) of the weight (Fig. 1). This shift-accumulate structure replaces all 4-bit integer multipliers in every linear projection of each Transformer block with a uniform FPoT PE. 
+
+Approximate-grid quantization. The odd-e path above requires a ×√2 coefficient. A 1-adder realization ( x + x≫1 = 1 .5x) deviates from √2 ≈ 1.414 by 6.1% , which would normally degrade accuracy under naive post-hoc substitution—quantizing to the exact FPoT grid and only replacing the coefficient at dequantization. Our solution is approximate-grid quantization : we quantize weights to the nearest level in the actual hardware grid (i.e., using 1.5 for odd e instead of √2), so that weight calibration absorbs the approximation as part of the quantization grid rather than as post-hoc distortion. Empirical validation of this scheme is reported in §5.3, with the resulting hardware cost analyzed in §4.2. 
+
+Weight grid-alignment. We additionally evaluate a calibration-time grid-alignment refinement applicable to both PoT and FPoT grids. Since weights are static after calibration, the optimal phase offset can be absorbed into the per-channel scale at zero inference overhead . We add a phase-shift refinement evaluating G candidate scales 
+
+sg = sbase · 2g/G , g = 0 , 1, . . . , G −1, (4) and pick per output-channel the g∗ minimizing MSE between raw weights and their FPoT reconstruc-tion. The winning sg∗ replaces sbase as a static per-channel weight scale, so the deployed architecture is identical to unaligned FPoT. 41 2 3 4 5              
+
+> FPoT shape parameter k
+> 0.05 0.10 0.15 0.20
+> MSE
+> (a) MSE vs. k
+> FPoT sweep PoT FPoT (Ours) uniform INT4 Optimal k1.83
+> 42024
+> Weight value w
+> 0.0 0.1 0.2 0.3 0.4 0.5
+> Density
+> NBE = 0.8773
+> (b) PoT
+> 42024
+> Weight value w
+> NBE = 0.9364
+> (c) FPoT (Ours)
+
+Figure 2: (a) MSE vs. shape parameter k for N (0 , 1) weights at 4-bit ( N =15 levels): the MSE is minimized at k⋆ ≈ 1.8, so the integer choice k=2 is near-optimal. (b, c) Bin-occupancy under the Gaussian proxy. FPoT concentrates levels near the high-density mode, while PoT spreads levels across an excessively wide range, leaving most of them in the sparsely-populated tail. Dashed curves: input density pW .
+
+4 Analysis 
+
+We analyze why the FPoT base-√2 grid is optimal for 4-bit LLM weight quantization (§4.1) and quantify its hardware cost relative to INT and standard PoT baselines (§4.2). 
+
+4.1 Grid-Matching Analysis Gaussian proxy. Raw LLM weights are far from Gaussian: they exhibit heavy-tailed, leptokur-tic distributions with high-magnitude outliers concentrated in a few channels. Recent LLM PTQ preprocessing redistributes channel-concentrated outliers across dimensions, reducing kurtosis and equalizing per-channel dynamic range. We analyze a zero-mean symmetric distribution whose log-magnitude is unimodal—a property that holds for the preprocessed weights, with the Gaussian 
+
+w ∼ N (0 , σ 2) serving as a tractable analytical proxy. Under this proxy, u = log 2 |w| is approx-imately Gaussian in log-space with standard deviation 1/(√2 ln 2) ≈ 1.02 octaves (derivation in Appendix B.2), so ∼95% of probability mass concentrates within ∼4 octaves around the mode. Empirically, the preprocessed weight distributions of all seven models studied closely match this Gaussian-proxy prediction (Appendix C), validating its use for 4-bit grid design. 
+
+Optimal base under the Gaussian proxy. A PoT quantizer with step ratio β = 2 1/k and N
+
+levels covers a dynamic range βN −1; with N =15 , k=1 yields a 16 ,384 × range that far exceeds the ∼4-octave preprocessed weight spread, k=2 yields 128 × (aligned), and k=4 yields 11 × (tail clipping). Numerically minimizing the MSE on w ∼ N (0 , 1) with 15 levels while jointly optimizing the scale s yields β⋆ ≈ 20.55 (effective k⋆ ≈ 1.8), very close to k=2 (Fig. 2): FPoT k=2 achieves MSE = 1 .27 × INT4, while PoT wastes levels near zero ( 3.21 ×) and k≥3 suffers dynamic range starvation ( 2.87 × at k=3 , 5.37 × at k=4 ). This optimality is bit-width specific—at 8-bit the optimal shifts to k⋆ ≈ 19 —so the k=2 choice is specifically motivated by the 4-bit constraint (8-bit analysis and full numerical table in Appendix B.3). 
+
+Normalized Bin Entropy. To quantify how effectively a grid utilizes its fixed bit budget under a given weight distribution, we introduce the Normalized Bin Entropy (NBE). For a quantizer Q with 
+
+N representable levels and level-occupancy probabilities pi = Pr[ Q(W ) = ℓi], we define 
+
+NBE( Q; pW ) = H(p)log 2 N , H(p) = − PNi=1 pi log 2 pi, (5) where N is the budget-determined number of representable levels (e.g., N =15 for the 4-bit symmetric grids studied here: 7 positive + 7 negative + 1 zero). NBE = 1 iff data mass is uniform across all levels; NBE → 0 as mass concentrates on a single level. Information-theoretically, log 2 N · NBE is the expected Shannon code length per weight, so NBE measures the fraction of the fixed bit budget that carries information (Appendix B.1). Unlike volumetric metrics such as QSUR [Hu et al., 2025], NBE distinguishes grid structures sharing the same dynamic range (Property 4 in Appendix B.1). 5Under the Gaussian proxy, FPoT k=2 achieves NBE = 0 .9364 , surpassing both uniform INT4 (0.9026 ) and PoT ( 0.8773 ): the half-octave log-grid places denser levels where probability mass concentrates near the mode |w| ≈ σ, while PoT wastes levels in the sparsely-populated tail ( 64:1 
+
+range); Fig. 2 visualizes this contrast. Empirical bin occupancy on real LLM weights (Appendix C) closely matches the Gaussian-proxy prediction. 
+
+Implicit magnitude pruning. The k-adaptive zero threshold τk = 2 −1/(2 k) (Eq. 2) interacts with the Gaussian-proxy distribution to map a k-dependent fraction of weights to zero. At k=2 ,
+
+τ2 ≈ 0.841 causes ∼22% of preprocessed weights to be zeroed— implicit magnitude pruning 
+
+that is fully compensated by the 2× finer grid resolution. Empirical measurement on real LLM weights confirms this ratio (Appendix C). These zeroed weights further skip their MACs entirely via zero-gating (§3), providing additional compute reduction beyond the shift-add substitution. Prior PoT methods (DeepShift, APoT) adopt ad-hoc zero strategies without recognizing this k-dependent effect. 
+
+4.2 Hardware Cost Analysis 
+
+We evaluate the hardware benefits of FPoT weight quantization with two complementary metrics: compute-unit (CU) cost from a naive component model and energy from published RTL synthesis data. FPoT is applied to all linear projection layers, converting all weight MACs (6.98 B per token) into shift-accumulate operations (per-projection breakdown in Appendix D). 
+
+Compute Unit Cost. We model hardware cost with a naive component-based analysis (Ap-pendix E.1): an INT multiplier grows quadratically ( W ×A gate-equivalents), while a PoT barrel shifter and FPoT shifter + adder grow linearly. FPoT adds one adder for the √2 approximation (x+x≫1 = 1 .5x, 6.1% error absorbed by approximate-grid quantization, §3). At W4A4, PoT costs 0.38 × and FPoT costs ∼0.50 × the INT multiplier; the O(W A )-vs.-O(W +A) scaling gap widens at higher bit-widths (Table 6). Critically, the additional 1-adder over standard PoT costs only ∼0.12 × extra CU at W4A4 while reducing perplexity overhead by 67% –94% , placing FPoT at the knee of the accuracy–efficiency Pareto frontier (Fig. 3) in the compute-bound prefill regime. Open-source logic synthesis (Yosys [Wolf and Glaser, 2013]) is consistent with the structural ordering INT > FPoT > PoT and the bit-width scaling predicted above (Tables 6–7, Appendix E.2). 
+
+Energy. We anchor the energy comparison to RTL synthesis by Przewlocka-Rus et al. [2022] on Samsung 5 nm (250 MHz, TT corner, 0.6 V, 25°C, 50% toggle rate), which reports a PoT-to-INT energy ratio of 0.42 × at W4A8—a 2.4× reduction per weight MAC. FPoT with the 1-adder √2
+
+unit adds minimal overhead (one adder, active for ∼50% of MACs); we report the FPoT energy ratio as 0.42 –0.46 × at W4A4 ( 0.84 –1.00 × at W4A8; 1.68 –2.00 × at W8A8)—a 2.2–2.4× energy reduction per weight multiply versus INT, with the √2 unit contributing at most 0.04 × overhead for a 50% duty cycle on odd exponents. Appendix E.4 provides per-model accuracy–cost trade-off curves. 
+
+Scope of hardware claims. The 0.42 –0.46 × energy and 0.50 × CU ratios are per weight MAC ,anchored to cell-level RTL synthesis [Przewlocka-Rus et al., 2022]; end-to-end inference energy reduction scales with the fraction of total energy attributable to weight MACs, which is largest in the compute-bound prefill regime and diminishes under memory-bound decode (Limitations, §6). 
+
+5 Experimental Results 
+
+5.1 Experimental Setup 
+
+FPoT is framework-agnostic with respect to the choice of state-of-the-art LLM PTQ preprocessing; for the main results we use the OSTQuant framework [Hu et al., 2025] for preprocessing, with rotation parameters jointly optimized with smooth scaling factors via Riemannian gradient descent for 400 steps with straight-through estimator (STE) gradients through discrete PoT quantization. Final weights are obtained via GPTQ [Frantar et al., 2023] with PoT targets. Cross-framework portability with DuQuant is validated in Appendix J. We evaluate WikiText-2 [Merity et al., 2017] perplexity (PPL ↓)and the unweighted mean of zero-shot accuracy across nine benchmarks (0-shot 9↑, in %): ARC-Challenge, ARC-Easy [Clark et al., 2018], HellaSwag [Zellers et al., 2019], WinoGrande [Sakaguchi 60.25 0.5 1 2 4 8      
+
+> CU Cost (norm. to W4A4 INT)
+> 6789
+> PPL (  )
+> W4A4KV4 W4A8KV8 W8A8KV8
+> (a) PPL vs. CU Cost
+> 0.25 0.5 1248
+> CU Cost (norm. to W4A4 INT)
+> 56 58 60 62 64 66 68 70
+> 0-shot 9 (\%,  )
+> (b) 0-shot 9vs. CU Cost
+> Uniform INT PoT FPoT (Ours) FP (bf16) W4A4KV4 W4A8KV8 W8A8KV8
+
+Figure 3: Accuracy–cost Pareto trade-off for Llama-3-8B. FPoT achieves near-baseline PPL at 
+
+∼0.50 × CU cost across all bit-widths. Per-model plots in Appendix E.4. et al., 2021], PIQA [Bisk et al., 2020], BoolQ [Clark et al., 2019], OpenBookQA [Mihaylov et al., 2018], LAMBADA [Paperno et al., 2016], and Social IQA [Sap et al., 2019]. All zero-shot evaluations are conducted via the lm-eval-harness framework [Gao et al., 2024]. Table 1 reports mean ±std over three calibration seeds (0, 42, 123); all other experiments use a single calibration seed (seed 0) unless the caption explicitly states otherwise. To scale FPoT training to 14B+ models on a single A100-80GB GPU, we implement a fused Triton [Tillet et al., 2019] kernel that merges the FPoT quantize–dequantize–STE pipeline into a single launch, reducing per-projection intermediate memory by 82% .
+
+5.2 Main Results 
+
+Table 1 presents the main comparison of our proposed FPoT method against the non-PoT (uniform INT) baseline and standard PoT across seven models and three bit-width configurations. Our default configuration uses FPoT with G=16 grid-alignment and 1-adder approximate-grid quantization (√2 ≈ 1.5); activations and KV-cache use uniform INT quantization throughout. 
+
+FPoT achieves near-lossless PoT quantization across all settings (per the ∆PPL <+0 .5,
+
+∆0-shot 9 ≥ − 1.0%p criterion stated in the introduction). On Llama-3-8B W4A4KV4, FPoT reduces PPL overhead from +1 .43 (PoT) to +0 .24 —an 83% reduction—while downstream accuracy degra-dation shrinks from −5.6%p to −0.4%p. Since k=2 is specifically optimized for the 4-bit regime (§3), we analyze results primarily within the W4 operating points (W4A4KV4 and W4A8KV8, 14 configurations across seven models): ∆PPL ranges from +0 .05 (Qwen2.5-14B W4A4KV4) to 
+
++0 .26 (Qwen2.5-1.5B W4A8KV8)— strictly below +0 .3 at the designed operating point —with PoT overhead reductions of 71% –94% (67% –94% across all twenty-one configurations including W8A8KV8). The W8A8KV8 configurations lie outside the 4-bit-specific design range yet still satisfy the +0 .5 near-lossless threshold ( ∆PPL up to +0 .42 ), demonstrating that FPoT k=2 generalizes beyond its design point. 
+
+5.3 √2 Approximation Quality 
+
+The FPoT PE requires a fixed ×√2 for odd-exponent weights ( ∼50% of MACs). Table 2 compares canonical signed digit (CSD) shift-add approximations on Llama-3-8B (W4A4KV4) under three strategies: na¨ ıve post-hoc substitution (“Exact Grid”: quantize to exact grid, dequantize with approxi-mate coefficient), approximate-grid quantization (“Approx Grid”: quantize to the nearest level in the actual hardware grid), and Aware training (use the approximate √2 during both OSTQuant training and GPTQ/eval). CU cost is evaluated under the same naive component model as §4.2, revealing that additional CSD adders rapidly consume the FPoT hardware advantage: the 3-adder variant already matches INT4 cost ( 1.00 ×), leaving only the 1-adder at the knee of the Pareto frontier. With na¨ ıve substitution, the 1-adder ( x + x≫1 = 1 .5, 6.1% error) degrades PPL by +0 .17 . However, with approximate-grid quantization, the same 1-adder achieves PPL = 7 .574 —within +0 .01 of exact √2—because weight calibration absorbs the approximation error as part of the quantization grid rather than as post-hoc distortion. The hierarchy Approx Grid > Aware > Exact Grid holds 7Table 1: Main results across models and quantization configurations (mean ±std over 3 calibration seeds). Uniform: OSTQuant uniform INT baseline; PoT (base 2) and FPoT (base √2, Ours) replace the weight grid on the same pipeline; default configuration in §5.2. PPL: WikiText-2 perplexity ( ↓). 0-shot 9: mean zero-shot accuracy across nine benchmarks ( ↑, %). W4A4KV4 W4A8KV8 W8A8KV8 Model Weight Quant PPL ↓ 0-shot 9↑ PPL ↓ 0-shot 9↑ PPL ↓ 0-shot 9↑
+
+Llama-3-8B Uniform 7.36 ±.07 65.2 ±.4 6.60 ±.01 67.5 ±.1 6.16 ±.00 68.2 ±.1
+
+PoT 8.79 ±.04 59.6 ±.6 7.64 ±.02 64.0 ±.7 7.52 ±.12 63.8 ±.7
+
+FPoT (Ours) 7.60 ±.02 64.8 ±.6 6.85 ±.01 67.3 ±.5 6.58 ±.00 67.7 ±.2
+
+Llama-2-7B Uniform 5.97 ±.01 62.1 ±.3 5.63 ±.04 63.8 ±.2 5.48 ±.00 65.1 ±.0
+
+PoT 6.93 ±.00 58.0 ±.1 6.27 ±.03 61.4 ±.7 6.05 ±.04 62.3 ±.2
+
+FPoT (Ours) 6.11 ±.04 61.9 ±.2 5.75 ±.02 63.8 ±.2 5.65 ±.03 64.2 ±.3
+
+Llama-2-13B Uniform 5.26 ±.01 65.6 ±.2 5.03 ±.01 67.1 ±.3 4.89 ±.00 67.7 ±.0
+
+PoT 5.90 ±.02 62.7 ±.5 5.48 ±.01 65.2 ±.3 5.31 ±.03 65.2 ±.7
+
+FPoT (Ours) 5.37 ±.02 65.2 ±.1 5.11 ±.02 66.6 ±.1 5.03 ±.01 67.2 ±.4
+
+Qwen2.5-1.5B Uniform 11.10 ±.14 38.7 ±.4 9.75 ±.03 42.7 ±.6 9.32 ±.00 44.0 ±.2
+
+PoT 13.23 ±.11 37.2 ±.8 11.35 ±.09 39.3 ±.4 11.33 ±.05 38.8 ±1.4
+
+FPoT (Ours) 11.23 ±.03 39.9 ±.4 10.01 ±.03 42.4 ±1.0 9.73 ±.01 43.0 ±.7
+
+Qwen2.5-7B Uniform 7.56 ±.01 66.4 ±.5 7.04 ±.01 68.1 ±.1 6.87 ±.00 68.6 ±.1
+
+PoT 8.22 ±.01 62.9 ±.6 7.56 ±.02 65.5 ±.2 7.57 ±.02 66.2 ±1.0
+
+FPoT (Ours) 7.62 ±.02 66.3 ±.3 7.14 ±.01 68.6 ±.6 7.03 ±.02 68.5 ±.6
+
+Qwen2.5-14B Uniform 6.33 ±.01 68.7 ±.4 5.65 ±.01 71.1 ±.4 5.31 ±.00 71.1 ±.2
+
+PoT 7.21 ±.05 64.8 ±1.1 6.48 ±.05 68.8 ±.3 6.40 ±.01 68.7 ±.4
+
+FPoT (Ours) 6.38 ±.04 68.9 ±.3 5.85 ±.08 71.3 ±.8 5.60 ±.00 72.0 ±.1
+
+Mistral-7B Uniform 5.62 ±.01 66.5 ±.3 5.41 ±.02 67.8 ±.1 5.32 ±.00 68.3 ±.1
+
+PoT 6.00 ±.03 64.6 ±.4 5.69 ±.02 65.5 ±.7 5.71 ±.02 66.4 ±.3
+
+FPoT (Ours) 5.71 ±.05 66.1 ±.5 5.49 ±.04 67.3 ±.4 5.45 ±.07 67.7 ±.4
+
+Table 2: √2 approximation strategies on Llama-3-8B W4A4KV4 (FPoT; single calibration seed). Exact Grid / Approx Grid (Ours) / Aware: see §5.3 for definitions. CU/ ×: same naive component model (§4.2); ‡exact √2 has no finite CSD realization. 0-shot 9 in %. Exact Grid Approx Grid Aware Impl. Value (Err.) Add. CU/ × PPL ↓ 0-shot 9↑ PPL ↓ 0-shot 9↑ PPL ↓ 0-shot 9↑
+
+Exact 1.414 (0%) — N/A ‡ 7.560 64.7 — — — —3-adder 1.438 (1.6%) 3 1.00 × 7.580 64.4 7.569 65.0 7.611 64.3 2-adder 1.375 (2.8%) 2 0.75 × 7.575 64.5 7.584 64.4 7.584 64.8 
+
+1-adder 1.500 (6.1%) 1 0.50 × 7.729 63.4 7.574 64.2 7.625 63.8 
+
+k=1 — 0 0.38 × 8.806 59.0 — — — —   
+
+> ‡Exact √2requires a full multiplier-grade unit (no finite CSD realization); not a shift-add alternative.
+
+for the 1-adder case (PPL 7.574 < 7.625 < 7.729 ): aware training ( 7.625 ) lies between the two extremes since the STE gradient through approximate dequantization is less accurate than through exact dequantization, while smaller approximation errors (2-adder, 3-adder) make all three strategies converge. This yields a simple PE whose compute unit is ∼0.50 × that of an INT4 multiplier with no measurable accuracy loss—a Pareto-optimal point among CSD variants (Table 2): the 2-adder and 3-adder alternatives pay 1.5× and 2× more CU, respectively, for at most a 0.005 PPL improvement, while the 0-adder PoT ( 0.38 ×) incurs an unusable +1 .19 PPL penalty. 85.4 Additional Ablations Preprocessing. Both rotation and per-channel scaling are necessary: without any transform FPoT yields catastrophic PPL = 181 .3; only the full combination (learned rotation + scale) reaches 7.56 ,within +0 .12 of the non-PoT baseline (Table 13, Appendix G.6). 
+
+Full FPoT (weight + activation). Applying the logarithmic grid to both weights and activations degrades accuracy severely (PPL 16 .9–114 .1 at k=1 , 8.21 –52 .49 at k=2 , versus 7.56 for weight-only; Appendix G.3). Uniform INT activations remain the practical choice. 
+
+Weight grid-alignment. Grid-alignment (Eq. 4) reduces PPL by up to −0.051 at k=1 at zero inference cost; at k=2 the finer grid self-corrects ( |∆PPL | ≤ 0.034 ; Appendix G.2). 
+
+Hyperparameter sensitivity. The zero-threshold τ and log-vs-linear rounding mode have negligible impact ( ∆PPL < 0.03 ); see Appendices G.4 and G.5. 
+
+Calibration robustness. FPoT’s data-independent grid boundaries yield robust calibration: 
+
+|∆PPL | ≤ 0.065 across n ∈ { 128 , 256 , 512 } and only +0 .06 –+0 .10 shift from WikiText-2 to C4 (Appendix G.1). 
+
+Cross-framework portability. A different PTQ framework yields comparable FPoT overhead (+0 .05 –+0 .34 PPL; Appendix J, Table 22). 
+
+LogART comparison. In the weight-only setting (W4A16), LogART achieves lower PPL but degrades catastrophically (PPL > 3900) under post-hoc INT4 activation without PTQ preprocessing, while FPoT remains stable (Appendix I, Table 21). 
+
+6 Discussion 
+
+Design rationale and comparison with prior PoT methods. FPoT’s three design choices—a regular geometric grid amenable to GPTQ (vs. APoT’s irregular additive decompositions [Li et al., 2020]), uniform INT activations eliminating runtime log 2 conversion [Elhoushi et al., 2021, Li et al., 2023], and 4-bit grid-resolution targeting (vs. PoT-PTQ’s 2–3-bit scale-calibration focus [Wang et al., 2025])—collectively position FPoT as the only multiplier-free PTQ achieving near-lossless W4A4KV4. LogART [Xu et al., 2026] reports strong W4A16 accuracy but lacks LLM W4A4KV4 evaluation due to absent PTQ preprocessing (Appendix I). 
+
+Broader impact. Multiplier-free LLM inference can reduce the energy consumption and carbon footprint of large-scale deployment. However, cheaper inference may also lower barriers to harmful applications; this work does not introduce new capabilities and applies to existing public models with slightly degraded accuracy. 
+
+Limitations. Efficiency projections use analytical cost models anchored to published RTL syn-thesis [Przewlocka-Rus et al., 2022]; open-source logic synthesis (Yosys [Wolf and Glaser, 2013]) confirms the structural ordering and bit-width scaling (Appendix E.2), and end-to-end RTL/ASIC validation is left for future work. Preprocessing training requires float32 weight copies, limiting single-GPU (80 GB) experiments to ≤14 B parameters. The k=2 optimum is 4-bit specific (8-bit shifts to ≈19 ). All results combine state-of-the-art LLM PTQ preprocessing with GPTQ; compatibility with AWQ or round-to-nearest (RTN) is untested. 
+
+7 Conclusion 
+
+We introduced FPoT—a half-octave fractional PoT weight quantization scheme that, combined with uniform INT activation quantization and state-of-the-art LLM PTQ preprocessing, achieves near-lossless accuracy while enabling multiplier-free shift-add inference. Three contributions enable this result. First, a Gaussian-proxy analysis identifies base-√2 as the optimal integer-resolution grid at 4-bit, halving the worst-case relative error of standard PoT ( 41 .4% →18 .9% ). Second, approximate-grid quantization absorbs the 1-adder √2 hardware error via weight calibration, yielding a PE whose 9compute unit is ∼0.50 × the INT4 multiplier gate count (vs. ∼0.38 × for standard PoT). Third, FPoT achieves consistent near-lossless results across twenty-one configurations spanning seven models and three quantization settings (W4A4KV4 / W4A8KV8 / W8A8KV8), recovering zero-shot accuracy to within 1.0% p of the uniform INT baseline in 20 /21 configurations (mean gap −0.17% p; all 14 
+
+W4 configurations within 0.5% p), and integrates with state-of-the-art LLM PTQ frameworks at comparable overhead (Appendix J). These results suggest that FPoT is a promising pathway toward shift-based LLM inference hardware with near-lossless accuracy, with future work including scaling to larger models, exploring higher bit-widths, and end-to-end RTL/ASIC validation. 
+
+Acknowledgments and Disclosure of Funding 
+
+This work was supported by the Korean Government through grants from IITP (RS-2021-II211343 and RS-2025-25442338) and NRF (RS-2026-25500579). 
+
+References 
+
+Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. QuaRot: Outlier-free 4-bit inference in rotated LLMs. Advances in Neural Information Processing Systems , 37:100213–100240, 2024. Yonatan Bisk, Rowan Zellers, Ronan Le Bras, Jianfeng Gao, and Yejin Choi. PIQA: Reasoning about physical commonsense in natural language. In Proceedings of the AAAI Conference on Artificial Intelligence , volume 34, pages 7432–7439, 2020. Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and Kristina Toutanova. BoolQ: Exploring the surprising difficulty of natural yes/no questions. In Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 1 (Long and Short Papers) , pages 2924–2936, 2019. Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. Think you have solved question answering? Try ARC, the AI2 reasoning challenge. 
+
+arXiv preprint arXiv:1803.05457 , 2018. Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. GPT3.int8(): 8-bit matrix multiplication for transformers at scale. Advances in Neural Information Processing Systems , 35: 30318–30332, 2022. Mostafa Elhoushi, Zihao Chen, Farhan Shafiq, Ye Henry Tian, and Joey Yiwei Li. DeepShift: Towards multiplication-less neural networks. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) Workshops , pages 2359–2368, 2021. Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. OPTQ: Accurate quantization for generative pre-trained transformers. In The Eleventh International Conference on Learning Representations , 2023. Leo Gao, Jonathan Tow, Baber Abbasi, Stella Biderman, Sid Black, Anthony DiPofi, Charles Foster, Laurence Golding, Jeffrey Hsu, Alain Le Noac’h, Haonan Li, Kyle McDonell, Niklas Muennighoff, Chris Ociepa, Jason Phang, Laria Reynolds, Hailey Schoelkopf, Aviya Skowron, Lintang Sutawika, Eric Tang, Anish Thite, Ben Wang, Kevin Wang, and Andy Zou. A framework for few-shot language model evaluation, July 2024. URL https://zenodo.org/records/12608602 .Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, et al. The Llama 3 herd of models. arXiv preprint arXiv:2407.21783 , 2024. Xing Hu, Yuan Cheng, Dawei Yang, Zhixuan Chen, Zukang Xu, Zhihang Yuan, Sifan Zhou, et al. OSTQuant: Refining large language model quantization with orthogonal and scaling transfor-mations for better distribution fitting. In The Thirteenth International Conference on Learning Representations , 2025. 10 Albert Q Jiang, Alexandre Sablayrolles, Arthur Mensch, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Florian Bressand, Gianna Lengyel, Guillaume Lample, Lucile Saulnier, et al. Mistral 7B. arXiv preprint arXiv:2310.06825 , 2023. Xinlin Li, Bang Liu, Rui Heng Yang, Vanessa Courville, Chao Xing, and Vahid Partovi Nia. Dense-Shift: Towards accurate and efficient low-bit power-of-two quantization. In Proceedings of the IEEE/CVF International Conference on Computer Vision , pages 17010–17020, 2023. Yuhang Li, Xin Dong, and Wei Wang. Additive powers-of-two quantization: An efficient non-uniform discretization for neural networks. In International Conference on Learning Representations , 2020. Haokun Lin, Haobo Xu, Yichen Wu, Jingzhi Cui, Yingtao Zhang, Linzhan Mou, Linqi Song, Zhenan Sun, and Ying Wei. DuQuant: Distributing outliers via dual transformation makes stronger quantized LLMs. Advances in Neural Information Processing Systems , 37:87766–87800, 2024a. Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. AWQ: Activation-aware weight quantization for on-device LLM compression and acceleration. Proceedings of Machine Learning and Systems , 6: 87–100, 2024b. Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghuraman Krish-namoorthi, Vikas Chandra, Yuandong Tian, and Tijmen Blankevoort. SpinQuant: LLM quantization with learned rotations. In The Thirteenth International Conference on Learning Representations ,2025. Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer sentinel mixture models. In International Conference on Learning Representations , 2017. Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal. Can a suit of armor conduct elec-tricity? A new dataset for open book question answering. In Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing , pages 2381–2391, 2018. Denis Paperno, Germ´ an Kruszewski, Angeliki Lazaridou, Ngoc-Quan Pham, Raffaella Bernardi, Sandro Pezzelle, Marco Baroni, Gemma Boleda, and Raquel Fern´ andez. The LAMBADA dataset: Word prediction requiring a broad discourse context. In Proceedings of the 54th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 1525–1534, 2016. Dominika Przewlocka-Rus, Syed Shakib Sarwar, H. Ekin Sumbul, Yuecheng Li, and Barbara De Salvo. Power-of-two quantization for low bitwidth and hardware compliant neural networks. In Proceed-ings of the tinyML Research Symposium , San Jose, CA, 2022. Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang, Michael Matena, Yanqi Zhou, Wei Li, and Peter J. Liu. Exploring the limits of transfer learning with a unified text-to-text transformer. Journal of Machine Learning Research , 21(140):1–67, 2020. Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. WinoGrande: An adversarial Winograd schema challenge at scale. Communications of the ACM , 64(9):99–106, 2021. Maarten Sap, Hannah Rashkin, Derek Chen, Ronan Le Bras, and Yejin Choi. Social IQa: Common-sense reasoning about social interactions. In Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Processing (EMNLP-IJCNLP) , pages 4463–4473, 2019. Vivienne Sze, Yu-Hsin Chen, Tien-Ju Yang, and Joel S Emer. Efficient processing of deep neural networks: A tutorial and survey. Proceedings of the IEEE , 105(12):2295–2329, 2017. Philippe Tillet, H. T. Kung, and David Cox. Triton: An intermediate language and compiler for tiled neural network computations. In Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages (MAPL) , pages 10–19, 2019. doi: 10.1145/3315508.3329973. 11 Hugo Touvron, Louis Martin, Kevin Stone, Peter Albert, Amjad Almahairi, Yasmine Babaei, Nikolay Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti Bhosale, et al. Llama 2: Open foundation and fine-tuned chat models. arXiv preprint arXiv:2307.09288 , 2023. Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. Advances in Neural Information Processing Systems , 30, 2017. Sinong Wang, Belinda Z Li, Madian Khabsa, Han Fang, and Hao Ma. Linformer: Self-attention with linear complexity. arXiv preprint arXiv:2006.04768 , 2020. Xinyu Wang, Vahid Partovi Nia, Peng Lu, Jerry Huang, Xiao-Wen Chang, Boxing Chen, and Yufei Cui. PoTPTQ: A two-step power-of-two post-training for LLMs. arXiv preprint arXiv:2507.11959 ,2025. Clifford Wolf and Johann Glaser. Yosys – a free Verilog synthesis suite. In Proceedings of the 21st Austrian Workshop on Microelectronics (Austrochip) , pages 1–6, 2013. Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. SmoothQuant: Accurate and efficient post-training quantization for large language models. In International Conference on Machine Learning , pages 38087–38099. PMLR, 2023. Jiawei Xu, Yi Zheng, Chenghe Sun, Taiyu Zhou, Zuqi Zhang, Jie Li, Lirong Zheng, and Zhuo Zou. LogART: Pushing the limit of efficient logarithmic post-training quantization. In The Fourteenth International Conference on Learning Representations , 2026. An Yang, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chengyuan Li, Dayiheng Liu, Fei Huang, Haoran Wei, et al. Qwen2.5 technical report. arXiv preprint arXiv:2412.15115 , 2024. Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. HellaSwag: Can a machine really finish your sentence? In Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics , pages 4791–4800, 2019. 12 A Preliminaries 
+
+A.1 Uniform Quantization 
+
+Standard uniform (linear) quantization maps a floating-point tensor to a finite set of evenly-spaced levels. For symmetric b-bit quantization with per-token dynamic scale s:
+
+Qlin (x) = clamp 
+
+j xs
+
+m
+
+, −2b−1, 2b−1−1
+
+
+
+· s, (6) where s = ∥x∥∞/(2 b−1−1) . In this work, activations and the KV cache use uniform INT quantization in all configurations, while weights use logarithmic (FPoT) quantization (§3). 
+
+A.2 State-of-the-Art LLM PTQ Preprocessing 
+
+Recent LLM PTQ preprocessing methods (QuaRot [Ashkboos et al., 2024], SpinQuant [Liu et al., 2025], OSTQuant [Hu et al., 2025], DuQuant [Lin et al., 2024a]; see Section 2 for taxonomy) apply learned transformations—orthogonal rotations, per-channel scaling, or their composition—to redistribute channel-concentrated outliers before quantization. For input activation X ∈ Rn×d and weight W ∈ Rd×m, these methods rewrite the linear operation as 
+
+Y = XW = ( XT )( T −1W ) = ˆX ˆW , (7) where T is an invertible transform (orthogonal rotation, scaling matrix, or their composition). This reduces kurtosis and produces smoother distributions amenable to the logarithmic PoT grid. We primarily build on OSTQuant, which jointly trains a Hadamard rotation with per-channel smooth scales via Riemannian gradient descent on the Stiefel manifold (400 steps with STE). The transform adds only ≈0.02% overhead in MAC operations ( ∼49 K additions per layer at d=4 ,096 vs. 218 Mweight MACs). Our FPoT method is compatible with any such preprocessing; we primarily evaluate with OSTQuant and confirm DuQuant portability in Appendix J. 
+
+B Grid-Matching Theory 
+
+B.1 Normalized Bin Entropy: Properties and Proofs 
+
+We establish five properties of Normalized Bin Entropy (NBE, Eq. (5)) that justify its use as a grid-level design metric. 
+
+Property 1 (Bounds). For any probability vector p ∈ ∆N −1, 0 ≤ NBE( p) ≤ 1, with NBE = 1 
+
+iff pi = 1 /N for all i (uniform occupancy), and NBE = 0 iff pi = 1 for some single level i.
+
+Proof. By the non-negativity of Shannon entropy, H(p) ≥ 0 with equality iff p is a point mass. The upper bound H(p) ≤ log 2 N is the maximum-entropy property of the uniform distribution over N
+
+outcomes, proven by Jensen’s inequality applied to −x log x. Dividing by log 2 N yields the stated bounds. 
+
+Property 2 (Information-theoretic interpretation). Let L⋆(p) denote the expected code length of an optimal prefix-free (Shannon–Fano or Huffman) code for the occupancy distribution p. Then 
+
+log 2 N · NBE( p) = H(p) ≤ L⋆(p) < H (p) + 1 .
+
+That is, log 2 N · NBE is the tightest achievable expected code length per weight, and NBE measures the fraction of the fixed-length budget log 2 N that carries information under the data distribution. 
+
+Proof. Shannon’s source coding theorem states that for any distribution p, H(p) ≤ L⋆(p) < H (p)+1 
+
+bits per symbol. Dividing by log 2 N and rearranging yields the claim. 
+
+Property 3 (Affine invariance of level values). NBE depends only on the occupancy probabilities 
+
+p, not on the level values {ℓi}. Consequently, affine relabeling ℓ′ 
+
+> i
+
+= aℓ i + b (a̸ = 0 ) leaves NBE unchanged, provided the induced decision boundaries assign the same weight population to each level. 
+
+Proof. Eq. (5) depends only on p. Under affine relabeling with unchanged decision topology, each pi
+
+is preserved. 13 This property ensures that NBE captures the shape of the level-mass mapping independently of level magnitudes, distinguishing it from value-dependent metrics such as MSE. 
+
+Property 4 (Grid-structure sensitivity under fixed dynamic range). Let Q1, Q 2 be two quantizers with identical N and identical dynamic range [−R, R ] but different level placements {ℓ(1)  
+
+> i
+
+}, {ℓ(2)  
+
+> i
+
+}
+
+(e.g., uniform vs. logarithmic). For a non-uniform weight distribution pW concentrated near 0,generally NBE( Q1; pW )̸ = NBE( Q2; pW ).
+
+Proof sketch. Different level placements yield different decision regions, which partition pW into different mass vectors p(1) ̸ = p(2) . While Shannon entropy can coincidentally coincide on distinct probability vectors (e.g., under permutation), structurally different partitions of a log-concave pW —such as those induced by uniform vs. logarithmic grids—yield mass vectors that differ not merely by permutation but in their degree of concentration, producing distinct entropies. For N (0 , 1) weights with N =15 , uniform INT4 yields NBE = 0 .9026 while FPoT k=2 yields NBE = 0 .9364 (Table 3), quantitatively confirming this claim. This is the property that volumetric utilization metrics (e.g., QSUR [Hu et al., 2025]) lack: they depend only on the bounding hypercube volume, not on the internal level structure. 
+
+Property 5 (Correlation with MSE for log-concave distributions). For log-concave symmetric weight distributions (satisfied by the Gaussian proxy and, after PTQ preprocessing, empirically by LLM weights), the quantizer base β = 2 1/k that maximizes NBE lies within a narrow neighborhood of the base that minimizes MSE. Specifically, for N (0 , 1) weights with 4-bit budget ( N = 15 ), both optima satisfy β⋆ ∈ [2 0.50 , 20.60 ] (equivalently, k⋆ ∈ [1 .67 , 2.00] ). 
+
+Empirical justification. The MSE of a log-base-β quantizer on pW decomposes into a tail-clipping term (decreasing in β, as a larger βN −1 reduces clipped tail mass) and an in-range rounding term (increasing in β, as coarser bins accept larger within-bin errors); the interior optimum balances these effects. NBE exhibits the analogous trade-off: too-small β concentrates mass in tail-proximal bins, too-large leaves high-density bins over-populated. Numerical sweep on N (0 , 1) with N =15 confirms both optima in the stated interval (Table 3, Fig. 2). A formal rate-distortion analysis is left to future work. 
+
+Remark. Properties 1–4 are exact; Property 5 is empirical for our operating regime and serves to justify why NBE-based grid design yields near-MSE-optimal quantizers in practice. 
+
+B.2 Log-Magnitude Distribution Derivation 
+
+Let u = log 2 |w| for w ∼ N (0 , σ 2). Its probability density is 
+
+fU (u) = 2 ln 2 
+
+√2π σ 2u exp 
+
+
+
+− 22u
+
+2σ2
+
+
+
+. (8) Substituting v = u − log 2 σ and expanding near v=0 gives fU ∝ exp( −v2), so the log-magnitude is approximately Gaussian in log-space with standard deviation 1/(√2 ln 2) ≈ 1.02 octaves ( 21.02 ). Consequently, ∼95% of probability mass concentrates within ∼4 octaves around the mode. This ∼4-octave concentration is not unique to exact Gaussians: any symmetric, outlier-suppressed distribution with comparable kurtosis exhibits a similar log-domain spread, which is the condition that PTQ preprocessing enforces. 
+
+B.3 MSE and NBE Across Integer k
+
+Table 3 reports the 4-bit MSE and NBE under the Gaussian proxy across k. The optimal base 
+
+β⋆ ≈ 20.55 yields an effective k⋆ ≈ 1.8 (MSE = 1 .23 × INT4, NBE = 0 .9417 ); integer k=2 is the closest practical choice. 
+
+Bit-width dependence. At 8-bit (127 magnitudes per side), the abundance of levels permits much finer resolution without dynamic-range starvation, shifting the optimal to k⋆ ≈ 19 . FPoT k=2 thus does not generalize as the preferred grid at higher bit-widths. 14 Table 3: MSE and NBE of 4-bit PoT quantizers applied to N (0 , 1) weights ( N =15 levels: 14 non-zero symmetric + 1 zero, log-domain rounding). MSE ratio is relative to uniform INT4. 
+
+Method MSE NBE MSE ratio Uniform INT4 0.0128 0.9026 1.00 ×
+
+PoT 0.0411 0.8773 3.21 ×
+
+FPoT k=2 0.0162 0.9364 1.27 ×
+
+FPoT k=3 0.0368 0.8762 2.87 ×
+
+FPoT k=4 0.0688 0.8115 5.37 ×
+
+Optimal ( k⋆≈1.8) 0.0158 0.9417 1.23 ×
+
+C Empirical Bin Occupancy 
+
+While the Gaussian-proxy bin occupancy (Fig. 2, §4.1) establishes the grid-matching mechanism analytically, we validate this on real LLM weights here. Fig. 4 compares the quantization grids of uniform INT4, PoT, and FPoT on the number line. Fig. 5 shows the aggregated empirical bin occupancy for Llama-3-8B (W4A4KV4). 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0 4.5                      
+
+> gap=0.50
+> Uniform (7 levels in range)
+> 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0 4.5
+> PoT (octave) (5 levels in range)
+> 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0 4.5 Representable value (positive side, scale s= 1 )
+> FPoT (half-octave) (9 levels in range)
+
+Figure 4: Quantization grid comparison: Uniform, PoT (octave), and FPoT (half-octave). The FPoT grid places 2× more levels within the high-density region of the Gaussian weight distribution. 5 0 5Canonical level 0.00 0.05 0.10 0.15 Density       
+
+> NBE=0.8761
+> (a) Uniform
+> 50 050 Canonical level 0.00 0.01 0.02 0.03 Density
+> NBE=0.8982
+> (b) PoT
+> 10 50510 Canonical level 0.0 0.1 0.2 Density
+> NBE=0.9271
+> (c) FPoT
+
+Figure 5: Empirical bin occupancy for Llama-3-8B (W4A4KV4, aggregated across all projections). The pattern closely matches the Gaussian proxy prediction in Fig. 2. We present the bin occupancy distributions of RTN-quantized weights (W4A4KV4) for each model evaluated in this work. These empirical distributions complement the theoretical Gaussian analysis (Fig. 2) and the Llama-3-8B aggregated results (Fig. 5). Across all models, the empirical bin occupancy closely matches the theoretical Gaussian prediction: (a) uniform INT4 exhibits a bell-shaped occupancy with ∼14% zero bin; (b) PoT concentrates 15 weights in the mid-exponent bins ( ±16 , ±32 ) with only ∼3% zero; (c) FPoT achieves more uniform non-zero bin occupancy but maps ∼20 –22% of weights to zero due to the k-adaptive zero threshold 
+
+τ2 = 2 −1/4 ≈ 0.841 (Section 3). The consistency across model families (Llama-2, Llama-3, Qwen2.5) and scales (1.5B–14B) confirms that recent LLM PTQ preprocessing produces weight distributions with similar log-domain concentration, validating the use of the Gaussian proxy analysis for grid design. 
+
+C.1 Per-Projection Breakdown 
+
+Fig. 6 shows the per-projection bin occupancy for Llama-3-8B, complementing the aggregated view in Fig. 5. 16 5 0 50.00 0.05 0.10 0.15 Density 
+
+NBE=0.8788 
+
+Uniform 
+
+WQ
+
+50 0 50 0.00 0.01 0.02 
+
+NBE=0.8973 
+
+PoT 
+
+10 5 0 5 10 0.00 0.05 0.10 0.15 0.20 
+
+NBE=0.9286 
+
+FPoT 
+
+5 0 50.00 0.05 0.10 0.15 Density 
+
+NBE=0.8789 
+
+WK
+
+50 0 50 0.00 0.01 0.02 
+
+NBE=0.8970 
+
+10 5 0 5 10 0.0 0.1 0.2 
+
+NBE=0.9286 
+
+5 0 50.00 0.05 0.10 0.15 Density 
+
+NBE=0.8764 
+
+WV
+
+50 0 50 0.00 0.01 0.02 0.03 NBE=0.8970 
+
+10 5 0 5 10 0.0 0.1 0.2 
+
+NBE=0.9278 
+
+5 0 50.00 0.05 0.10 0.15 Density 
+
+NBE=0.8590 
+
+WO
+
+50 0 50 0.00 0.01 0.02 0.03 NBE=0.8989 
+
+10 5 0 5 10 0.0 0.1 0.2 
+
+NBE=0.9167 
+
+5 0 50.00 0.05 0.10 0.15 Density 
+
+NBE=0.8775 
+
+WGate 
+
+50 0 50 0.00 0.01 0.02 0.03 NBE=0.8969 
+
+10 5 0 5 10 0.0 0.1 0.2 
+
+NBE=0.9280 
+
+5 0 50.00 0.05 0.10 0.15 Density 
+
+NBE=0.8774 
+
+WUp 
+
+50 0 50 0.00 0.01 0.02 0.03 NBE=0.8969 
+
+10 5 0 5 10 0.0 0.1 0.2 
+
+NBE=0.9279 
+
+5 0 5Canonical level 0.00 0.05 0.10 0.15 Density 
+
+NBE=0.8770 
+
+WDown 
+
+50 0 50 Canonical level 0.00 0.01 0.02 0.03 NBE=0.8992 
+
+10 5 0 5 10 Canonical level 0.0 0.1 0.2 
+
+NBE=0.9276 Figure 6: Per-projection bin occupancy of RTN-quantized Llama-3-8B weights (W4A4KV4). Rows: 
+
+WQ, WK , WV , WO , WGate , WU p , WDown . Columns: Uniform, PoT, FPoT. The occupancy pattern is consistent across all seven projections, with FPoT achieving NBE > 0.91 uniformly (0.9167– 0.9286), substantially above PoT and uniform INT4. 17 C.2 Effect of PTQ Preprocessing on Bin Occupancy 
+
+Fig. 7–12 compare the bin occupancy before and after PTQ preprocessing. A consistent pattern emerges: preprocessing increases NBE for uniform INT4 ( +0 .01 to +0 .07 ) and FPoT ( +0 .01 to 
+
++0 .06 ), while slightly decreasing NBE for PoT ( −0.01 to −0.03 ). This confirms that distribution redistribution specifically benefits grids whose dynamic range is matched to the redistributed weight spread ( ∼4 octaves), while the excessively wide PoT grid ( 64:1 ) cannot exploit the narrower post-preprocessing distribution. The effect is most pronounced for Qwen2.5 models, whose raw weights exhibit stronger outlier concentration. 5 0 50.00 0.05 0.10 0.15 Density                 
+
+> NBE=0.8599
+> Uniform Before preprocessing
+> 50 050 0.00 0.01 0.02 0.03 0.04 NBE=0.9111
+> PoT
+> 10 50510 0.0 0.1 0.2
+> NBE=0.9142
+> FPoT
+> 505Canonical level 0.00 0.05 0.10 0.15 Density
+> NBE=0.8761
+> After preprocessing
+> 50 050 Canonical level 0.00 0.01 0.02 0.03 NBE=0.8982
+> 10 50510 Canonical level 0.0 0.1 0.2
+> NBE=0.9271
+
+Figure 7: Bin occupancy before (top) and after (bottom) PTQ preprocessing for Llama-3-8B (W4A4KV4). uniform INT4 NBE rises from 0.8599 to 0.8761 and FPoT from 0.9142 to 0.9271; PoT drops slightly (0.9111 → 0.8982). 5 0 50.00 0.05 0.10 0.15 Density                 
+
+> NBE=0.8662
+> Uniform Before preprocessing
+> 50 050 0.00 0.01 0.02 0.03 0.04 NBE=0.9085
+> PoT
+> 10 50510 0.0 0.1 0.2
+> NBE=0.9177
+> FPoT
+> 505Canonical level 0.00 0.05 0.10 0.15 Density
+> NBE=0.8766
+> After preprocessing
+> 50 050 Canonical level 0.00 0.01 0.02 0.03 NBE=0.8979
+> 10 50510 Canonical level 0.0 0.1 0.2
+> NBE=0.9274
+
+Figure 8: Bin occupancy before (top) and after (bottom) PTQ preprocessing for Llama-2-7B (W4A4KV4). NBE shifts: uniform INT4 0.8662 → 0.8766; FPoT 0.9177 → 0.9274. 18 5 0 50.00 0.05 0.10 0.15 Density 
+
+> NBE=0.8655
+
+Uniform Before preprocessing 
+
+50 0 50 0.00 0.01 0.02 0.03 0.04 NBE=0.9093 
+
+PoT 
+
+10 5 0 5 10 0.0 0.1 0.2 
+
+> NBE=0.9174
+
+FPoT 
+
+5 0 5Canonical level 0.00 0.05 0.10 0.15 Density 
+
+> NBE=0.8766
+
+After preprocessing 
+
+50 0 50 Canonical level 0.00 0.01 0.02 0.03 NBE=0.8981 
+
+10 5 0 5 10 Canonical level 0.0 0.1 0.2 
+
+> NBE=0.9275
+
+Figure 9: Bin occupancy before (top) and after (bottom) PTQ preprocessing for Llama-2-13B (W4A4KV4). NBE shifts: uniform INT4 0.8655 → 0.8766; FPoT 0.9174 → 0.9275. 5 0 50.00 0.05 0.10 0.15 0.20 Density 
+
+> NBE=0.8293
+
+Uniform Before preprocessing 
+
+50 0 50 0.00 0.01 0.02 0.03 0.04 NBE=0.9211 
+
+PoT 
+
+10 5 0 5 10 0.0 0.1 0.2 0.3 NBE=0.8874 
+
+FPoT 
+
+5 0 5Canonical level 0.00 0.05 0.10 0.15 Density 
+
+> NBE=0.8768
+
+After preprocessing 
+
+50 0 50 Canonical level 0.00 0.01 0.02 
+
+> NBE=0.8973
+
+10 5 0 5 10 Canonical level 0.0 0.1 0.2 
+
+> NBE=0.9273
+
+Figure 10: Bin occupancy before (top) and after (bottom) PTQ preprocessing for Qwen2.5-1.5B (W4A4KV4). NBE shifts are large (uniform INT4 0.8293 → 0.8768; FPoT 0.8874 → 0.9273), reflecting strong raw-weight outlier concentration. 19 5 0 50.0 0.1 0.2 Density 
+
+> NBE=0.8065
+
+Uniform Before preprocessing 
+
+50 0 50 0.00 0.02 0.04 0.06 NBE=0.9285 
+
+PoT 
+
+10 5 0 5 10 0.0 0.1 0.2 0.3 
+
+> NBE=0.8644
+
+FPoT 
+
+5 0 5Canonical level 0.00 0.05 0.10 0.15 Density 
+
+> NBE=0.8775
+
+After preprocessing 
+
+50 0 50 Canonical level 0.00 0.01 0.02 0.03 NBE=0.8989 
+
+10 5 0 5 10 Canonical level 0.0 0.1 0.2 
+
+> NBE=0.9282
+
+Figure 11: Bin occupancy before (top) and after (bottom) PTQ preprocessing for Qwen2.5-7B (W4A4KV4). NBE shifts: uniform INT4 0.8065 → 0.8775; FPoT 0.8644 → 0.9282. 5 0 50.0 0.1 0.2 Density 
+
+> NBE=0.8201
+
+Uniform Before preprocessing 
+
+50 0 50 0.00 0.02 0.04 0.06 0.08 NBE=0.9313 
+
+PoT 
+
+10 5 0 5 10 0.0 0.1 0.2 0.3 NBE=0.8701 
+
+FPoT 
+
+5 0 5Canonical level 0.00 0.05 0.10 0.15 Density 
+
+> NBE=0.8787
+
+After preprocessing 
+
+50 0 50 Canonical level 0.00 0.01 0.02 0.03 NBE=0.8995 
+
+10 5 0 5 10 Canonical level 0.0 0.1 0.2 
+
+> NBE=0.9286
+
+Figure 12: Bin occupancy before (top) and after (bottom) PTQ preprocessing for Qwen2.5-14B (W4A4KV4). NBE shifts: uniform INT4 0.8201 → 0.8787; FPoT 0.8701 → 0.9286. 20 D Per-Projection Sensitivity Analysis 
+
+D.1 Per-Projection MAC Breakdown 
+
+Table 4 presents the per-projection MAC breakdown for Llama-3-8B (32 layers, single token); the FFN projections (Gate, Up, Down) dominate at 80 .8% of weight MACs. Table 4: MAC Breakdown per Token for Llama-3-8B (32 Layers) 
+
+Projection MACs (M) % of Total 
+
+WQ 537 7.7% 
+
+WK 134 1.9% 
+
+WV 134 1.9% 
+
+WO 537 7.7% Gate 1,879 26.9% Up 1,879 26.9% Down 1,879 26.9% 
+
+Attn total 1,342 19.2% FFN total 5,637 80.8% 
+
+Total 6,979 100% D.2 Per-Projection FPoT Sensitivity 
+
+Table 5 presents the per-projection FPoT sensitivity on Llama-3-8B (W4A4KV4). Each row applies weight-only FPoT to the indicated projection(s) while the rest use uniform INT. The non-PoT baseline achieves PPL = 7 .444 and 0-shot 9 = 64 .98 %. Table 5: Per-projection FPoT weight-only ablation on Llama-3-8B (W4A4KV4, 400 steps, single seed). Each row applies FPoT to the indicated projection(s); all others use uniform INT. Activations use uniform INT4 throughout. FPoT Applied To PPL ↓ 0-shot 9↑ (%) None (non-PoT baseline) 7.444 64.98 
+
+WQ only 7.379 65.59 
+
+WK only 7.393 64.77 
+
+WV only 7.487 65.45 
+
+WO only 7.337 65.21 Gate only 7.381 65.45 Up only 7.386 65.77 Down only 7.496 64.59 Attention ( WQ+WK +WV +WO ) 7.419 65.13 FFN (Gate+Up+Down) 7.530 64.74 
+
+All 7 projections 7.563 64.28 FPoT achieves near-lossless quantization on every individual projection. All single-projection entries achieve PPL within +0 .05 of the non-PoT baseline, with 0-shot 9 within 0.4%p. Even when applied to all seven projections simultaneously, the total overhead is only +0 .12 PPL and −0.7%p 0-shot 9.
+
+Degradation is sub-additive. Applying FPoT to all seven projections (PPL = 7 .563 ) incurs less overhead than the sum of individual per-projection overheads, suggesting complementary error compensation across projections. 
+
+D.3 Design Implications 
+
+Per-projection sensitivity guides future aggressive compression designs. The Value projection requires uniform INT activations: full FPoT on WV incurs ∆PPL = +0 .30 versus +0 .04 for weight-only FPoT (Table 5), a 7× gap driven by post-softmax activation noise. For future full-PoT activation 21 designs, the Output projection is the safest candidate, followed by FFN projections; Value should be last. 
+
+E Hardware Efficiency Analysis Details 
+
+This appendix documents the methodology underlying the hardware cost estimates in Section 4.2 and presents per-model accuracy–cost trade-offs. 
+
+E.1 Naive Component-Based Cost Model 
+
+We adopt a simple component-counting model with two unit costs: cfa = 1 .0 (full-adder equivalent) for arithmetic logic, and cmux = 0 .5 × cfa for 2-to-1 multiplexer stages (reflecting the lower transistor count of a pass-gate MUX vs. a full adder). All costs are per-bit of the datapath width A (activation bits). 
+
+INT multiplier. A W ×A signed multiplier generates W ×A partial products and reduces them through an adder tree. Complexity grows quadratically :
+
+CINT = W × A. 
+
+PoT barrel shifter. A barrel shifter with (W −1) -bit shift control implements (W −1) cascaded MUX stages, each containing A two-input multiplexers: 
+
+CPoT = ( W −1) × A × cmux = ( W −1) × A × 0.5.
+
+Complexity grows linearly in both W and A, which is the fundamental source of PoT’s hardware advantage. 
+
+FPoT shifter + adder. FPoT uses a barrel shifter with one fewer stage (shift amount = ⌊e/ 2⌋,requiring W −2 control bits), plus a 1-adder √2 approximation unit ( x + x≫1 = 1 .5x, 6.1% error). The constant right-shift ( ≫ 1) is a hard-wired reconnection requiring zero logic gates. The 6.1% coefficient error is absorbed by approximate-grid quantization (Section 5.3): 
+
+CFPoT = ( W −2) × A × 0.5
+
+| {z }
+
+> barrel shifter
+
++ 1 × A
+
+| {z }  
+
+> √2adder
+
+= 0 .5 · A · W. 
+
+Accumulator. All three modes share an identical (W +A)-bit accumulator adder: 
+
+CACC = ( W +A) × cfa = W + A. 
+
+Table 6: Naive component-based cost model for INT, PoT, and FPoT compute units and full MACs (Section 4.2). Values are normalized to W4A4 INT compute unit = 1 .00 ×, using cmux = 0 .5×cfa 
+
+(full derivation in §E.1). The accumulator ( CACC = W +A) is identical across all three modes and added to obtain the full-MAC cost.                                    
+
+> Config INT PoT FPoT PoT/INT FPoT/INT
+> Compute unit only
+> W4A4 1.00 0.38 0.50 0.38 ×0.50 ×
+> W4A8 2.00 0.75 1.00 0.38 ×0.50 ×
+> W8A8 4.00 1.75 2.00 0.44 ×0.50 ×
+> Full MAC (compute unit + accumulator)
+> W4A4 1.50 0.88 1.00 0.58 ×0.67 ×
+> W4A8 2.75 1.50 1.75 0.55 ×0.64 ×
+> W8A8 5.00 2.75 3.00 0.55 ×0.60 ×
+
+The INT multiplier grows as O(W A ) (quadratic), while both PoT and FPoT grow as O(W + A)
+
+(linear). The cost advantage therefore increases at higher bit-widths. 22 Remark 1 (Assumptions and Limitations) . The naive model makes several simplifying assumptions: (1) unit cost approximation ( cmux = 0 .5 × cfa ); (2) no synthesis optimization; (3) no energy modeling (gate counts as area proxy only); (4) technology-node independence; (5) omitted common logic (sign negation, zero-gating), which are shared across all three modes and implemented in the accumulator control path rather than the compute unit, so their omission does not affect the CU cost ratios reported above. Despite these simplifications, the model correctly captures the fundamental scaling argument: multiplier cost is quadratic in bit-width while shifter + adder cost is linear, confirmed by the synthesis results. 
+
+E.2 Open-source Synthesis Results 
+
+To corroborate the structural claims of the naive model, we synthesize the three compute units using Yosys 0.9 [Wolf and Glaser, 2013] with ABC generic-gate mapping ( abc -g gates ). Sign negation and zero-gating are implemented in the accumulator control path—consistent with Remark 1, assumption (5)—and are therefore excluded from compute-unit gate counts. Table 7 reports gate counts for all nine (config × mode) combinations. Three observations are consistent with the analytical model. First, the structural ordering INT > FPoT > PoT holds for every configuration, confirming that the 1-adder √2 unit adds only mod-erate overhead relative to the INT multiplier. Second, the INT gate count grows faster with bit-width than FPoT: scaling from W4A4 to W8A8 (compute unit), INT grows 5.2× while FPoT grows 3.8×,confirming that FPoT’s cost advantage widens at higher bit-widths. Third, the full-MAC PoT/INT ratio decreases from 0.50 × at W4A4 to 0.37 × at W8A8, consistent with the quadratic-versus-linear scaling prediction. Absolute ratios differ from Table 6 in two respects. PoT/INT at W4A4 (compute unit) measures 
+
+0.24 × vs. the analytical 0.38 ×: the ABC optimizer aggressively shares gates in the barrel-shifter MUX chain, making the analytical model a conservative estimate of PoT’s advantage. FPoT/INT at W4 (compute unit) measures 0.57 –0.59 × vs. the analytical 0.50 ×: the output-width MUX (selecting the even/odd branch) costs more than the cmux = 0 .5 assumption in a generic-gate library. The Yosys results therefore support the core structural claim of the analytical model—the INT-vs.-FPoT cost gap is real and widens with bit-width—while absolute values should be interpreted with the caveats of Remark 1. Quantitatively, the cosine similarity between the analytical and Yosys-measured cost vectors (all 18 entries of Table 6 and Table 7, normalized to W4A4 INT CU) is 0.988 , confirming near-perfect agreement in structural ordering and bit-width scaling direction despite differences in absolute ratios. Table 7: Gate counts from Yosys + ABC open-source synthesis (generic-gate library, 
+
+abc -g gates ), with relative cost in parentheses normalized to W4A4 INT compute unit = 1 .00 ×
+
+(matching Table 6). Sign negation and zero-gating reside in the accumulator control path and are excluded from compute-unit counts (Remark 1, assumption 5).                                    
+
+> Config INT PoT FPoT PoT/INT FPoT/INT
+> Compute unit only
+> W4A4 75 (1.00) 18 (0.24) 44 (0.59) 0.24 ×0.59 ×
+> W4A8 154 (2.05) 30 (0.40) 87 (1.16) 0.19 ×0.57 ×
+> W8A8 391 (5.21) 92 (1.23) 167 (2.23) 0.24 ×0.43 ×
+> Full MAC (compute unit + accumulator)
+> W4A4 119 (1.59) 60 (0.80) 91 (1.21) 0.50 ×0.77 ×
+> W4A8 216 (2.88) 95 (1.27) 161 (2.15) 0.44 ×0.75 ×
+> W8A8 487 (6.49) 180 (2.40) 271 (3.61) 0.37 ×0.56 ×
+
+E.3 MAC Energy Ratio: Published Synthesis Anchor 
+
+The energy estimates in §4.2 are anchored to the only published RTL-level ASIC synthesis comparing INT and PoT MAC units at identical conditions: Przewlocka-Rus et al. [2022] (Samsung 5 nm, 250 MHz, TT corner, 0.6 V, 25°C, 50% toggle rate). Relative to an 8 ×8 uniform MAC baseline, they report W4A8 uniform MAC at 2.5× energy reduction and W4A8 PoT MAC at 6.0×. The PoT-to-INT 23 ratio for the same W4A8 precision is therefore: 
+
+EPoT,W4A8 
+
+EINT,W4A8 
+
+= 2.56.0 ≈ 0.42 ×.
+
+FPoT adds the ×√2 unit (one adder, active for ∼50% of MACs). We report the FPoT/INT energy ratio as a range: 0.42 –0.46 ×, where the lower bound assumes negligible √2 switching energy and the upper bound assumes proportional contribution. 
+
+Applicability to LLMs. Although Przewlocka-Rus et al. [2022] synthesize CNN-oriented MAC units (ResNet/VGG benchmarks), the reported per-MAC energy ratio is model-agnostic: the syn-thesized block—a 4×8 shift-add unit vs. a 4×8 uniform multiplier—is structurally identical to the per-weight MAC in our LLM datapath. Model-level differences (sequence length, attention, layer count) affect only the aggregate MAC count, not the per-MAC energy, so the 0.42 × ratio transfers directly to LLM inference. Note that this anchor reports per-MAC energy of the arithmetic unit alone; total LLM inference energy additionally includes memory-access, accumulator, and activation-path contributions, the relative weight of which varies with batch size and sequence length. The per-MAC ratio therefore sets the achievable upper bound on weight-arithmetic energy savings rather than the total system-level reduction. 
+
+E.4 Per-Model Accuracy–Cost Trade-offs 
+
+The per-model figures below present accuracy–cost Pareto trade-offs across compute unit (CU) cost and full MAC cost (CU + accumulator), normalized to W4A4 Uniform INT = 1 .0×.The figures reveal a consistent pattern across all seven models: (1) FPoT consistently approaches the Uniform INT accuracy at 0.50 × CU cost; (2) the shared accumulator compresses the advantage at full-MAC level ( 0.67 × at W4A4); (3) as bit-widths increase, the quadratic/linear scaling gap widens, increasing FPoT’s advantage; (4) all models share the same x-axis coordinates (hardware is model-independent), with variation only in accuracy ( y-axis). Per-model Pareto curves for Llama-3-8B, Llama-2-7B/13B, Mistral-7B, and Qwen2.5-1.5B/7B/14B are shown in Figs. 13–19, respectively. 0.25 0.5 1 2 4 8                 
+
+> CU Cost (norm. to W4A4 INT)
+> 6789
+> PPL (  )
+> W4A4KV4 W4A8KV8 W8A8KV8
+> (a) PPL vs. CU Cost
+> 0.25 0.5 1248
+> CU Cost (norm. to W4A4 INT)
+> 57.5 60.0 62.5 65.0 67.5 70.0
+> 0-shot 9 (\%,  )
+> (b) 0-shot 9vs. CU Cost
+> 0.25 0.5 1248
+> Energy (norm. to W4A4 INT)
+> 6789
+> PPL (  )
+> (c) PPL vs. Energy
+> 0.25 0.5 1248
+> Energy (norm. to W4A4 INT)
+> 57.5 60.0 62.5 65.0 67.5 70.0
+> 0-shot 9 (\%,  )
+> (d) 0-shot 9vs. Energy
+
+Llama-3-8B 
+
+> Uniform INT PoT FPoT (Ours) FP (bf16) W4A4KV4 W4A8KV8 W8A8KV8
+
+Figure 13: Accuracy–cost Pareto trade-off: Llama-3-8B. 24 0.25 0.5 1 2 4 8
+
+CU Cost (norm. to W4A4 INT) 
+
+5.0 5.5 6.0 6.5 7.0 7.5 
+
+> PPL (  )
+> W4A4KV4 W4A8KV8 W8A8KV8
+
+(a) PPL vs. CU Cost 
+
+0.25 0.5 1 2 4 8
+
+CU Cost (norm. to W4A4 INT) 
+
+56 58 60 62 64 66 
+
+> 0-shot 9 (\%,  )
+
+(b) 0-shot 9 vs. CU Cost 
+
+0.25 0.5 1 2 4 8
+
+Energy (norm. to W4A4 INT) 
+
+5.0 5.5 6.0 6.5 7.0 7.5 
+
+> PPL (  )
+
+(c) PPL vs. Energy 
+
+0.25 0.5 1 2 4 8
+
+Energy (norm. to W4A4 INT) 
+
+56 58 60 62 64 66 
+
+> 0-shot 9 (\%,  )
+
+(d) 0-shot 9 vs. Energy 
+
+Llama-2-7B 
+
+Uniform INT PoT FPoT (Ours) FP (bf16) W4A4KV4 W4A8KV8 W8A8KV8 Figure 14: Accuracy–cost Pareto trade-off: Llama-2-7B. 0.25 0.5 1 2 4 8
+
+CU Cost (norm. to W4A4 INT) 
+
+4.5 5.0 5.5 6.0 6.5  
+
+> PPL (  )
+> W4A4KV4 W4A8KV8 W8A8KV8
+
+(a) PPL vs. CU Cost 
+
+0.25 0.5 1 2 4 8
+
+CU Cost (norm. to W4A4 INT) 
+
+60 62 64 66 68 
+
+> 0-shot 9 (\%,  )
+
+(b) 0-shot 9 vs. CU Cost 
+
+0.25 0.5 1 2 4 8
+
+Energy (norm. to W4A4 INT) 
+
+4.5 5.0 5.5 6.0 6.5 
+
+> PPL (  )
+
+(c) PPL vs. Energy 
+
+0.25 0.5 1 2 4 8
+
+Energy (norm. to W4A4 INT) 
+
+60 62 64 66 68 
+
+> 0-shot 9 (\%,  )
+
+(d) 0-shot 9 vs. Energy 
+
+Llama-2-13B 
+
+Uniform INT PoT FPoT (Ours) FP (bf16) W4A4KV4 W4A8KV8 W8A8KV8 
+
+Figure 15: Accuracy–cost Pareto trade-off: Llama-2-13B. 25 0.25 0.5 1 2 4 8
+
+CU Cost (norm. to W4A4 INT) 
+
+5.00 5.25 5.50 5.75 6.00 6.25 6.50  
+
+> PPL (  )
+> W4A4KV4 W4A8KV8 W8A8KV8
+
+(a) PPL vs. CU Cost 
+
+0.25 0.5 1 2 4 8
+
+CU Cost (norm. to W4A4 INT) 
+
+64 66 68 70 
+
+> 0-shot 9 (\%,  )
+
+(b) 0-shot 9 vs. CU Cost 
+
+0.25 0.5 1 2 4 8
+
+Energy (norm. to W4A4 INT) 
+
+5.00 5.25 5.50 5.75 6.00 6.25 6.50 
+
+> PPL (  )
+
+(c) PPL vs. Energy 
+
+0.25 0.5 1 2 4 8
+
+Energy (norm. to W4A4 INT) 
+
+64 66 68 70 
+
+> 0-shot 9 (\%,  )
+
+(d) 0-shot 9 vs. Energy 
+
+Mistral-7B 
+
+Uniform INT PoT FPoT (Ours) FP (bf16) W4A4KV4 W4A8KV8 W8A8KV8 Figure 16: Accuracy–cost Pareto trade-off: Mistral-7B. 0.25 0.5 1 2 4 8
+
+CU Cost (norm. to W4A4 INT) 
+
+910 11 12 13 14 
+
+> PPL (  )
+> W4A4KV4 W4A8KV8 W8A8KV8
+
+(a) PPL vs. CU Cost 
+
+0.25 0.5 1 2 4 8
+
+CU Cost (norm. to W4A4 INT) 
+
+40 45 50 55 60 65 
+
+> 0-shot 9 (\%,  )
+
+(b) 0-shot 9 vs. CU Cost 
+
+0.25 0.5 1 2 4 8
+
+Energy (norm. to W4A4 INT) 
+
+910 11 12 13 14 
+
+> PPL (  )
+
+(c) PPL vs. Energy 
+
+0.25 0.5 1 2 4 8
+
+Energy (norm. to W4A4 INT) 
+
+40 45 50 55 60 65 
+
+> 0-shot 9 (\%,  )
+
+(d) 0-shot 9 vs. Energy 
+
+Qwen2.5-1.5B 
+
+Uniform INT PoT FPoT (Ours) FP (bf16) W4A4KV4 W4A8KV8 W8A8KV8 
+
+Figure 17: Accuracy–cost Pareto trade-off: Qwen2.5-1.5B. 26 0.25 0.5 1 2 4 8
+
+CU Cost (norm. to W4A4 INT) 
+
+6.5 7.0 7.5 8.0 8.5  
+
+> PPL (  )
+> W4A4KV4 W4A8KV8 W8A8KV8
+
+(a) PPL vs. CU Cost 
+
+0.25 0.5 1 2 4 8
+
+CU Cost (norm. to W4A4 INT) 
+
+60 62 64 66 68 70 
+
+> 0-shot 9 (\%,  )
+
+(b) 0-shot 9 vs. CU Cost 
+
+0.25 0.5 1 2 4 8
+
+Energy (norm. to W4A4 INT) 
+
+6.5 7.0 7.5 8.0 8.5 
+
+> PPL (  )
+
+(c) PPL vs. Energy 
+
+0.25 0.5 1 2 4 8
+
+Energy (norm. to W4A4 INT) 
+
+60 62 64 66 68 70 
+
+> 0-shot 9 (\%,  )
+
+(d) 0-shot 9 vs. Energy 
+
+Qwen2.5-7B 
+
+Uniform INT PoT FPoT (Ours) FP (bf16) W4A4KV4 W4A8KV8 W8A8KV8 Figure 18: Accuracy–cost Pareto trade-off: Qwen2.5-7B. 0.25 0.5 1 2 4 8
+
+CU Cost (norm. to W4A4 INT) 
+
+5.0 5.5 6.0 6.5 7.0 7.5 
+
+> PPL (  )
+> W4A4KV4 W4A8KV8 W8A8KV8
+
+(a) PPL vs. CU Cost 
+
+0.25 0.5 1 2 4 8
+
+CU Cost (norm. to W4A4 INT) 
+
+64 66 68 70 72 
+
+> 0-shot 9 (\%,  )
+
+(b) 0-shot 9 vs. CU Cost 
+
+0.25 0.5 1 2 4 8
+
+Energy (norm. to W4A4 INT) 
+
+5.0 5.5 6.0 6.5 7.0 7.5 
+
+> PPL (  )
+
+(c) PPL vs. Energy 
+
+0.25 0.5 1 2 4 8
+
+Energy (norm. to W4A4 INT) 
+
+64 66 68 70 72 
+
+> 0-shot 9 (\%,  )
+
+(d) 0-shot 9 vs. Energy 
+
+Qwen2.5-14B 
+
+Uniform INT PoT FPoT (Ours) FP (bf16) W4A4KV4 W4A8KV8 W8A8KV8 
+
+Figure 19: Accuracy–cost Pareto trade-off: Qwen2.5-14B. 27 F Fused Triton Kernel for FPoT Training 
+
+The FPoT fake-quantization pipeline (quantize → dequantize → STE) generates ∼8 intermediate tensors per weight matrix when implemented in standard PyTorch—sign, absolute value, log 2 result, exponent, zero/kill masks, and dequantized output—each the same size as the weight. During gradient-checkpointed backward passes, these intermediates are regenerated, creating a memory peak that exceeds single-GPU capacity for models above ∼13 B parameters on 80 GB GPUs. We implement a fused Triton kernel that performs the entire pipeline in a single kernel launch: 1. Quantize : compute |x/s |, apply zero threshold ( 2−0.5/k ), compute round (log 2(·) × k),clamp exponents, determine sign and kill masks. 2. Dequantize : compute s · sign · 2e/k .3. STE : output xfake ; backward passes gradient through unchanged via a custom 
+
+torch.autograd.Function .All intermediate values reside in GPU registers and are never materialized as global-memory tensors. The kernel handles per-channel broadcast of scale, n, and m parameters natively through stride-based indexing, avoiding expand as().contiguous() copies that would otherwise duplicate these tensors to full weight size. 
+
+Memory savings. On the largest single-projection weight in Qwen2.5-14B ( gate proj : 18 ,944 ×
+
+5,120 ), the fused kernel reduces peak intermediate memory from 1.07 GB to 0.19 GB—an 82% reduction . This enables FPoT training of 14B-parameter models on a single A100-80GB with batch size 4, previously infeasible due to OOM during gradient checkpoint recomputation. 
+
+Numerical fidelity. The kernel performs all arithmetic in float32, matching the precision-critical 
+
+log 2 and 2(·) operations. On a full-size weight tensor, 99 .6% of elements match the PyTorch reference exactly; the remaining 0.4% differ by at most one quantization level due to bf16 →float32 promotion order differences, with the Triton path being strictly more precise. A pure-PyTorch fallback is provided for environments without Triton. 
+
+Pseudocode. Algorithm 1 details the complete FPoT quantize/dequantize/STE pipeline. 28 Algorithm 1 Signed FPoT Quantization with k-Adaptive Zero Threshold 
+
+Require: Weight tensor W ∈ RCout ×Cin , bit budget b, resolution parameter k, clip ratio α ∈ (0 , 1] 
+
+Ensure: Quantized weight codes M ∈ { 0, . . . , 2b−1−1}Cout ×Cin , signs S ∈ {− 1, 0, +1 }, per-channel scales s ∈ RCout 
+
+// Grid parameters  
+
+> 1:
+
+emax ← 2b−1 − 2 ▷ Max exponent index (4-bit → emax =6 ) 
+
+> 2:
+
+τk ← 2−1/(2 k) ▷ k -adaptive zero threshold 
+
+(k=1 : τ =0 .707 ; k=2 : τ =0 .841 )
+
+// Per-channel scale with MSE clip search  
+
+> 3:
+
+for each output channel c = 1 , . . . , C out do  
+
+> 4:
+
+sc ← α∗ 
+
+> c
+
+· max j |Wc,j | / 2emax /k ▷ α ∗ 
+
+> c
+
+: MSE-optimal clip ratio  
+
+> 5:
+
+end for // Quantize each weight  
+
+> 6:
+
+for each weight w = Wc,j do  
+
+> 7:
+
+˜w ← | w|/s c ▷ Scale-normalized magnitude  
+
+> 8:
+
+if ˜w < τ k then ▷ Below zero threshold  
+
+> 9:
+
+m ← 0, σ ← 0 ▷ Zero code (implicit pruning)  
+
+> 10:
+
+else  
+
+> 11:
+
+e ← clip  ⌊log 2( ˜ w) · k⌉, 0, e max 
+
+ ▷ FPoT exponent index  
+
+> 12:
+
+m ← e + 1 ▷ Magnitude code: m ∈ { 1, . . . , 2b−1−1} 
+
+> 13:
+
+σ ← sgn( w) ▷ Sign  
+
+> 14:
+
+end if  
+
+> 15:
+
+end for // Stored weight representation ( b-bit) 
+
+weight [b−1] = sign bit, weight [b−2:0] = magnitude m
+
+// Dequantization 
+
+ˆw =
+
+0 if m = 0 
+
+σ · sc · 2(m−1) /k if m ≥ 1
+
+// Hardware decomposition ( k=2 , inference) 
+
+For each MAC y += xact · ˆw:
+
+if m = 0 : skip (zero-gating) 
+
+e ← m − 1 ▷ Recover exponent from magnitude (subtract) 
+
+shift ← ⌊ e/ 2⌋ = weight [b−2:1] ▷ Wire selection, 0 gates 
+
+odd ← e mod 2 = weight [0] ▷ Wire, 0 gates 
+
+shifted ← xact ≪ shift ▷ Barrel shifter 
+
+if even: y += σ · shifted 
+
+if odd: y += σ ·  shifted + shifted ≫1 ▷ = 1 .5 · shifted , 6.1% err vs √2, absorbed by ApproxGrid 
+
+G Additional Ablations 
+
+G.1 Calibration Sensitivity 
+
+A common concern for post-training quantization methods is sensitivity to the calibration set: both its size and domain. We evaluate FPoT on Llama-3-8B (W4A4KV4) while varying: (1) the number of calibration samples n ∈ { 128 , 256 , 512 }, and (2) the calibration dataset: WikiText-2 [Merity et al., 2017] (the default used throughout the paper) versus C4 [Raffel et al., 2020] (a large-scale web-crawled corpus). All other hyperparameters—OSTQuant training steps (400), learning rate, GPTQ settings—remain fixed. 29 Table 8: Calibration sensitivity analysis on Llama-3-8B (W4A4KV4, FPoT, 400 steps). Rows vary the calibration dataset and number of calibration samples ( n). The default configuration used throughout the paper is WikiText-2 with n=128 .Cal. Dataset n PPL ↓ 0-shot 9↑ (%) ∆PPL WikiText-2 128 7.559 65.07 —256 7.589 64.68 +0.030 512 7.525 64.80 −0.034 C4 [Raffel et al., 2020] 128 7.617 64.91 +0.058 256 7.660 65.01 +0.101 512 7.647 64.88 +0.088 
+
+FPoT is robust to calibration set size. Within either dataset, PPL varies by at most 0.065 (7.525 –
+
+7.589 for WikiText-2; 7.617 –7.660 for C4) across a 4× range of sample counts. The 0-shot 9 accuracy is similarly stable, with a maximum spread of 0.4%p. This indicates that n=128 samples are sufficient for FPoT calibration; increasing to 256 or 512 yields no systematic improvement, consistent with prior findings for GPTQ-based methods [Frantar et al., 2023]. 
+
+FPoT is robust to calibration domain. Switching from WikiText-2 to C4 increases PPL by 
+
++0 .06 –+0 .10 , a minor shift relative to the method’s +0 .12 total overhead. Downstream accuracy is virtually unchanged ( 64 .9–65 .1% for C4 vs. 64 .8–65 .1% for WikiText-2). The modest cross-domain degradation suggests that FPoT’s log-scale grid structure is inherently less sensitive to calibration distribution than fine-grained uniform quantization methods, since the quantization boundaries (powers of two) are data-independent—only the per-channel scale s adapts to the calibration data. 
+
+Practical recommendation. Our default setting ( n=128 , WikiText-2) is near-optimal across all configurations tested, and practitioners may safely use alternative calibration sources without re-tuning. We evaluate design choices in the FPoT quantization scheme: the zero-threshold parameter, rounding mode, and weight-only vs. full PoT quantization. All experiments use Llama-3-8B (W4A4KV4, FPoT, 400 OSTQuant training steps). 
+
+G.2 Weight Grid-Alignment 
+
+Table 9 reports PPL and 0-shot 9 across G ∈ { 4, 8, 16 , 32 } phase-shift candidates on Llama-3-8B (W4A4KV4, 400 steps). Table 9: Weight grid-alignment ablation (Llama-3-8B, W4A4KV4, 400 steps, single seed). G: number of phase-shift candidates (Eq. (4)); G=— denotes the plain FPoT baseline. At k=1 , grid-alignment reduces PPL by up to −0.051 ; at k=2 the finer grid already self-corrects, so |∆PPL | ≤ 0.034 . 0-shot 9
+
+values are in %. 
+
+k=1 k=2 
+
+G PPL ↓ 0-shot 9↑ PPL ↓ 0-shot 9↑
+
+— 8.806 58.99 7.563 64.28 
+
+4 8.755 59.09 7.545 64.49 
+
+8 8.771 60.04 7.597 64.45 
+
+16 8.771 60.08 7.560 64.71 
+
+32 8.801 59.69 7.568 63.55 
+
+G.3 Weight-Only vs. Full PoT Quantization 
+
+Table 10 shows that applying PoT/FPoT to both weights and activations is catastrophic (PPL 16 .9–
+
+114 .1 at k=1 ; even FPoT k=2 reaches only 8.21 –52 .49 ), while weight-only PoT/FPoT remains usable. The dominant bottleneck is the coarse logarithmic grid applied to post-softmax activations, not activation quantization per se. 30 Table 10: Weight-only vs. Full PoT/FPoT on Llama-3-8B (all 7 projections, single seed). Weight-only: PoT/FPoT weight + uniform INT activation. Full: PoT/FPoT applied to both weight and activation. 0-shot 9 values are in %. 
+
+k Scope PPL ↓ 0-shot 9↑
+
+W4A4KV4 (non-PoT baseline: PPL = 7 .44 )
+
+k=1 Full 16.91 44.6 
+
+k=1 W-only 8.81 59.0 
+
+k=2 Full 8.21 62.5 
+
+k=2 W-only (Ours) 7.56 64.3 
+
+W4A8KV8 (non-PoT baseline: PPL = 6 .60 )
+
+k=1 Full 114.1 42.7 
+
+k=1 W-only 7.65 64.7 
+
+k=2 Full 52.49 53.8 
+
+k=2 W-only (Ours) 6.80 67.2 
+
+W8A8KV8 (non-PoT baseline: PPL = 6 .16 )
+
+k=1 Full 37.07 52.3 
+
+k=1 W-only 7.66 63.1 
+
+k=2 Full 27.91 57.4 
+
+k=2 W-only (Ours) 6.54 66.7 G.4 k-Adaptive Zero-Threshold Sensitivity 
+
+In FPoT quantization, values with |w/s | < τ are mapped to zero rather than to the nearest PoT level. We parameterize τ = 2 α/k where α controls the aggressiveness of zeroing. The default α = −0.5
+
+places the threshold at the log-space midpoint between zero and the smallest PoT level ( s · 20 = s), which is the theoretically optimal boundary under a uniform-in-log prior. Table 11: Zero-threshold sensitivity analysis on Llama-3-8B (W4A4KV4, FPoT, 400 steps). The threshold τ = 2 α/k determines the boundary below which |w/s | is mapped to zero. The default 
+
+α=−0.5 corresponds to the log-space midpoint between zero and the smallest PoT level. 
+
+α τ (=2 α/ 2) PPL ↓ 0-shot 9↑ (%) 
+
+−0.5 0.841 7.560 64 .71 
+
+−1 0.707 7.573 64 .99 
+
+−2 0.500 7.565 64 .99 
+
+−3 0.354 7.553 65 .06 
+
+−4 0.250 7.545 64 .72 
+
+−6 0.125 7.557 64 .54 
+
+−100 ≈0 7.540 64 .78 
+
+Table 11 sweeps α from −0.5 (aggressive zeroing, τ = 0 .841 ) to −100 (effectively no zeroing, τ ≈ 0). Across this entire range, PPL varies by only 0.033 (7.540 –7.573 ) and 0-shot 9 by 0.5%p ( 64 .5–65 .1%). The negligible sensitivity indicates that the zero-threshold is not a critical hyperparameter for FPoT: state-of-the-art LLM PTQ preprocessing and GPTQ calibration effectively compensate for the threshold choice. Practitioners may safely use the default α = −0.5 without tuning. 
+
+G.5 Rounding Mode 
+
+The standard FPoT rounding uses nearest-neighbor in log-space: e = round (log 2(|w/s |) · k), which places decision boundaries at the geometric mean of adjacent PoT levels. An alternative is linear-space nearest-neighbor, which places boundaries at the arithmetic mean —potentially better aligned with MSE-based objectives like GPTQ, since it minimizes absolute (rather than relative) quantization error per element. Table 12 shows that the two rounding modes produce virtually identical results (∆PPL = −0.001 ,
+
+∆0-shot 9 = +0 .1%p). This is expected: for FPoT, adjacent levels differ by a factor of √2 ≈ 1.414 ,31 Table 12: Rounding mode comparison on Llama-3-8B (W4A4KV4, FPoT, 400 steps). Log-space 
+
+rounds to the nearest PoT level measured by relative distance (geometric mean boundary). Linear-space rounds by absolute distance (arithmetic mean boundary). Rounding mode PPL ↓ 0-shot 9↑ (%) Log-space NN (default) 7.560 64 .71 
+
+Linear-space NN 7.559 64 .81 
+
+so the geometric and arithmetic mean boundaries differ by only ∼1.5% —well within the noise floor of the calibration process. The default log-space rounding is retained for its computational simplicity (one round vs. floor + two exp2 + comparison). 
+
+G.6 Preprocessing Ablation 
+
+Table 13 ablates the type and quality of the preprocessing transform under FPoT weight quantiza-tion on Llama-3-8B W4A4KV4. Configurations vary along two orthogonal axes: rotation quality (none → fixed Hadamard → learned) and the presence of per-channel scale. Table 13: Preprocessing component ablation within OSTQuant under FPoT weight quantization on Llama-3-8B W4A4KV4 (400 steps, single seed; cf. Table 1 3-seed mean 7.60 ±.02 for the full-pipeline entry). Activations and KV-cache use uniform INT4 throughout. Preprocessing PPL ↓ 0-shot 9↑ (%) No transform 181.3 37.56 Scale only 9.78 58.79 Fixed Hadamard 8.30 62.64 Learned rotation 7.78 63.30 
+
+Learned rotation + scale 7.56 64.28 Both rotation and scale are necessary. Without any transform, FPoT yields catastrophic PPL =181 .3. Fixed Hadamard rotation alone ( 8.30 ) or learned rotation alone ( 7.78 ) provide substantial recovery, while scale-only achieves 9.78 . Only the full combination (learned rotation + scale) reaches 
+
+7.56 , within +0 .12 of the non-PoT baseline, because rotation suppresses position-level outliers on the logarithmic grid while scale normalizes per-channel amplitude. More broadly, this supports the design criterion satisfied by state-of-the-art LLM PTQ methods such as OSTQuant and DuQuant. 
+
+H Per-Task Downstream Results 
+
+This appendix reports individual zero-shot task scores for all models and bit-width configurations in Table 1. For tasks providing both acc and acc norm , we report acc norm (ARC-C, ARC-E, HellaSwag, PIQA, OpenBookQA); all others report acc . The “AVG” column is the unweighted mean across all nine tasks, matching the 0-shot 9 metric in the main paper. All scores are in %. Three weight quantization methods are compared: Uniform (uniform INT baseline), PoT (weight-only), and FPoT (Ours) , with the unquantized FP (bf16) reference shown above each model’s quantized results. Tables 14–20 report per-task results for each model across the W4A4KV4, W4A8KV8, and W8A8KV8 configurations. FPoT (Ours) rows are bolded throughout. Observations. Across all seven models and three bit-width configurations, FPoT with 1-adder approximate-grid quantization maintains competitive per-task performance relative to both the FP (bf16) reference and the Uniform INT baseline. Key patterns: • Per-task ∆ within ±3%p : On most tasks, the difference between uniform INT and FPoT is within ±2–3%p, consistent with the aggregate 0-shot 9 results in Table 1. • WinoGrande consistently improves under FPoT at W4A4KV4 for five of seven models, suggesting a mild regularization benefit from the logarithmic weight grid. 32 Table 14: Per-task results: Llama-3-8B . Single calibration seed (seed 0); FP (bf16) is the unquantized reference; FPoT (Ours) rows are bolded. All scores in %. Config Method ARC-C ARC-E Hella Wino PIQA BoolQ OBQA Lam SIQA AVG 
+
+FP (bf16) reference 53.1 77.9 79.2 73.4 81.0 81.3 45.0 75.7 47.1 68.2 W4A4KV4 Uniform 44.8 76.4 57.0 68.2 76.9 77.0 32.2 73.5 46.3 65.0 PoT 36.4 68.1 53.0 67.2 73.8 67.2 26.6 68.0 42.6 59.0 
+
+FPoT (Ours) 43.9 75.4 56.0 69.2 76.7 78.0 31.2 73.2 45.1 64.2 
+
+W4A8KV8 Uniform 49.4 79.7 59.1 74.0 78.5 78.5 34.2 75.3 47.5 67.5 PoT 44.5 76.5 57.0 72.1 76.2 78.1 31.4 71.8 45.5 64.7 
+
+FPoT (Ours) 47.9 78.9 57.8 72.8 78.4 79.5 33.6 75.2 46.6 67.1 
+
+W8A8KV8 Uniform 50.7 80.0 60.2 73.3 79.4 81.6 35.2 75.4 46.7 68.3 PoT 41.6 74.4 56.1 72.5 76.2 68.3 30.0 72.6 45.5 63.1 
+
+FPoT (Ours) 47.3 79.3 59.1 74.5 79.3 80.6 34.0 75.0 46.0 67.5 
+
+Table 15: Per-task results: Llama-2-7B . Single calibration seed (seed 0); FP (bf16) is the unquantized reference; FPoT (Ours) rows are bolded. All scores in %. Config Method ARC-C ARC-E Hella Wino PIQA BoolQ OBQA Lam SIQA AVG 
+
+FP (bf16) reference 45.9 74.5 75.9 68.8 78.7 78.0 44.2 73.6 46.0 65.1 W4A4KV4 Uniform 40.6 73.4 54.7 66.9 75.8 74.7 32.4 70.4 44.0 62.2 PoT 35.8 69.1 52.0 62.8 73.6 68.8 27.2 63.8 41.1 58.1 
+
+FPoT (Ours) 40.4 73.9 53.3 67.3 75.4 73.8 29.8 72.4 44.0 62.1 
+
+W4A8KV8 Uniform 42.3 75.6 55.7 68.4 77.0 75.3 30.8 71.6 44.4 63.8 PoT 39.8 72.4 54.3 66.5 76.2 72.3 28.6 66.7 43.6 61.1 
+
+FPoT (Ours) 40.8 73.8 55.1 68.9 77.8 76.6 30.2 73.6 44.6 63.5 
+
+W8A8KV8 Uniform 43.0 76.1 57.3 69.7 78.1 77.9 31.2 73.2 46.0 65.1 PoT 40.3 72.6 54.9 67.6 76.9 73.0 30.6 67.4 44.5 62.5 
+
+FPoT (Ours) 42.8 75.0 56.5 68.6 77.5 75.9 31.6 73.4 45.0 64.0 
+
+• PoT degradation is uniform : Standard PoT shows consistent degradation across all tasks (−2 to −8%p), confirming the coarse grid resolution hurts all downstream capabilities equally. • Qwen2.5 and Mistral-7B: FPoT matches or exceeds uniform : At W4A4KV4, FPoT AVG meets or surpasses the uniform INT baseline for all three Qwen2.5 models ( +0 .7–+1 .2%p) and Mistral-7B ( +0 .1%p), while the Llama family shows a small deficit ( −0.1 to −0.8%p). FPoT overhead is thus model-family dependent rather than universally negative. • LAMBADA: contrasting patterns across models : FPoT consistently outperforms Uniform on Llama-2 and Mistral-7B by +0 .2–+2 .0%p across all bit-widths, suggesting a task-specific affinity between FPoT’s sparse weight representation and long-range language modeling. By contrast, all quantized methods collapse to ≈0% for Qwen2.5-1.5B (FP reference: 61 .9%). • FP gap shrinks with bit-width : At W8A8KV8, FPoT AVG is within ∼1%p of the FP reference for six of seven models (Qwen2.5-1.5B is an exception at −18 .7%p, reflecting its small-model sensitivity to aggressive quantization). The W4A4KV4 gap is largest across all models. 33 Table 16: Per-task results: Llama-2-13B . Single calibration seed (seed 0); FP (bf16) is the unquantized reference; FPoT (Ours) rows are bolded. All scores in %. Config Method ARC-C ARC-E Hella Wino PIQA BoolQ OBQA Lam SIQA AVG 
+
+FP (bf16) reference 49.1 77.5 79.4 71.7 80.6 80.7 45.6 76.7 47.2 67.6 W4A4KV4 Uniform 43.2 76.5 58.3 69.6 77.8 77.8 34.0 75.4 46.8 65.5 PoT 41.4 74.8 56.2 67.8 76.4 75.7 31.0 67.8 42.1 62.3 
+
+FPoT (Ours) 44.0 76.2 57.2 68.7 77.5 78.8 33.8 75.7 44.8 65.2 
+
+W4A8KV8 Uniform 45.5 78.1 59.5 72.5 78.6 79.4 33.8 76.6 46.6 66.7 PoT 46.8 77.4 58.1 69.6 77.7 79.5 32.2 72.1 45.1 65.5 
+
+FPoT (Ours) 46.3 78.2 58.6 71.4 77.6 78.7 32.4 77.4 46.9 66.5 
+
+W8A8KV8 Uniform 48.3 79.3 60.1 72.1 78.9 80.6 35.4 76.6 47.3 67.7 PoT 45.7 77.9 58.8 69.1 78.2 79.7 33.2 73.3 45.9 66.0 
+
+FPoT (Ours) 48.0 78.9 59.5 71.4 78.8 80.6 34.2 77.1 46.7 67.5 
+
+Table 17: Per-task results: Qwen2.5-1.5B . Single calibration seed (seed 0); FP (bf16) is the unquan-tized reference; FPoT (Ours) rows are bolded. All scores in %. Config Method ARC-C ARC-E Hella Wino PIQA BoolQ OBQA Lam SIQA AVG 
+
+FP (bf16) reference 44.9 71.6 67.8 63.5 76.0 72.8 40.4 61.9 49.0 60.9 W4A4KV4 Uniform 28.1 41.5 29.3 58.0 63.5 51.0 21.2 0.0 35.9 38.7 PoT 27.1 40.5 29.0 54.2 62.6 53.1 21.8 0.0 35.2 38.1 
+
+FPoT (Ours) 28.0 44.7 29.3 59.0 63.6 56.3 21.2 0.0 35.6 39.9 
+
+W4A8KV8 Uniform 29.0 45.5 30.1 62.8 65.4 70.9 23.2 0.0 36.9 43.2 PoT 28.5 43.9 29.4 61.1 64.4 46.7 20.2 0.0 36.2 39.2 
+
+FPoT (Ours) 29.5 45.2 29.9 62.6 65.5 56.3 21.6 0.0 36.8 41.3 
+
+W8A8KV8 Uniform 31.6 47.1 30.5 63.5 67.3 71.0 23.4 0.8 38.0 44.1 PoT 28.1 40.6 29.3 59.8 63.7 49.3 19.2 0.0 35.2 38.3 
+
+FPoT (Ours) 31.1 46.7 30.2 62.4 66.3 61.5 21.0 0.1 37.4 42.2 
+
+Table 18: Per-task results: Qwen2.5-7B . Single calibration seed (seed 0); FP (bf16) is the unquantized reference; FPoT (Ours) rows are bolded. All scores in %. Config Method ARC-C ARC-E Hella Wino PIQA BoolQ OBQA Lam SIQA AVG 
+
+FP (bf16) reference 51.4 77.7 79.0 73.2 80.0 84.7 47.0 71.6 54.8 68.8 W4A4KV4 Uniform 47.1 78.5 57.2 69.9 77.9 81.5 32.4 68.4 50.3 66.0 PoT 41.2 74.2 55.2 64.8 76.2 79.1 29.6 61.6 49.4 62.8 
+
+FPoT (Ours) 48.3 79.6 56.5 67.5 76.9 82.3 32.0 69.2 51.9 66.7 
+
+W4A8KV8 Uniform 48.0 80.5 59.3 71.6 78.7 83.9 34.6 71.8 51.8 68.0 PoT 45.2 77.0 57.5 70.9 77.8 81.6 31.8 64.7 50.8 65.6 
+
+FPoT (Ours) 51.0 82.3 58.5 72.3 78.8 85.8 32.4 71.5 54.4 69.2 
+
+W8A8KV8 Uniform 47.8 81.1 60.1 72.6 78.7 84.5 33.8 71.3 55.0 68.8 PoT 46.3 78.9 57.6 69.1 78.5 83.8 31.6 66.4 51.1 66.4 
+
+FPoT (Ours) 49.9 81.3 59.1 71.3 79.1 83.8 33.2 71.8 53.6 68.5 
+
+34 Table 19: Per-task results: Qwen2.5-14B . Single calibration seed (seed 0); FP (bf16) is the unquantized reference; FPoT (Ours) rows are bolded. All scores in %. Config Method ARC-C ARC-E Hella Wino PIQA BoolQ OBQA Lam SIQA AVG 
+
+FP (bf16) reference 59.0 79.3 82.9 74.7 82.1 85.4 44.8 74.1 55.5 70.9 W4A4KV4 Uniform 51.6 81.4 60.3 72.1 79.1 83.9 33.6 71.3 50.0 68.4 PoT 50.2 78.0 57.6 66.6 77.5 80.6 32.4 65.3 47.8 65.7 
+
+FPoT (Ours) 52.4 82.1 59.8 73.2 78.5 84.6 33.6 73.6 52.2 69.2 
+
+W4A8KV8 Uniform 56.1 83.0 62.9 75.5 80.6 85.4 35.4 75.4 55.2 71.4 PoT 54.0 82.8 60.8 73.0 79.8 82.6 31.4 68.0 51.8 68.7 
+
+FPoT (Ours) 56.1 83.0 62.5 78.0 80.5 87.7 34.2 75.3 54.3 72.0 
+
+W8A8KV8 Uniform 54.9 82.0 63.5 75.5 81.4 85.0 34.8 74.1 55.7 70.9 PoT 51.3 80.4 61.3 73.8 79.1 84.6 32.6 70.0 50.9 68.9 
+
+FPoT (Ours) 56.2 83.1 62.5 76.8 81.6 86.8 35.0 74.7 55.0 71.9 
+
+Table 20: Per-task results: Mistral-7B . Single calibration seed (seed 0); FP (bf16) is the unquantized reference; FPoT (Ours) rows are bolded. All scores in %. Config Method ARC-C ARC-E Hella Wino PIQA BoolQ OBQA Lam SIQA AVG 
+
+FP (bf16) reference 52.2 78.3 80.5 73.6 82.3 82.1 44.2 75.1 45.8 68.2 W4A4KV4 Uniform 45.5 77.7 59.0 69.9 79.2 82.4 30.6 73.4 44.7 66.3 PoT 44.5 76.7 57.5 68.7 78.8 79.9 29.6 70.5 44.3 65.0 
+
+FPoT (Ours) 48.0 77.8 57.9 70.5 79.2 81.0 31.8 75.0 44.7 66.4 
+
+W4A8KV8 Uniform 48.6 79.7 60.0 73.0 79.9 82.3 31.8 74.6 45.4 67.8 PoT 44.5 77.7 58.8 71.1 79.6 76.7 29.6 71.7 44.9 65.1 
+
+FPoT (Ours) 48.0 79.1 59.2 73.0 79.5 80.9 32.6 76.3 45.3 67.3 
+
+W8A8KV8 Uniform 49.1 79.6 60.9 73.6 80.1 82.3 33.6 75.0 46.0 68.3 PoT 45.9 77.9 59.6 71.1 79.1 79.1 33.2 71.5 45.8 66.1 
+
+FPoT (Ours) 47.9 79.3 59.9 72.5 79.8 83.4 32.8 76.3 45.2 67.9 
+
+35 I Comparison with LogART 
+
+LogART [Xu et al., 2026] is a concurrent logarithmic quantization method that also targets multiplier-free inference via power-of-two weight representations. Both methods share the same hardware motivation—replacing integer multipliers with barrel shifters—but differ in scope and design: • LogART : Dynamic base assignment (per-channel base-2 or base-√2), learned rounding (500 iterations/layer), asymmetric quantization. Weight-only ; no activation or KV-cache quantization is reported for LLMs. • Ours (FPoT) : Fixed base-√2 grid, 1-adder approximate-grid quantization, state-of-the-art LLM PTQ preprocessing. Full W/A/KV quantization within a unified framework. 
+
+Important caveat: LogART’s official implementation excludes activation quantization. For the W4A4KV4 rows below, we apply our per-token dynamic INT4 activation quantizer post-hoc to LogART’s weight-quantized model without PTQ preprocessing. These results analyze the interaction between activation quantization and distribution redistribution, not a direct LogART benchmark. Table 21 compares the two methods under weight-only (W4A16) and full (W4A4KV4) quantization. LogART is reproduced using the official open-source code 1 with the same calibration setup as our experiments. Table 21: Comparison with LogART under weight-only (W4A16) and full (W4A4KV4) quantization. All methods are multiplier-free (PoT-based). FPoT W4A4KV4 entries are copied from Table 1 (mean over three calibration seeds); FPoT W4A16 and all LogART entries use a single calibration seed. PPL: WikiText-2 ( ↓). 0-shot 9: unweighted mean across nine benchmarks ( ↑, %). 
+
+W4A16 W4A4KV4 †
+
+Model Method PPL ↓ 0-shot 9↑ PPL ↓ 0-shot 9↑
+
+LLaMA-3-8B LogART 6.516 68.8 3903 34.4 
+
+FPoT (Ours) 6.862 66.6 7.60 64.8 
+
+LLaMA-2-7B LogART 5.617 66.8 ∞ 33.9 
+
+FPoT (Ours) 5.861 63.5 6.11 61.9       
+
+> †Post-hoc INT4 activation quantization applied to LogART’s W4 model without PTQ preprocessing. This is not LogART’s official configuration. PPL =∞indicates numerical overflow (NaN loss).
+
+In the weight-only setting (W4A16), LogART achieves lower PPL and higher 0-shot accuracy than FPoT on both models ( −0.24 PPL / +3 .3%p 0-shot on LLaMA-2-7B; −0.35 PPL / +2 .2%p 0-shot on LLaMA-3-8B), likely due to (1) dynamic per-channel base allocation and (2) learned rounding that directly optimizes the Hessian-weighted reconstruction loss. However, when INT4 activation quantization is applied, LogART’s weight-quantized model degrades catastrophically (PPL > 3900 or ∞; 0-shot 9 drops to ∼34 %, near random), while FPoT maintains stable accuracy (PPL ≤ 7.60 , 0-shot 9 ≥ 61 .9%). This confirms that distribution redistribution via state-of-the-art LLM PTQ preprocessing is a prerequisite for stable joint W4A4KV4 quantization . Without Hadamard rotation, channel-concentrated activation outliers dominate the per-token scale, effectively quantizing the majority of activations to zero. FPoT’s compatibility with state-of-the-art LLM PTQ preprocessing resolves this at the source by redistributing outliers prior to quantization, enabling stable W4A4KV4 deployment that weight-only methods do not support. 
+
+J Cross-Framework Portability 
+
+A natural question is whether FPoT’s low overhead is specific to OSTQuant’s learned rotation–scaling pipeline or transfers to other post-training quantization (PTQ) frameworks. To answer this, we integrate FPoT weight quantization into DuQuant [Lin et al., 2024a], a recent PTQ method that uses         
+
+> 1LogART settings: log dynamic +scale search +learn rounding (500 iters, lr =0.05), asymmetric, per-channel, no Z-Fold or OPTQ init. Calibration: WikiText-2, 128 samples, seqlen 2048.
+
+36 a dual-transform strategy—iteratively applying learned block-diagonal rotations and zigzag channel permutations to smooth both weight and activation outliers before quantization. 
+
+Integration. We replace DuQuant’s round-to-nearest (RTN) weight quantizer with a column-wise weight calibration backend that supports both uniform INT and FPoT grids. Activations and the KV-cache remain on the uniform INT grid in all configurations; only the weight grid is swapped. We use symmetric per-channel weight quantization, no learnable weight clipping (epochs = 0), and a single calibration seed (WikiText-2, 128 samples, seqlen 2048). The weight calibration backend performs its own MSE-based clip-ratio search per channel, independent of DuQuant’s smooth/rotation transforms. 
+
+Results. Table 22 compares OSTQuant (our main pipeline) and DuQuant+GPTQ under identical evaluation (WikiText-2 perplexity and nine zero-shot benchmarks). Several observations are worth highlighting: • FPoT overhead is small and framework-invariant. Across all completed model–config pairs, replacing uniform INT weights with FPoT increases perplexity by +0.05–0.34 in the DuQuant pipeline, comparable to the +0.08–0.42 range observed with OSTQuant (Table 1). The overhead is consistently smallest at W4A4KV4, where the quantization grid is already coarse and the additional granularity of the FPoT half-octave grid compensates well. • DuQuant matches OSTQuant on absolute quality. For Llama-2-7B, the two frameworks produce nearly identical perplexity under both uniform and FPoT grids (within ±0.15 PPL across all bit-widths). For Llama-3-8B the gap is slightly larger ( ≈0.3 PPL at W4A4), reflecting differences in the preprocessing strategy rather than the weight grid. • Zero-shot accuracy tracks perplexity. The nine-task mean accuracy drops by at most 
+
+1.1%p when switching from uniform to FPoT—within the noise margin of single-seed runs—confirming that the perplexity overhead translates to negligible downstream impact. These results demonstrate that FPoT’s near-lossless multiplier-free property is not tied to a specific PTQ framework: any pipeline that performs channel-level weight calibration (e.g. column-wise MSE search or OSTQuant’s learned scaling) can adopt FPoT weights with minimal additional quality loss. Table 22: Cross-framework comparison of FPoT weight quantization; only the weight grid differs across methods (Uniform INT vs. FPoT), with activations and KV-cache using uniform INT through-out. OSTQuant (ours): 3-seed mean; see Table 1. DuQuant : single calibration seed; column-wise weight calibration replaces the default RTN quantizer (see Appendix J). PPL: WikiText-2 perplexity (↓). 0-shot 9: mean zero-shot accuracy across nine benchmarks ( ↑, %). W4A4KV4 W4A8KV8 W8A8KV8 Model Method Weight PPL ↓ 0-shot 9↑ PPL ↓ 0-shot 9↑ PPL ↓ 0-shot 9↑
+
+Llama-3-8B OSTQuant Uniform 7.36 65.2 6.60 67.5 6.16 68.2 FPoT 7.60 64.8 6.85 67.3 6.58 67.7 DuQuant Uniform 7.67 62.9 6.56 67.3 6.17 68.0 FPoT 7.87 63.1 6.68 66.6 6.51 66.9 Llama-2-7B OSTQuant Uniform 5.97 62.1 5.63 63.8 5.48 65.1 FPoT 6.11 61.9 5.75 63.8 5.65 64.2 DuQuant Uniform 6.08 61.7 5.62 64.3 5.49 65.0 FPoT 6.19 61.6 5.67 63.3 5.60 64.4 Llama-2-13B OSTQuant Uniform 5.26 65.6 5.03 67.1 4.89 67.7 FPoT 5.37 65.2 5.11 66.6 5.03 67.2 DuQuant Uniform 5.30 65.5 5.00 66.6 4.90 67.4 FPoT 5.35 65.4 5.05 67.1 4.99 66.8 37

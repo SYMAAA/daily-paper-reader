@@ -1,0 +1,783 @@
+Title: Beyond 4 bits: Data-Centric Post-training Quantization and Recovery
+
+URL Source: https://arxiv.org/pdf/2610.28537v1
+
+Published Time: Wed, 21 Oct 2026 01:50:28 GMT
+
+Number of Pages: 30
+
+Markdown Content:
+Preprint. Under Review. 
+
+# BEYOND 4 B ITS : D ATA -C ENTRIC POST -T RAINING 
+
+# QUANTIZATION AND RECOVERY 
+
+Rhea Sanjay Sukthanker 1 Riccardo Grazzi 2 James Hensman 2 Pashmina Cameron 11Applied Sciences Group (ASG), Microsoft 2Microsoft Research 
+
+rsukthanker@microsoft.com riccardo.grazzi.4@gmail.com jameshensman@microsoft.com pcameron@microsoft.com 
+
+## ABSTRACT 
+
+Post-training quantization (PTQ) compresses the weights of a trained model with limited compute and data. Down to 4 bits it is near-lossless, but at 2 bits scalar PTQ configurations fall to chance-level accuracy. We study three choices usually treated as implementation details that matter little at 4 bits but decide 2-bit quality: the quantization representation, the calibration data, and the recovery fine-tuning data, across six dense and mixture-of experts models (ranging from 3.8 to 32 Bparameters). Representation is the largest factor and vector codebooks restore us-able models where scalar PTQ pipelines collapse. Most of the remaining loss in accuracy is on generative tasks, and the amount of performance drop is model-dependent. Furthermore, at a short recovery budget, calibration and recovery data are coupled. The best recovery data depends on the calibration data, so the two must be chosen jointly. The resulting recipe involves a vector codebook represen-tation, a small task-aligned calibration mixture, and an inexpensive codebook-only recovery stage. Including codebooks, it uses about 2.3 effective bits per weight and retains 89 to 97% of full-precision question-answering (QA) accuracy where scalar PTQ is at chance, and, including recovery, uses 1.4 to 30 × less compute than the strongest quantization-aware-training (QAT) baseline. 
+
+## 1 INTRODUCTION 
+
+Post-training quantization (PTQ) is standard for serving large language models under tight memory budgets. At 4 bits (W4A16: 4-bit weights, 16-bit activations), it costs only a few accuracy points (Frantar et al., 2023; Lin et al., 2024; Shao et al., 2024; Ashkboos et al., 2024; Liu et al., 2025b). At 2 bits, scalar PTQ falls to chance-level accuracy (Egiazarian et al., 2024; Chee et al., 2023; Liu et al., 2024a; Figure 1a), and quantized reasoning models can overthink and loop (Lotfi et al., 2026). Richer codebooks (Van Baalen et al., 2024; Liu et al., 2024a; Egiazarian et al., 2024; Tseng et al., 2024a) or learned quantization (Liu et al., 2024b; Du et al., 2024; Dadgarnia et al., 2026) trade compute for quality, yet 2-bit models still lag their 4-bit counterparts. Three choices usually treated as implementation details govern 2-bit quality: the quantization rep-resentation , the calibration data that shape quantization, and the recovery data used to fine-tune the quantized model. They matter little at 4 bits but become consequential below 4 bits, where calibration and recovery data also interact, so tuning them separately can be misleading. We study 2-bit quantization and recovery across six dense and mixture-of-experts (MoE) models ( 3.8 to 32 Bparameters) and propose an actionable recipe (Section 5) for low-budget 2-bit quantization. Our primary observations are: • Representation dominates at 2 bits. Every scalar PTQ pipeline we test falls to random chance-level, while vector PTQ at ∼2.3 effective bits keeps 89 –97% of a full-precision model’s question-answering accuracy without training, using 39 –304 × less compute than trained scalar methods (Table 4). • Loss of reasoning ability is model-dependent. Question-answering retention is similar across models, but HumanEval (codegen) retention spans 45% (Phi-4-mini, Qwen3-8B) to 
+
+81% (Qwen3-MoE), tracking the model and its scale more than the quantizer (Figure 4). 1arXiv:2610.28537v1 [cs.AI] 20 Oct 2026 Preprint. Under Review. 4 3 2
+
+> Weight bit-width
+> 30 40 50 60 70
+> 7-task QA average (%)
+> near-random floor
+> BF16 ceiling 71.0
+> 69.2 50.1 29.3 61.8
+> +32.5 vector
+> scalar PTQ collapses
+> Scalar PTQ (SpinQuant, rotation) Vector PTQ (YAQA, 2-bit)
+
+(a) The 2-bit cliff. 10 1 10 2 10 3 10 4  
+
+> PTQ + recovery compute (PFLOP , log) 020 40 60 80 AvgGen (GSM8K, HumanEval; %)
+> 65.8 0.0 18.4 17.9 26.2 36.7 45.7 48.9 39.2
+> BF16, P-bf16 (72.3)
+> SpinQuant 4/2-bit BitDistiller (QAT) GSQ 2-bit YAQA base + recovery
+
+(b) Recovery improves generation. 
+
+Figure 1: Phi-4-mini at 2 bits. (a) Scalar PTQ (SpinQuant, Liu et al., 2025b) falls to the random floor on question-answering (QA) tasks as bitwidth decreases; a 2-bit vector representation (YAQA, Tseng et al., 2026) stays higher. (b) Generation (AvgGen, the GSM8K/HumanEval mean) versus compute: trained scalar baselines (BitDistiller, Du et al., 2024; GSQ, Dadgarnia et al., 2026) trail no-recovery vector PTQ, and short codebook-only recovery improves generation. • Calibration and recovery data interact. Choosing them jointly improves Phi-4-mini’s accuracy on generation tasks from 11 .1% (web calibration) to 45 .7% (math calibration, web recovery); the best recovery data flips with calibration on all three dense models we study (Tables 1 and 2). The proposed recipe is a vector representation with a task-aligned calibration mixture and a short codebook-only recovery stage . With recovery, it narrows the gap to 4-bit models while using 1.4 to 
+
+30 × less compute than the strongest quantization-aware-training (QAT) baseline; a cheap per-model check handles model dependence (Section 5). Upon acceptance, we will release our code, Hessian mixtures, and quantized models. 
+
+## 2 RELATED WORK 
+
+Scalar PTQ. GPTQ (Frantar et al., 2023) sets the near-lossless 4-bit weight-only baseline via ap-proximate second-order error minimization; AWQ (Lin et al., 2024) and SmoothQuant (Xiao et al., 2023) rescale salient channels, while QuaRot (Ashkboos et al., 2024) and SpinQuant (Liu et al., 2025b) rotate weights before rounding. The scalar PTQ configurations we evaluate collapse at 2 bits without any further quantization-aware training or recovery (Section 4.4). 
+
+Vector and ultra-low-bit quantization. Codebooks give better rate-distortion below 3 bits. QuIP (Chee et al., 2023) adds incoherence processing to adaptive scalar rounding; QuIP# (Tseng et al., 2024a) pairs it with lattice codebooks and fine-tuning. AQLM, GPTVQ, VPTQ, and QTIP (Egiazar-ian et al., 2024; Van Baalen et al., 2024; Liu et al., 2024a; Tseng et al., 2024b) use additive, hier-archical, or trellis-coded codebooks. YAQA (Tseng et al., 2026) adds a Fisher-weighted rounding objective. Non-uniform (Kim et al., 2024) and 1-bit (Huang et al., 2024; Yuan et al., 2024; Xu et al., 2024b) methods also target lower precision to go even beyond 2-bits. 
+
+Trained scalar quantization. OmniQuant (Shao et al., 2024) learns clipping thresholds block-wise, and GSQ (Dadgarnia et al., 2026) learns scalar-grid assignments through a Gumbel-Softmax relaxation; we use GSQ as an intermediate-cost scalar baseline between PTQ and QAT. 
+
+Calibration data. PTQ usually calibrates on a few hundred C4 or WikiText-2 sequences (Frantar et al., 2023; Lin et al., 2024; Shao et al., 2024; Egiazarian et al., 2024). Calibration data affect 4-bit models (Williams & Aletras, 2024) and pruning (Bandari et al., 2024; Ji et al., 2025), and self-generated text can replace curated corpora (Williams et al., 2025). We find that calibration data 2Preprint. Under Review. effects 2-bit PTQ methods much more than on 4-bit methods and this effect is consistent across representations and recipe grids (Appendix A.6). 
+
+Evaluating quantized LLMs. Quantization costs generation, reasoning, and knowledge-intensive tasks more than perplexity or multiple-choice QA as suggested by (Jaiswal et al., 2024; Li et al., 2024a; Jin et al., 2024; Kurtic et al., 2025; Liu et al., 2025a), and robustness depends on model size and token density (Dettmers & Zettlemoyer, 2023; Kumar et al., 2025; Ouyang et al., 2025). We confirm this gap at 2 bits and show that the degradation of generation quality depends on calibration, recovery data and model-scale. 
+
+Recovery for quantized models. Distillation-based recovery (Hinton et al., 2015) narrows the quan-tization gap without full QAT. LLM-QAT and BitDistiller (Liu et al., 2024b; Du et al., 2024) retrain all weights; LoRA and QLoRA (Hu et al., 2022; Dettmers et al., 2023) add high-precision parame-ters; closest to ours, EfficientQAT (Chen et al., 2025) trains all weights block-wise, then quantization parameters end to end; ParetoQ (Liu et al., 2026) studies extremely low-bit QAT. AQLM and QuIP# fine-tune codebooks or continuous parameters after quantization. PV-Tuning (Malinovskii et al., 2024) additionally also learns discrete assignments to the codebook vectors. In this work we use codebook-only recovery and show that its best data flips with the calibration data, so the two must be chosen jointly (Section 4.2). 
+
+## 3 BACKGROUND AND METHOD 
+
+We study post-training quantization followed by recovery fine-tuning at the same format and bitwidth. 3.1 SCALAR AND VECTOR QUANTIZATION 
+
+Scalar quantization maps each weight to one of 2b levels, ˆx = s(q − z), with integer code q,per-group scale s, and optional zero-point z. Error-aware PTQ, such as GPTQ (Frantar et al., 2023), minimizes output error on a calibration distribution X with input Hessian HX = Ex∼X [xx ⊤]:
+
+min  
+
+> ˆW∈Q
+
+Ex∼X (W − ˆW )x 22 = min  
+
+> ˆW∈Q
+
+Tr (W − ˆW )HX (W − ˆW )⊤, (1) where Q is the set of representable weights. Vector quantization maps each d-dimensional sub-vector wi to an entry of a learned codebook C = {ck}Kk=1 , ˆwi = cai , using weight correlations that scalar grids miss. VPTQ (Liu et al., 2024a) solves Equation 1 over codebooks. Structured-curvature methods such as KronQ (Lee et al., 2026) and YAQA (Tseng et al., 2026) use Kronecker-factored full-model KL curvature and YAQA rounds onto trellis-coded sets. 
+
+Calibration mixtures. The objective depends on the data only through HX . A mixture with weights 
+
+αj ≥ 0, P 
+
+> j
+
+αj = 1 , over domains with Hessians Hj has Hα = P 
+
+> j
+
+αj Hj would allow one to ap-proximate the hessian for different data distributions, cheaply. We sweep mixtures by reweighting precomputed Hessians without re-collecting hessians on actual dataset mixtures; each mixture still needs its own quantization pass. For YAQA we mix the Kronecker input and output factors sepa-rately, approximating re-estimation on different dataset mixtures. 3.2 RECOVERY FINE -T UNING 
+
+Recovery freezes the quantized backbone and trains only quantization parameters: the codebook 
+
+C with assignments fixed, or the scales s (and z). QAT backpropagates through the quantizer with a straight-through estimator (Liu et al., 2024b) and keeps optimizer state for all weights (≈ 14 P bytes for P parameters). Recovery keeps the bitwidth and needs only a teacher and stu-dent ( ≈ 2P + bP/ 8 bytes. We distill from the full-precision model with L = α LCE + (1 −
+
+α) τ 2 KL  σ(zt/τ ) ∥ σ(zs/τ ), where zt and zs are teacher and student logits, σ is the softmax, 
+
+τ the temperature, and α=0 .5 unless noted. Our recovery pipeline involves codebook-only recov-ery. In the appendix we cover alternative losses and logit truncation (Appendix A.7), a scale-only recovery scalar control (Appendix A.7), and finetuning with low-rank adapters (Hu et al., 2022; Dettmers et al., 2023; Xu et al., 2024a; Li et al., 2024b), which add half-precision parameters (Ap-pendix A.11). 3Preprint. Under Review. 
+
+## 4 EXPERIMENTS AND RESULTS 
+
+4.1 EXPERIMENTAL SETUP 
+
+Models and quantizers. We evaluate Phi-4-mini (Abouelenin et al., 2025) (3.8B, instruct), Llama-3.1-8B (Grattafiori et al., 2024) (base), and Qwen3-30B-A3B (Yang et al., 2025) (reasoning MoE, 
+
+∼3B active). Qwen3-8B (reasoning) checks the calibration and recovery choices; OLMoE-1B-7B (Muennighoff et al., 2025) (instruct MoE) and Qwen3-32B (reasoning, dense) extend the compar-isons to smaller MoEs and large-scale dense models, respectively. The scalar baselines we use are SpinQuant (Liu et al., 2025b) and QuaRot (Ashkboos et al., 2024) at group size 128. Furthermore, we observe that learned rotations do not help at 2 bits (Appendix A.3). The vector-quantization base-lines we study are VPTQ (Liu et al., 2024a) ( 216 -entry codebook over 8-dimensional vectors) and YAQA (Tseng et al., 2026), a Fisher-weighted trellis quantizer, both in the same incoherence-rotated frame; we report native (unrotated) VPTQ where it is stronger. We also compare vector quantization against GSQ (Dadgarnia et al., 2026) (scalar PTQ with learned assignments) and BitDistiller (Du et al., 2024) (scalar QAT). In our experiments we quantize attention and MLP projections, including every MoE expert. Routers, embeddings, norms and the language modeling head stay in half preci-sion. Our ablation on the router precision in Appendix A.10, suggests that the router is pretty robust to quantization. Counting indices, codebooks, and scales, every method uses 2.09 –2.33 effective bits per weight. In the MoEs, VPTQ shares codebooks across experts, while YAQA operates with a single large codebook for all weights. We evaluate dequantized weights, report packed-size stor-age estimates, and count dominant model passes, amortizing Hessian collection over the calibration sweep. Configurations and protocols are in Appendices A.3, A.2. 
+
+Calibration and evaluation. For calibration data we primarily focus on web, instruction, math (OpenR1-Math), code, and their mixtures. We report an AvgQA metric which averages over seven QA tasks: MMLU (5-shot) (Hendrycks et al., 2020), WinoGrande (Sakaguchi et al., 2021), and LAMBADA (Paperno et al., 2016), scored by accuracy, and ARC-Easy, ARC-Challenge (Clark et al., 2018), HellaSwag (Zellers et al., 2019), and PIQA (Bisk et al., 2020), scored by length-normalized accuracy (all 0-shot except MMLU). We report an AvgGen metric which averages GSM8K (5-shot, strict match) (Cobbe et al., 2021) and HumanEval (0-shot, pass@1) (Chen et al., 2021); we also report IFEval (0-shot, prompt-strict) (Zhou et al., 2023). Results use bfloat16 eval-uation (P-bf16) unless a table is marked P-fp16 (float16); the two differ only marginally in our analyses. 4.2 CALIBRATION AND RECOVERY DATA ARE NOT SEPARABLE none web math       
+
+> recovery data (3.3M tokens, codebook-only)
+> 10 20 30 40 50 60 70
+> AvgGen, % of BF16
+> 11.1 18.9 24.0 36.7
+> 45.7
+> 42.3 interaction −8.5
+> 95% CI [ −12.6, −4.3]
+> Phi-4-mini (BF16 AvgGen 72.3)
+> web calibration math calibration
+> none web math
+> recovery data (3.3M tokens, codebook-only)
+> 9.5 8.7 10.5
+> 27.4
+> 22.2 21.4 interaction −2.7
+> 95% CI [ −5.0, −0.7]
+> Llama-3.1-8B (BF16 AvgGen 44.0)
+
+Figure 2: Calibration and recovery data are not separable at 2 bits. 2-bit YAQA bases are calibrated on web or math text (OpenR1-Math), then unrecovered (hollow markers) or given short codebook-only recovery budget on web or math text ( 3,200 examples). The shared y-axis is AvgGen as a percentage of each model’s BF 16 AvgGen; labels give absolute AvgGen. Means ± std over three recovery seeds (P-bf16). Circles mark the best cell. Boxes give the interaction contrast and its 95% 
+
+hierarchical-bootstrap interval. Detailed results are in Table 1. 4Preprint. Under Review. Table 1: The best recovery data depends on the calibration data (2-bit YAQA, P-bf16; mean of three recovery seeds, std in Table 21). Calibration : data used to compute the Hessians when quantizing. Recovery : data used for the short codebook-only fine-tuning after quantization ( 3,200 
+
+examples); none is the unrecovered base. The web data we use is FineWeb-Edu; and the math dataset is OpenR1-Math. Shaded bold: best AvgGen per model; red: recovery lowers AvgGen below its base. Follow-up evaluations on Qwen3-8B are in Table 23 in the Appendix.                                                                         
+
+> Phi-4-mini Llama-3.1-8B Calibration Recovery AvgQA GSM8K HEval AvgGen AvgQA GSM8K HEval AvgGen web none 63.1 15.5 6.7 11.1 65.1 11.6 7.3 9.5 web web 63.3 24.2 13.6 18.9 64.1 6.6 10.8 8.7 web math 62.8 33.8 14.2 24.0 63.7 9.9 11.2 10.5 math none 58.3 53.2 20.1 36.7 62.0 33.4 21.3 27.4
+> math web 60.0 56.9 34.6 45.7 62.4 27.4 17.1 22.2 math math 58.7 60.1 24.6 42.3 61.4 28.2 14.6 21.4
+> BF 16 70.8 81.7 62.8 72.3 73.2 50.2 37.8 44.0
+
+The best recovery data depends on the calibration data. We quantize Phi-4-mini and Llama-3.1-8B with web or math calibration data, then apply short codebook-only recovery ( 3,200 examples) on web or math data (Figure 2, Table 1). Math recovery helps the web-calibrated base but not the math-calibrated one, giving a negative interaction on both models with 95% intervals excluding zero (Table 2). Calibration is the larger factor and math calibration raises generation under either recovery source. Furthermore, whether to recover or not is model-dependent. Every recovery stage helps the instruction-tuned Phi-4-mini. However for the pretrained base Llama-3.1-8B, math calibration and no recovery procedure works best. The interaction sign also holds on a logit scale and these results cover one domain pair at a short budget (Table 8). Table 2: Switching recovery data helps one calibration base and not the other (change in AvgGen points, P-bf16; 95% bootstrap intervals over recovery seeds and test items). Math vs. web recovery : AvgGen after math recovery minus after web recovery, on each base. Interaction :math-base minus web-base column (up to rounding); negative means the best recovery data flips with the calibration data. Calibration : math minus web calibration, averaged over both recovery sources. ∗ the held-out model our hypothesis is confirmed on.                                             
+
+> Math vs. web recovery Interaction Calibration Model web base math base AvgGen GSM8K HumanEval math vs. web Phi-4-mini +5 .1[2 .9,7.4] −3.4[−6.9,0.2] −8.5[−12 .6,−4.3] −6.4−10 .6+22 .5
+> Llama-3.1-8B +1 .8[0 .8,3.6] −0.8[−2.7,1.2] −2.7[−5.0,−0.7] −2.5−2.9+12 .2
+> Qwen3-8B ∗+3 .6[1 .1,5.8] −5.8[−9.0,−2.7] −9.4[−13 .3,−5.3] −3.8−15 .1+16 .5
+
+Prospective confirmation. Before collecting Qwen3-8B data, we pre-registered its 2 × 2 design, analysis, and three predictions (Appendix A.9): a negative interaction, web recovery at least as good as math recovery on the math-calibrated base, and a larger interaction on HumanEval than on GSM8K. All of these predictions hold (Table 2) on this model. The interaction also stays negative on held-out tasks, with fresh Phi-4-mini calibration samples, and with disjoint recovery-data samples (Figure 3; Appendices A.9 and Table 25). On prompt-independent tasks alone (MBPP, MATH-500), the interaction effect is clear only on Phi-4-mini (Appendix A.9). 
+
+What the interaction does not imply. It is not a rule to “add the domain absent from calibration”: on Phi-4-mini every short recovery improves over its base, and calibration changes only which recovery source helps more. 4.3 SCALAR PTQ COLLAPSES IN THE TESTED PIPELINES 
+
+Scalar PTQ has a sharp 2-bit cliff. At 4 bits the best scalar method stays close to BF 16; at 2 bits every tested scalar pipeline falls to the random QA floor with 0.0 accuracy on generation, on all three models (Table 3 and curves in Appendix A.15). 5Preprint. Under Review. −16 −12 −8 −4 0           
+
+> Interaction (AvgGen points, 95% CI)
+> Phi-4-mini
+> Main (GSM8K, HumanEval) Held-out (MBPP, HumanEval+, MATH-500) Re-quantized bases (3 per arm) New recovery-data samples (3)
+> Llama-3.1-8B
+> Main (GSM8K, HumanEval) Held-out (MBPP, HumanEval+, MATH-500)
+> Qwen3-8B (pre-registered)
+> Main (GSM8K, HumanEval) Held-out (MBPP, HumanEval+, MATH-500)
+> -8.5 [-12.6, -4.3] -6.8 [-10.1, -3.6] -9.6 [-15.8, -3.4] -7.2 [-11.5, -2.9] -2.7 [-5.0, -0.7] -1.6 [-3.6, 0.3] -9.4 [-13.3, -5.3] -6.0 [-9.2, -3.0]
+> ←best recovery data flips with calibration
+> Main benchmarks Held-out tasks Resampled bases / recovery data
+
+Figure 3: The interaction stays negative across robustness checks. Interaction contrast with 
+
+95% intervals; left of zero, the best recovery data flips with the calibration data. Circles: bootstrap over recovery seeds and test items, on the main benchmarks or on held-out tasks (HumanEval+ reuses HumanEval prompts). Squares: intervals over three independently re-quantized bases per arm (Welch) or three disjoint recovery-data samples ( t). Table 3: Quantization ladder (web calibration, no recovery; P-fp16). Best QA and generation per precision; superscripts mark the winning method: SpinQuant ( S), QuaRot ( Q; expert-wise on the MoE), YAQA ( Y), VPTQ ( V). Red: collapse to the random floor; shaded: 2-bit vector pipelines. 
+
+> BF
+
+16 Scalar 4-bit Scalar 2-bit Vector 2-bit Model QA Gen QA Gen QA Gen QA Gen Phi-4-mini 71.0 73.2 69.3 Q 65.8 S 29.3 S 0.0 63.3 Y 12.2 Y
+
+Llama-3.1-8B 73.1 42.9 71.8 S 38.0 Q 29.0 Q 0.0 65.1 Y 9.6 Y
+
+Qwen3-30B-A3B 72.6 61.8 70.3 S 66.2 S 29.4 S 0.0 66.0 Y 54.0 Y
+
+Vector codebooks revive 2-bit models. Vector pipelines raise 2-bit QA into the mid-60s from the 20s floor on all three families, and YAQA stays ahead in a matched-bit control (Table 13). 4.4 COMPARISONS WITH TRAINED SCALAR QUANTIZATION 
+
+On question answering, the vector pipelines match or beat GSQ and BitDistiller on every model; on generation, YAQA beats both (Table 4). Within our recipe grid and bit budget, YAQA leads on every model. GSQ collapses to the random-accuracy floor on the MoEs. 4.5 CALIBRATION CHIEFLY CONTROLS GENERATION 
+
+With the quantizer fixed, calibration data mainly moves generation: across recipes, AvgGen varies by 13 .5–26 .7 points per model, while AvgQA varies by only 3.9–7.5 (Table 5). At 4 bits, the same sweep moves scalar models by at most 1.6 QA and 7.9 generation points (Table 17). Math calibration gives the best generation on the dense models, a targeted mixture on Qwen3-MoE, and broad web-heavy data the best QA. 
+
+Generation retention is model-dependent. QA retention is similar across models, but HumanEval retention ranges from under half to over 80% (Figure 4). Within Qwen3 the dense 32B model retains far more generation than the dense 8B one, so model scale is necessary for strong retention. Furthermore, the precision of the MoE router barely changes accuracy (Appendix A.10). 6Preprint. Under Review. Table 4: Cross-paradigm comparison at 2 bits (P-fp16; OLMoE row P-bf16). Best AvgQA (a) and AvgGen (b) per model. VPTQ and YAQA select the best recipe per metric from their recipe grids. GSQ: layer-wise scalar PTQ; BitDistiller: scalar QAT; VPTQ, YAQA: vector PTQ. Shaded bold marks the best per model. N Native (unrotated) VPTQ, P-bf16, where it beats rotated VPTQ (Appendix Table 27). S Experts share one codebook per layer and projection type ( 2.09 /2.14 effec-tive bits 
+
+(a) QA (AvgQA ↑). Trained scalar Vector PTQ Model BF 16 GSQ BitDist. VPTQ YAQA Phi-4-mini 71.0 52.6 53.0 57.6 N 63.3                
+
+> Llama-3.1-8B 73.1 57.0 60.3 63.3 N65.7
+> Qwen3-MoE 72.6 29.4 55.9 64.8 S66.7
+> OLMoE-1B-7B 68.3 29.6 49.1 63.0 S64.0
+
+(b) Generation (AvgGen ↑). Trained scalar Vector PTQ Model BF 16 GSQ BitDist. VPTQ YAQA Phi-4-mini 73.2 17.9 18.4 29.5 N 37.4                
+
+> Llama-3.1-8B 42.9 18.1 16.2 16.1 26.6
+> Qwen3-MoE 61.8 0.0 45.7 53.0 S62.4
+> OLMoE-1B-7B 32.4 0.0 0.9 15.2 S20.6
+
+Table 5: Calibration mainly changes generation (2-bit YAQA, P-fp16; bold: best; ∆: range over the full sweep). 
+
+Phi-4-mini Llama-3.1 Qwen3-MoE Recipe QA Gen QA Gen QA Gen Web 63.3 12.2 65.1 9.6 66.0 54.0 Math 58.5 37.4 62.1 26.6 64.5 61.8 Code 55.9 18.7 60.8 22.6 62.8 48.9 Math+web .5/.5 62.6 24.7 65.7 17.8 66.7 56.5 Web+math .7/.3 63.0 27.7 65.5 15.1 65.8 56.2 All-4 .25 each 58.8 19.9 65.2 20.1 66.0 59.3 MWI .4/.4/.2 59.5 17.1 62.7 12.2 66.5 62.4 
+
+∆ 7.5 26.7 4.9 17.0 3.9 13.5 
+
+4.6 CODEBOOK -ONLY RECOVERY IS MODEL -DEPENDENT 
+
+Table 8 pairs each 2-bit base with long codebook-only recovery on the same recipe data. On Phi-4-mini, recovery changes QA little but roughly doubles HumanEval. On Qwen3-MoE it changes both little; on Llama-3.1-8B base model, QA decreases in all three long runs and generation has no consistent gain. IFEval falls on most Phi-4-mini recipes under completion prompts and is mostly, but not uniformly, preserved under the chat template (Appendix Table 35). Furthermore recovery does not help 2-bit models which hit the random floor. Scale-only recovery on a collapsed scalar 2-bit model leaves it near the floor (Appendix A.7). 
+
+Under the deployment prompt, short recovery need not cost instruction following. With the chat template, web recovery of the math-calibrated Phi-4-mini base raises GSM8K from 55 .0 to 
+
+58 .9, HumanEval from 34 .1 to 43 .9, and IFEval from 40 .3 to 44 .5 (four recovery seeds); math recovery raises GSM8K further ( 61 .5) but lowers IFEval to 37 .9 (Table 36). The best recovery data still flips with calibration and math recovery gives the highest AvgGen from the web base and web recovery from the math base. 
+
+Recovery data matter more than distillation hyperparameters. The type of knowledge distil-lation loss, the teacher precision, temperature, and top-k truncation change AvgQA little. A 4-bit teacher matches a BF 16 one, and dropping the teacher keeps most generation gain (Appendix A.7). With fixed web recovery data, generation gains 6.3 points by 3,200 examples and then plateaus, while QA rises slowly with more data (Figure 5). Recovery with low-rank-adaptor is in Ap-pendix A.11. 4.7 OVERTHINKING UNDER QUANTIZATION 
+
+We reproduce the overthinking failure mode of Lotfi et al. (2026) on Qwen3-30B-A3B, a reasoning model with an explicit thinking mode at 2-bits. On MATH-500 (Hendrycks et al., 2021) levels 4–5 with greedy decoding, we compare the BF 16 ceiling with the best 4-bit checkpoint and the expert-shared 2-bit VPTQ web/mixed 0.7/0.3 checkpoint of Table 10 in the Appendix. Accuracy 7Preprint. Under Review. Phi-4-mini 3.8B OLMoE 6.9B MoE Llama-3.1 8.0B Qwen3-8B 8.2B Qwen3-30B-A3B 30.5B MoE Qwen3-32B 32.8B 
+
+> 020 40 60 80 100 Retention of BF16 (%)  89 45 94 49 90 73 90 45 92 81 97 68
+> QA (AvgQA) HumanEval, chat template HumanEval, completion (base model, no chat template) MoE
+
+Figure 4: 2-bit retention of QA and chat-template HumanEval by model. Models are ordered by total parameters (hatched: MoE). Best no-recovery VPTQ/YAQA checkpoint per metric on our recipe grid within the 2.5-bit budget (YAQA on the MoEs). The dotted Llama-3.1-8B bar is completion-style HumanEval (base model, no chat template); completion-prompt AvgGen is in Ta-ble 33. 0 200 800 3.2k 12.8k 51.2k Recovery examples 01234567Gain over base (points)  3,200 (used) Generation (AvgGen) QA (Core6) 
+
+Figure 5: Recovery gains saturate early. Gain over the unrecovered base as the recovery budget grows (Phi-4-mini, math-calibrated 2-bit YAQA, codebook-only recovery on web data; Table 22). Generation gains 6.3 points by 3,200 examples and then plateaus; QA rises slowly. is exact match on the final answer. “Markers/1k” counts hesitation and branch-forking tokens (e.g., “Wait”, “But”, “Alternatively”) per 1,000 generated tokens. The loop score is the repeated 4-gram fraction. Table 6 shows that 2-bit quantization amplifies overthinking without collapse. Accuracy falls ( 0.675 → 0.45 ), and the hesitation-marker rate, loop score, and length-cap hit rate rise. A small repetition penalty reduces looping and improves 2-bit accuracy (Table 7). Figure 15 in the appendix shows the effect of a repetition penalty. 
+
+## 5 A P RACTICAL RECIPE FOR ACCURATE 2-B IT MODELS 
+
+Table 9 and the highlighted box below give the recipe. The representation default holds across six models, including two MoEs; the calibration defaults come from the three primary model families. Whether and how to recover depends on the model and the calibration data, so the recipe adds a cheap per-model check. Screening k calibrated bases costs k quantization passes, 2k short recoveries (≈100 PFLOP each for a 4B-parameter model and 3k evaluations, far less than QAT. 8Preprint. Under Review. Table 6: Overthinking under 2-bit quantization (Qwen3-30B-A3B, MATH-500, greedy). 2-bit amplifies hesitation and looping and moderately lowers accuracy without collapsing. “Cap-hit” is the length-cap hit rate. “R-then-A” is the reached-then-abandoned rate among wrong answers. We use 40 problems, and the 2-bit model is expert-shared VPTQ ( 2.09 bits).                         
+
+> Precision Accuracy Mean CoT Cap-hit Markers/1k Loop ( 4-gram) R-then-A
+> BF 16 0.675 4928 0.25 15.5 0.39 0.69 4-bit 0.650 5265 0.25 12.4 0.41 0.50 2-bit 0.450 5900 0.45 23.7 0.67 0.41
+
+Table 7: Decoding penalties on the 2-bit model (Qwen3-30B-A3B, MATH-500, 2-bit). A repeti-tion penalty reduces looping and chain-of-thought length and improves accuracy. The same penalty also helps BF 16.                                                
+
+> Rep. penalty Marker penalty Accuracy Mean CoT Cap-hit Markers/1k Loop ( 4-gram) 1.0 00.425 5884 0.475 23.0 0.66 1.0 20.475 5156 0.375 10.2 0.62 1.0 60.500 4726 0.350 2.2 0.59 1.2 00.575 5052 0.300 15.0 0.40 1.3 00.625 4799 0.250 13.0 0.30
+> Recipe: five steps to an accurate 2-bit model
+> 1. Use a vector codebook (e.g., YAQA); scalar PTQ collapses at 2 bits. 2. Calibrate on target-domain data ; mix in broad web text when QA matters. 3. Choose recovery data together with calibration: for each calibrated base, compare no, web, and target-domain recovery. 4. Keep recovery short and optional: codebook-only on 3,200 examples; keep it only if it clears a preset margin without losing QA or instruction following. 5. Evaluate as deployed: Report QA and generation separately against a matched full-precision reference. Evaluate quantized model at higher repetition penalty to avoid overthinking behavior.
+
+## 6 CONCLUSION AND FUTURE WORK 
+
+Conclusion At 2 bits, quality depends heavily on representation, calibration data, and recovery. A vector codebook restores most collapsed accuracy and a task-aligned calibration mixture and short codebook-only recovery stage narrow the generation gap at much less compute than QAT. The data choices are not separable at a short recovery budget: calibration domain drives generation, and the best recovery data depends on it. Across three models and a held-out composite, math recovery helps a web-calibrated base but not a math-calibrated one (clearest on Phi-4-mini). Tuning the two data choices separately can therefore select the wrong recovery data, and whether to recover must be validated per model. Most remaining loss is in generation, whose measurement depends on prompt format and numerical precision. 
+
+Limitations and Future Work. We measure base and data-sample variability only on Phi-4-mini, and replicate bases share one rotation and one recovery seed. The interaction covers one domain pair and one quantizer (YAQA) at a short budget; we did not re-run the 2 × 2 design at long budgets. We leave these studies for future work. 
+
+## USE OF AI T OOLS 
+
+All ideas presented in this paper are original to the authors or built upon the related work cited herein. AI-based tools were used only in an assistive capacity: to sharpen the clarity of the authors’ initial drafts, to prepare initial drafts, to help typeset the paper in L ATEX, to rephrase sections, to improve the presentation of figures and tables, to correct grammatical errors and make sentences more salient, and to act as a coding assistant that implements the authors’ ideas. All technical content, claims, and conclusions were conceived, verified, and approved by the authors. 9Preprint. Under Review. Table 8: Codebook recovery is model-dependent. Each row is a 2-bit YAQA model quantized with the listed calibration data . base : no recovery; +rec. : after long codebook-only recovery whose re-covery data is the same mixture as the calibration data (forward KL, BF 16 teacher). HumanEval uses each instruction-tuned model’s chat template (Phi-4-mini, Qwen3-MoE) and completion prompts for the base Llama-3.1-8B. Teal /red: change beyond two paired standard errors. P-bf16 except the Qwen3-MoE AvgQA, GSM8K, and IFEval cells (P-fp16). §P-bf16, mean of three evaluations.                                                                                                  
+
+> AvgQA GSM8K HumanEval IFEval Model Calibration recipe base +rec. base +rec. base +rec. base +rec. Phi-4-mini web 63.1 62.9 15.5 42.2 14.0 28.0 29.0 21.8 math 58.3 60.4 53.2 62.5 34.1 47.6 31.2 27.7 math+web (0.5/0.5) 62.5 63.2 38.8 53.5 17.7 33.5 33.1 33.1 web+math (0.7/0.3) 62.8 63.3 39.9 53.3 18.3 32.3 37.3 29.4 mw64: math+web (0.6/0.4) 61.7 63.2 44.0 58.3 17.1 39.0 32.2 29.9
+> BF 16 70.8 81.7 75.0 55.8
+> Llama-3.1-8B math+web (0.5/0.5) 65.6 64.8 22.7 21.2 14.0 14.6 7.8 5.9 web+math (0.7/0.3) 65.5 64.8 18.4 18.0 10.4 17.7 6.5 7.8 all-4 (equal four-way) 65.1 64.4 19.9 16.8 18.3 22.6 8.3 8.9
+> BF 16 73.2 50.2 37.8 9.4
+> Qwen3-MoE web 66.0 67.8 73.8 76.0 75.0 76.8 23.0 §22.0
+> BF 16 72.6 90.0 92.7 28.3
+
+Table 9: 2-bit decision guide (Section 4; KD and teacher rows: Phi-4-mini).            
+
+> Decision Recommendation Representation vector codebook (YAQA). Calibration task-aligned Hessian mixture Recovery short codebook-only KD, or none for base models. Recovery data choose jointly with calibration. KD settings defaults ( τ=1 ). Teacher 4-bit (matches BF 16) or none. MoE routers keep in half precision. Reporting QA and generation separately with repetiton penalty applied.
+
+## ACKNOWLEDGMENTS 
+
+We are deeply grateful to Hari VK and Andrey Rybalchenko (Microsoft Research, Cambridge) for their extensive work to make application of incoherence rotations automatic and robust. This work allowed us to reliably test the effect of incoherent rotations on a large number of dense and mixture-of-experts transformer models with different architectures. The work underpins our rotated scalar baselines and the incoherence-rotated frame in which our vector quantizers operate on the MoE models, and it was essential for extending this study from dense models to Qwen3-30B-A3B and OLMoE-1B-7B. 
+
+## REFERENCES 
+
+Abdelrahman Abouelenin, Atabak Ashfaq, Adam Atkinson, Hany Awadalla, Nguyen Bach, Jianmin Bao, Alon Benhaim, Martin Cai, Vishrav Chaudhary, Congcong Chen, et al. Phi-4-mini technical report: Compact yet powerful multimodal language models via mixture-of-loras. arXiv preprint arXiv:2503.01743 , 2025. Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. Quarot: Outlier-free 4-bit inference in rotated llms. Advances in Neural Information Processing Systems , 37:100213–100240, 2024. Abhinav Bandari, Lu Yin, Cheng-Yu Hsieh, Ajay Kumar Jaiswal, Tianlong Chen, Li Shen, Ranjay Krishna, and Shiwei Liu. Is c4 dataset optimal for pruning? an investigation of calibration data for llm pruning. In Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing , pp. 18089–18099, 2024. 10 Preprint. Under Review. Yonatan Bisk, Rowan Zellers, Jianfeng Gao, Yejin Choi, et al. Piqa: Reasoning about physical com-monsense in natural language. In Proceedings of the AAAI conference on artificial intelligence ,volume 34, pp. 7432–7439, 2020. Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and Christopher De Sa. Quip: 2-bit quan-tization of large language models with guarantees. In A. Oh, T. Naumann, A. Glober-son, K. Saenko, M. Hardt, and S. Levine (eds.), Advances in Neural Information Process-ing Systems , volume 36, pp. 4396–4429. Curran Associates, Inc., 2023. doi: 10.52202/ 075280-0196. URL https://proceedings.neurips.cc/paper_files/paper/ 2023/file/0df38cd13520747e1e64e5b123a78ef8-Paper-Conference.pdf .Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde De Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, et al. Evaluating large language models trained on code. arXiv preprint arXiv:2107.03374 , 2021. Mengzhao Chen, Wenqi Shao, Peng Xu, Jiahao Wang, Peng Gao, Kaipeng Zhang, and Ping Luo. Efficientqat: Efficient quantization-aware training for large language models. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pp. 10081–10100, 2025. Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. Think you have solved question answering? try arc, the ai2 reasoning challenge. 
+
+arXiv preprint arXiv:1803.05457 , 2018. Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, et al. Training verifiers to solve math word problems. arXiv preprint arXiv:2110.14168 , 2021. Alireza Dadgarnia, Soroush Tabesh, Mahdi Nikdan, Michael Helcig, Eldar Kurti´ c, Max Kleinegger, and Dan Alistarh. Gsq: Highly-accurate low-precision scalar quantization for llms via gumbel-softmax sampling. arXiv preprint arXiv:2604.18556 , 2026. Tim Dettmers and Luke Zettlemoyer. The case for 4-bit precision: k-bit inference scaling laws. In 
+
+International Conference on Machine Learning , pp. 7750–7774. PMLR, 2023. Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke Zettlemoyer. Qlora: Efficient finetuning of quantized llms. Advances in neural information processing systems , 36:10088–10115, 2023. Dayou Du, Yijia Zhang, Shijie Cao, Jiaqi Guo, Ting Cao, Xiaowen Chu, and Ningyi Xu. Bitdistiller: Unleashing the potential of sub-4-bit llms via self-distillation. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pp. 102–116, 2024. Vage Egiazarian, Andrei Panferov, Denis Kuznedelev, Elias Frantar, Artem Babenko, and Dan Alis-tarh. Extreme compression of large language models via additive quantization. In Proceedings of the 41st International Conference on Machine Learning . JMLR.org, 2024. Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. Optq: Accurate quantization for generative pre-trained transformers. In The eleventh international conference on learning representations , 2023. Leo Gao, Jonathan Tow, Stella Biderman, Sid Black, Anthony DiPofi, Charles Foster, Laurence Golding, Jeffrey Hsu, Kyle McDonell, Niklas Muennighoff, et al. A framework for few-shot language model evaluation. Zenodo , 2021. Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, et al. The llama 3 herd of models. arXiv preprint arXiv:2407.21783 , 2024. Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. Measuring massive multitask language understanding. arXiv preprint arXiv:2009.03300 , 2020. 11 Preprint. Under Review. Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. Measuring mathematical problem solving with the math dataset. NeurIPS ,2021. Geoffrey Hinton, Oriol Vinyals, and Jeff Dean. Distilling the knowledge in a neural network. arXiv preprint arXiv:1503.02531 , 2015. Edward J Hu, yelong shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen. LoRA: Low-rank adaptation of large language models. In International Con-ference on Learning Representations , 2022. URL https://openreview.net/forum? id=nZeVKeeFYf9 .Wei Huang, Yangdong Liu, Haotong Qin, Ying Li, Shiming Zhang, Xianglong Liu, Michele Magno, and Xiaojuan Qi. Billm: pushing the limit of post-training quantization for llms. In Proceedings of the 41st International Conference on Machine Learning , ICML’24. JMLR.org, 2024. Ajay Jaiswal, Zhe Gan, Xianzhi Du, Bowen Zhang, Zhangyang Wang, and Yinfei Yang. Compress-ing llms: The truth is rarely pure and never simple. In International Conference on Learning Representations , volume 2024, pp. 36973–36993, 2024. Yixin Ji, Yang Xiang, Juntao Li, Qingrong Xia, Ping Li, Xinyu Duan, Zhefeng Wang, and Min Zhang. Beware of calibration data for pruning large language models. In International Conference on Learning Representations , volume 2025, pp. 18604–18620, 2025. Renren Jin, Jiangcun Du, Wuwei Huang, Wei Liu, Jian Luan, Bin Wang, and Deyi Xiong. Acomprehensive evaluation of quantization strategies for large language models. In Findings of the association for computational linguistics: ACL 2024 , pp. 12186–12215, 2024. Sehoon Kim, Coleman Richard Charles Hooper, Amir Gholami, Zhen Dong, Xiuyu Li, Sheng Shen, Michael W. Mahoney, and Kurt Keutzer. SqueezeLLM: Dense-and-sparse quantization. In Forty-first International Conference on Machine Learning , 2024. URL https://openreview. net/forum?id=0jpbpFia8m .Tanishq Kumar, Zachary Ankner, Benjamin Spector, Blake Bordelon, Niklas Muennighoff, Man-sheej Paul, Cengiz Pehlevan, Christopher R´ e, and Aditi Raghunathan. Scaling laws for precision. In International Conference on Learning Representations , volume 2025, pp. 71833–71864, 2025. Eldar Kurtic, Alexandre Noll Marques, Shubhra Pandit, Mark Kurtz, and Dan Alistarh. “give me bf16 or give me death”? accuracy-performance trade-offs in llm quantization. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pp. 26872–26886, 2025. Donghyun Lee, Yuhang Li, Ruokai Yin, and Priyadarshini Panda. Kronq: Llm quantization via kronecker-factored hessian. arXiv preprint arXiv:2607.07964 , 2026. Shiyao Li, Xuefei Ning, Luning Wang, Tengxuan Liu, Xiangsheng Shi, Shengen Yan, Guohao Dai, Huazhong Yang, and Yu Wang. Evaluating quantized large language models. In Ruslan Salakhut-dinov, Zico Kolter, Katherine Heller, Adrian Weller, Nuria Oliver, Jonathan Scarlett, and Felix Berkenkamp (eds.), Proceedings of the 41st International Conference on Machine Learning , vol-ume 235 of Proceedings of Machine Learning Research , pp. 28480–28524. PMLR, 2024a. Yixiao Li, Yifan Yu, Chen Liang, Nikos Karampatziakis, Pengcheng He, Weizhu Chen, and Tuo Zhao. Loftq: Lora-fine-tuning-aware quantization for large language models. In International Conference on Learning Representations , volume 2024, pp. 13409–13424, 2024b. Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. Awq: Activation-aware weight quantization for on-device llm compression and acceleration. Proceedings of machine learning and systems ,6:87–100, 2024. Ruikang Liu, Yuxuan Sun, Manyi Zhang, Haoli Bai, Xianzhi Yu, Tiezheng Yu, Chun Yuan, and Lu Hou. Quantization hurts reasoning? an empirical study on quantized reasoning models. arXiv preprint arXiv:2504.04823 , 2025a. 12 Preprint. Under Review. Yifei Liu, Jicheng Wen, Yang Wang, Shengyu Ye, Li Lyna Zhang, Ting Cao, Cheng Li, and Mao Yang. Vptq: Extreme low-bit vector post-training quantization for large language models. In 
+
+Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing , pp. 8181–8196, 2024a. Zechun Liu, Barlas Oguz, Changsheng Zhao, Ernie Chang, Pierre Stock, Yashar Mehdad, Yangyang Shi, Raghuraman Krishnamoorthi, and Vikas Chandra. Llm-qat: Data-free quantization aware training for large language models. In Findings of the association for computational linguistics: ACL 2024 , pp. 467–484, 2024b. Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghuraman Krish-namoorthi, Vikas Chandra, Yuandong Tian, and Tijmen Blankevoort. Spinquant: Llm quantiza-tion with learned rotations. In International Conference on Learning Representations , volume 2025, pp. 92009–92032, 2025b. Zechun Liu, Changsheng Zhao, Hanxian Huang, Sijia Chen, Jing Zhang, Jiawei Zhao, Scott Roy, Lisa Jin, Yunyang Xiong, Yangyang Shi, et al. Paretoq: Improving scaling laws in extremely low-bit llm quantization. Advances in Neural Information Processing Systems , 38:91311–91336, 2026. Sanae Lotfi, Polina Kirichenko, Steven Li, and Zechun Liu. Quantized reasoning models think they need to think longer, but they do not. In NeurIPS 2026 Poster , 2026. URL https:// neurips.cc/virtual/2026/poster/151668 .Vladimir Malinovskii, Denis Mazur, Ivan Ilin, Denis Kuznedelev, Konstantin Burlachenko, Kai Yi, Dan Alistarh, and Peter Richtarik. Pv-tuning: Beyond straight-through estimation for extreme llm compression. Advances in Neural Information Processing Systems , 37:5074–5121, 2024. Niklas Muennighoff, Luca Soldaini, Dirk Groeneveld, Kyle Lo, Jacob Morrison, Sewon Min, Wei-jia Shi, Pete Walsh, Oyvind Tafjord, Nathan Lambert, et al. Olmoe: Open mixture-of-experts language models. In International Conference on Learning Representations , volume 2025, pp. 62061–62121, 2025. Xu Ouyang, Tao Ge, Thomas Hartvigsen, Zhisong Zhang, Haitao Mi, and Dong Yu. Low-bit quan-tization favors undertrained llms. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pp. 32338–32348, 2025. Denis Paperno, Germ´ an Kruszewski, Angeliki Lazaridou, Ngoc-Quan Pham, Raffaella Bernardi, Sandro Pezzelle, Marco Baroni, Gemma Boleda, and Raquel Fern´ andez. The lambada dataset: Word prediction requiring a broad discourse context. In Proceedings of the 54th annual meeting of the association for computational linguistics (volume 1: Long papers) , pp. 1525–1534, 2016. Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. Winogrande: An adver-sarial winograd schema challenge at scale. Communications of the ACM , 64(9):99–106, 2021. Wenqi Shao, Mengzhao Chen, Zhaoyang Zhang, Peng Xu, Lirui Zhao, Zhiqian Li, Kaipeng Zhang, Gao Peng, Yu Qiao, and Ping Luo. Omniquant: Omnidirectionally calibrated quantization for large language models. In International Conference on Learning Representations , volume 2024, pp. 45472–45496, 2024. Albert Tseng, Jerry Chee, Qingyao Sun, Volodymyr Kuleshov, and Christopher De Sa. Quip#: Even better llm quantization with hadamard incoherence and lattice codebooks. Proceedings of machine learning research , 235:48630, 2024a. Albert Tseng, Qingyao Sun, David Hou, and Christopher De. Qtip: Quantization with trellises and incoherence processing. Advances in Neural Information Processing Systems , 37:59597–59620, 2024b. Albert Tseng, Zhaofeng Sun, and Christopher De Sa. Model-preserving adaptive rounding. In 
+
+International Conference on Machine Learning (ICML) , 2026. YAQA: Yet Another Quantization Algorithm. 13 Preprint. Under Review. Mart Van Baalen, Andrey Kuzmin, Ivan Koryakovskiy, Markus Nagel, Peter Couperus, Cedric Bas-toul, Eric Mahurin, Tijmen Blankevoort, and Paul Whatmough. Gptvq: The blessing of dimen-sionality for llm quantization. arXiv preprint arXiv:2402.15319 , 2024. Miles Williams and Nikolaos Aletras. On the impact of calibration data in post-training quantization and pruning. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pp. 10100–10118, 2024. Miles Williams, George Chrysostomou, and Nikolaos Aletras. Self-calibration for language model quantization and pruning. In Conference of the Nations of the Americas Chapter of the Association for Computational Linguistics , 2025. Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. Smoothquant: Accurate and efficient post-training quantization for large language models. In International conference on machine learning , pp. 38087–38099. PMLR, 2023. Yuhui Xu, Lingxi Xie, Xiaotao Gu, Xin Chen, Heng Chang, Hengheng Zhang, Zhengsu Chen, Xi-aopeng Zhang, and Qi Tian. Qa-lora: Quantization-aware low-rank adaptation of large language models. In International Conference on Learning Representations , volume 2024, pp. 52401– 52418, 2024a. Yuzhuang Xu, Xu Han, Zonghan Yang, Shuo Wang, Qingfu Zhu, Zhiyuan Liu, Weidong Liu, and Wanxiang Che. Onebit: Towards extremely low-bit large language models. Advances in Neural Information Processing Systems , 37:66357–66382, 2024b. An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388 , 2025. Zhihang Yuan, Yuzhang Shang, and Zhen Dong. Pb-llm: Partially binarized large language models. In The Twelfth International Conference on Learning Representations , 2024. Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. Hellaswag: Can a ma-chine really finish your sentence? In Proceedings of the 57th annual meeting of the association for computational linguistics , pp. 4791–4800, 2019. Jeffrey Zhou, Tianjian Lu, Swaroop Mishra, Siddhartha Brahma, Sujoy Basu, Yi Luan, Denny Zhou, and Le Hou. Instruction-following evaluation for large language models. arXiv preprint arXiv:2311.07911 , 2023. 14 Preprint. Under Review. 
+
+## A ADDITIONAL EXPERIMENTAL DETAILS AND RESULTS 
+
+In this section we provide additional details about out pipeline, evaluations and ablation studies on different knobs of the 2-bit quantization pipeline. A.1 EVALUATION PROTOCOLS AND RESULT PROVENANCE 
+
+Our results use four protocols. All of them run with lm-evaluation-harness 0.4.12 , transformers 
+
+4.53 .3, and greedy decoding. They use 5-shot MMLU and GSM8K (strict match) and 0-shot Hu-manEval (pass@1) and IFEval (prompt-strict). Most controlled comparisons use one protocol. Ta-ble 4 mixes labeled native-VPTQ P-bf16 entries into a P-fp16 comparison. 
+
+P-fp16 (completion prompts, float16) covers the main sweeps in Tables 3, 4, and 5. It also covers the Qwen3-MoE row of Table 8, the calibration sweeps, the recovery budget curve, and the Core6 seed table. 
+
+P-fp32 repeats P-fp16 in float32 for the two Phi-4-mini checkpoints affected by float16 decoding (Appendix A.8). 
+
+P-bf16 is the canonical controlled protocol. It uses completion prompts, bfloat16, per-item logs, and a finite-logit probe. It covers the Phi-4-mini and Llama-3.1-8B 2 × 2 design (Figure 2 and Table 21) and the Phi-4-mini and Llama-3.1-8B rows of Table 8. It also covers teacher-free recovery, learned SpinQuant, calibration-side controls, and the dense-32B and OLMoE evaluations. 
+
+P-chat covers chat-template tables. It uses each model’s chat template with thinking disabled and at most 1,024 generated tokens. It runs in bfloat16 unless marked. A.2 EVALUATION DETAILS 
+
+Table 10: MoE VPTQ with expert-shared codebooks. One codebook per decoder layer and pro-jection type, shared by all experts ( 2.09 / 2.14 effective bits; P-bf16). HumanEval c uses the chat template. Parentheses give retention relative to BF 16 under the same protocol. This protocol is bfloat16 for Qwen3-MoE ( BF 16 score 92.7) and float16 for OLMoE ( BF 16 score 34.8).                                                  
+
+> Model Calibration AvgQA GSM8K HumanEval HumanEval c
+> Qwen3-MoE web 64.8 69.5 25.6 64.6 (70%) instruction 64.8 67.5 19.5 67.7 (73%) code 63.8 66.9 39.0 76.2 (82%) math 59.8 72.2 17.7 59.8 (64%) all-4 mixture 63.7 75.1 18.3 76.2 (82%) web/math 0.7/0.366.0 76.3 22.6 67.1 (72%) math+web 0.5/0.565.0 74.4 24.4 64.6 (70%) web/mixed 0.7/0.367.2 75.6 34.8 72.6 (78%) OLMoE-1B-7B web 62.7 11.8 7.9 7.3 (21%) math+web 63.0 18.7 11.6 12.2 (35%)
+
+Evaluation and reproducibility. We score tasks with an lm-evaluation-harness -based split-task orchestrator (Gao et al., 2021). Multiple-choice tasks use log-likelihood scoring. MMLU and GSM8K use 5-shot prompting. GSM8K and HumanEval use greedy decoding with temperature 
+
+0 and no sampling. They are scored by strict match and pass@1. Compute accounting uses 128 
+
+scalar-calibration sequences and 128 –2,048 vector-Hessian sequences per domain. Seed 42 is the default. A.3 PER -METHOD QUANTIZATION CONFIGURATIONS 
+
+Table 11 summarizes the quantization and recovery settings. Unless noted, methods target 2-bit weights at group size 128 and use the protocol of §A.2 with seed 42 .15 Preprint. Under Review. Table 11: Per-method configuration summary. Paradigm, effective bits per quantized weight including codebooks, trained parameters, and calibration or recovery data. All methods use group size 128 and the protocol of §A.2.                                     
+
+> Method Paradigm Eff. b/w Trained parameters Calibration / recovery data QuaRot scalar PTQ (rotation) 2.12 none (GPTQ) 128 sequences SpinQuant scalar PTQ (rotation) 2.12 none (GPTQ) 128 sequences GSQ trained scalar 2.12 grid assignments 0.1B-token, 10 epochs BitDistiller full QAT 2.12 all weights 1-epoch mixture VPTQ vector PTQ 2.09–2.33 codebook (post-hoc) per-domain Hessians YAQA vector PTQ 2.26–2.31 codebook (post-hoc) per-domain Hessians PTQ+RFT codebook recovery 2.26–2.31 codebook only task-aligned mixtures
+
+Table 12: Learning SpinQuant’s rotations does not move the 2-bit floor. AvgQA (seven-task mean) and AvgGen (GSM8K/HumanEval mean) for Cayley-optimized R1/R2 (100 steps, learning rate η), shown as ranges over web, math, mixed, and code calibration. Fixed is the best-domain AvgQA of Hadamard-initialized SpinQuant used elsewhere (Table 37). Learned rows use bfloat16.                                 
+
+> Fixed Learned, η=1 .5Learned, η=0 .25
+> Model Bits AvgQA AvgQA AvgGen AvgQA AvgGen Phi-4-mini 469.2 68.4–69.3 63.2–68.9 68.2–69.7 62.9–70.4 229.3 28.8–29.3 0.0 28.7–29.4 0.0 Llama-3.1-8B 471.8 70.4–71.6 36.5–40.5 70.9–71.9 37.1–41.8 229.8 28.7–29.4 0.0 29.3–29.7 0.0
+
+QuaRot and SpinQuant (scalar PTQ). QuaRot and SpinQuant apply an incoherence rotation before scale-only ≈ 2.12 -bit GPTQ quantization (Appendix A.2). QuaRot uses a fixed randomized Hadamard transform with activation ordering, Hessian-ordered columns, error feedback, and damp-ing 0.1. SpinQuant uses residual-stream and per-head rotations ( R1, R2) at randomized-Hadamard initialization, with experts rotated separately on Qwen3-MoE. Both methods consume 128 calibra-tion sequences and add no trained weights. 
+
+Learned-rotation in Spinquant. We test learned SpinQuant rotations on the two dense primary models (Table 12). We optimize R1 and R2 with Cayley SGD for 100 steps on the same 128 calibra-tion sequences from each domain. We use learning rates 1.5 and 0.25 , then the same GPTQ quan-tization. Learned rotations leave all 2-bit models at the random-accuracy floor and barely change best-domain 4-bit AvgQA (Table 12). The scalar cliff is not from the unoptimized rotation. We could not fit the full-precision copy needed for Qwen3-30B-A3B, so its SpinQuant entries keep the Hadamard initialization. 
+
+VPTQ (vector PTQ). VPTQ maps each 8-dimensional weight sub-vector to one of 65 ,536 (216 )codebook entries ( 2.00 index bits). Dense models use one 1 MiB FP 16 codebook per linear layer (2.12 –2.33 effective bits). MoEs use expert-shared codebooks ( 2.09 –2.14 ). VPTQ uses channel-independent second-order optimization over a shared Hadamard frame with input Hessians collected by calibration domain. The rate control of §A.4 uses one model-wide 262 ,144 -entry ( 218 ) codebook, giving 2.25 index bits and 2.26 effective bits. 
+
+YAQA (vector PTQ). YAQA uses a trellis codebook with Fisher-weighted, Kronecker-factored curvature from the full-model KL objective and 2.25 index bits. Sign vectors and a shared lookup table bring the rate to 2.26 –2.31 effective bits. YAQA also retains a fine-tuning-ready codebook under the same incoherence rotation, with curvature estimated from 128 –2,048 sequences per cali-bration domain. 
+
+GSQ (trained scalar). GSQ learns discrete grid assignments through a Gumbel-softmax relax-ation initialized with GPTQ ( 512 sequences). It optimizes one transformer block at a time with detached inputs. It runs 10 epochs over a 0.1B-token calibration set ( 48 ,828 sequences of length 
+
+2048 ) with group size 128 and a Lion optimizer. 16 Preprint. Under Review. Table 13: Vector-quantizer rate control (Phi-4-mini). Rows give index / effective bits per weight. 
+
+Model-wide denotes one 218 -entry codebook shared by all linear layers, matching YAQA’s effective bits (P-bf16). Its HumanEval is 0 on both recipes. AvgQA is the seven-task mean; AvgGen averages GSM8K and HumanEval (pass@1). Bold marks best per column.                        
+
+> web math Method (bits/weight) AvgQA AvgGen AvgQA AvgGen VPTQ ( 2.00 /2.33 )51 .51.241 .06.5
+> VPTQ, model-wide ( 2.25 /2.26 )58 .44.347 .511 .8
+> YAQA ( 2.25 /2.27 )63 .312 .258 .537 .4
+
+Table 14: AvgQA by vector quantizer and calibration domain. Bold marks the better method within each model/domain. S Expert-shared codebooks ( 2.09 effective bits, P-bf16).                                        
+
+> Model Method Web Instruct Math Code Mixture Phi-4-mini VPTQ 51.5 53.9 41.0 44.4 47.8 YAQA 63.3 56.8 58.5 55.9 58.8
+> Llama-3.1-8B VPTQ 57.6 59.8 45.7 53.4 54.5 YAQA 65.1 63.9 62.1 60.8 64.3
+> Qwen3-30B-A3B VPTQ S64.8 64.8 59.8 63.8 63.7 YAQA 66.0 64.9 64.5 62.8 66.0
+
+BitDistiller (full QAT). BitDistiller trains a Hadamard-rotated 2-bit model with asymmetric acti-vation clipping and CAKLD ( β ≈ 0.84 ). We run one FSDP full-shard epoch across 8 GPUs. We use sequence length 1024 , per-device batch 1, gradient accumulation 8 (effective batch 64 ), learning rate 2 × 10 −5 with cosine decay, and 10% warmup. The recovery mixture has ∼500 k dense-model sequences and ∼50 k Qwen3-MoE sequences. 
+
+Codebook-only recovery (PTQ+RFT). Recovery freezes the quantized backbone and discrete assignments, then updates only the continuous codebook, leaving the effective bitwidth unchanged. Scalar scale-only recovery is a limited control (Appendix A.7). We do not test zero-point recov-ery. This stage distills from a BF 16 or a x4 times smaller 4-bit teacher. The objective optimized is a temperature-1 forward-KL loss plus next-token cross-entropy. We optimize it with AdamW at learning rate 10 −4 and a cosine schedule. Long Phi-4-mini runs (Table 8 and the main run) use 8
+
+GPUs, per-device batch 1, gradient accumulation 2, sequence length 4,096 (65 ,536 tokens per opti-mizer step), 5,500 steps ( ≈360 M tokens), and 550 warmup steps on the recipe mixture. Llama uses the same layout for ≈185 M tokens. Qwen3-MoE uses sequence length 512 , gradient accumulation 
+
+2, a device-sharded teacher, and ≈1.2M tokens. Controlled short runs cover the 2 × 2 design, bud-get curve, seeds, and teacher-free control. They run on one GPU with per-device batch 1, gradient accumulation 8, sequence length 1,024 (8 sequences per step), and 40 warmup steps. The 51 ,200 -example point keeps 8 sequences per step with 8-GPU data parallelism. Ablations and LoRA are in §A.7 and §A.11. A.4 PER -DOMAIN VECTOR -QUANTIZER COMPARISON 
+
+Table 14 compares VPTQ and YAQA by calibration domain. YAQA wins all completed dense-model comparisons. Expert-shared VPTQ stays close on Qwen3-MoE web, instruction, and code, and on Phi-4-mini math and code. 
+
+YAQA’s advantage is not a bit-rate advantage. On Phi-4-mini, VPTQ trails YAQA even when it spends more bits. With per-linear (2 16 , 8) codebooks, VPTQ uses 2.33 effective bits and YAQA uses 2.27 . At matched bits, a model-wide 218 -entry VPTQ codebook ( 2.26 bits) narrows but does not close the web gap and trails further on math (Table 13). 17 Preprint. Under Review. Table 15: Vector PTQ versus trained scalar quantization at 2 bits. AvgQA ( ↑). “Best VQ” selects the strongest task-complete VPTQ or YAQA checkpoint for each model within the 2.5-bit budget. The last column is Best VQ minus the scalar baseline. 
+
+Model Scalar baseline AvgQA Best VQ AvgQA ∆
+
+Phi-4-mini GSQ 52.6 YAQA 63.3 +10.7 Phi-4-mini BitDistiller 53.0 YAQA 63.3 +10.3 Llama-3.1-8B GSQ 57.0 YAQA 65.7 +8.7 Llama-3.1-8B BitDistiller 60.3 YAQA 65.7 +5.4 Qwen3-MoE BitDistiller 55.9 YAQA 66.7 +10.8 
+
+Table 16: Task-complete 2-bit YAQA calibration sweep. QA and generation means from com-plete per-task evaluations. Blank weight entries mean absent sources. Dashes mark cells with only aggregate AvgQA/HEval. ∆complete excludes dashed result cells.                                                                                                                              
+
+> Hessian mixture weight Phi-4-mini Llama-3.1-8B Qwen3-30B-A3B Group Recipe Code Web Math Instr QA Gen QA Gen QA Gen Single Web 163.3 12.2 65.1 9.6 66.0 54.0 Instruct 156.8 10.7 63.9 11.8 64.9 49.8 Math 158.5 37.4 62.1 26.6 64.5 61.8 Code 155.9 18.7 60.8 22.6 62.8 48.9 Standard mix math+web 0.5 0.5 62.6 24.7 65.7 17.8 66.7 56.5 web+math 0.7 0.3 63.0 27.7 65.5 15.1 65.8 56.2 web+instruct 0.6 0.4 58.7 14.6 65.7 16.5 66.6 51.4 math+instruct 0.6 0.4 57.3 18.2 64.6 17.6 64.2 53.8 code+web 0.6 0.4 58.0 18.2 64.3 21.6 65.2 59.4 code+math 0.6 0.4 56.2 19.4 61.6 23.5 63.9 53.7 code+math+web 0.4 0.3 0.3 57.8 23.4 64.6 22.0 65.9 61.8 all-4 0.25 0.25 0.25 0.25 58.8 19.9 65.2 20.1 66.0 59.3 Targeted mwi442 0.4 0.4 0.2 59.5 17.1 62.7 12.2 66.5 62.4
+> ∆complete 7.5 26.7 4.9 17.0 3.9 13.5
+
+A.5 CROSS -PARADIGM 2-BIT COMPARISON 
+
+Table 15 compares trained scalar checkpoints with the strongest in-budget vector PTQ result on the same model in AvgQA. The vector checkpoint leads across models. BitDistiller performs full-model QAT, GSQ performs layer-wise discrete optimization, and VPTQ and YAQA are PTQ without training the weights. A.6 COMPLETE CROSS -MODEL CALIBRATION SWEEP 
+
+Table 16 keeps recipes evaluated on all three main model families. The final row summarizes the task-complete spread. The per-domain scalar sweep measures calibration sensitivity at 4 bits. Ta-ble 17 reports the AvgQA and AvgGen spread across web, instruction, math, code, and mixed do-mains, alongside the 2-bit YAQA spread (Tables 16 and 5). The 4-bit scalar spreads are smaller. The comparison crosses representations and recipe grids because 2-bit scalar models are at the random floor for every domain. It does not isolate a bitwidth-only effect (Table 17). Table 17: Spread across calibration domains, 4-bit scalar versus 2-bit vector. Max minus min over five calibration domains (4-bit) or the full recipe sweep (2-bit YAQA). AvgQA is the seven-task mean. AvgGen is the GSM8K/HumanEval mean. 
+
+4-bit scalar (QA / Gen spread) 2-bit YAQA Model SpinQuant QuaRot KronQ (QA / Gen) Phi-4-mini 1.4 / 2.9 0.5 / 6.5 1.3 / 5.0 7.5 / 26.7 Llama-3.1-8B 1.6 / 4.4 1.0 / 2.6 0.6 / 7.3 4.9 / 17.0 
+
+18 Preprint. Under Review. Table 18: Benchmark overlap ( 13 -gram) with the first 20 ,000 rows of each calibration/recovery source. Entries give the percentage of evaluation items sharing at least one 13 -gram with the source text. 
+
+Source GSM8K (test) HumanEval MATH-500 web (FineWeb-Edu) 0.0 0.0 0.0 math (OpenR1-Math-220k) 0.0 0.6 4.8 code (Evol-Instruct-Code-80k) 0.0 5.5 1.0 instruction (Alpaca-cleaned) 0.0 2.4 0.6 
+
+Table 19: Codebook-only recovery ablations. Per-task accuracy on Phi-4-mini 2-bit YAQA. AvgQA is the mean of the seven QA tasks. GSM8K and HEval are reported separately.                                                                                                                                                                                                                           
+
+> Axis Setting MMLU WG ARC-e ARC-c HS LMB PIQA GSM8K HEval AvgQA
+> References
+> BF 16 ceiling 68.7 71.9 80.3 58.9 72.7 66.0 78.3 81.9 64.6 71.0 2-bit YAQA, no recovery 51.7 63.6 73.6 48.5 61.7 59.8 73.7 44.9 8.5 61.8
+> Loss (soft cross-entropy uses teacher targets and equals forward KL up to the teacher entropy) Forward KL 53.7 66.1 75.0 50.4 63.9 60.5 75.1 49.6 19.5 63.5 Reverse KL 53.6 65.7 74.7 50.4 63.8 60.1 74.9 50.2 20.1 63.3 Soft cross-entropy (teacher) 53.7 65.8 75.0 50.5 63.9 60.5 74.9 49.7 20.1 63.5
+> Teacher precision
+> BF 16 53.7 66.1 75.0 50.4 63.9 60.5 75.1 49.6 19.5 63.5 4-bit matched 53.7 66.5 74.6 50.4 63.8 61.2 75.1 48.7 18.9 63.6
+> Temperature
+> τ= 0 .553.4 66.4 75.0 50.7 63.8 60.3 74.8 48.4 19.5 63.5
+> τ= 1 .053.7 66.1 75.0 50.4 63.9 60.5 75.1 49.6 19.5 63.5
+> τ= 2 .053.7 66.1 74.8 50.3 63.5 60.1 74.9 50.2 19.5 63.3
+> Logit support
+> k= 128 53.6 65.7 75.0 50.4 63.9 60.7 75.1 49.4 20.1 63.5
+> k= 512 53.6 65.8 75.0 50.5 64.0 60.5 75.0 49.1 20.1 63.5
+> k= 1024 53.6 65.6 75.1 50.6 63.9 60.6 74.9 49.8 20.1 63.5 Full vocabulary 53.7 66.1 75.0 50.4 63.9 60.5 75.1 49.6 19.5 63.5
+> Recovery data
+> Web 53.7 66.1 75.0 50.4 63.9 60.5 75.1 49.6 19.5 63.5 Instruct 53.2 66.7 75.0 50.2 63.9 59.8 75.1 49.4 14.6 63.4 Math 53.6 65.3 73.2 48.7 63.3 60.0 74.2 58.4 10.4 62.6 Code 53.4 66.0 73.0 49.4 63.4 62.0 74.5 53.3 21.3 63.1 Mixture 53.7 66.1 74.8 50.3 64.0 60.3 74.8 55.0 17.7 63.4
+> Selected run (best QA/generation balance): mixture data 53.7 66.1 74.8 50.3 64.0 60.3 74.8 55.0 17.7 63.4
+
+A.7 CODEBOOK -ONLY RECOVERY ABLATIONS 
+
+The codebook-only ablation uses the Phi-4-mini 2-bit YAQA mw64 checkpoint with math+web calibration. The reference configuration is forward KL, τ = 1 , full-vocabulary distillation, a BF 16 teacher, and web recovery data. Each block varies one factor. Note that fixed-base reference differs from the web row of Table 8, which recovers the web-calibrated base. 
+
+Teacher-free recovery. We recovered the math-calibrated Phi-4-mini base of Appendix A.8 on the same 3,200 web examples with plain next-token cross-entropy and no teacher, keeping every other setting fixed (seed 42 , bfloat16 evaluation). It reaches the same qualitative level as forward-KL distillation from a 4-bit teacher (three seeds, Table 21) and stays above the no-recovery base. In this single-seed Phi-4-mini setting, the teacher improves the result, but recovery data accounts for most of the effect. 
+
+Scale-only recovery of a scalar 2-bit model. We applied the same recovery recipe (forward KL, web data, 1,024 -token context) to a scalar 2-bit Phi-4-mini model. This setup uses Hadamard ro-tation, GPTQ with activation ordering, group size 128 , and scale-only recovery. We trained only the per-group scales, with the integer codes frozen ( ≈P/ 128 parameters). Recovery moves AvgQA only slightly off the floor, while GSM8K and HumanEval stay near zero. With fixed codes, rescaling does not rescue the scalar model. The same 3,200 -example web-recovery recipe helps 2-bit code-19 Preprint. Under Review. Table 20: Calibration and recovery interact at matched budget. AvgGen is the mean of GSM8K and HumanEval. The final column is held out from recipe selection. Core6 averages 6 QA tasks (excluding MMLU)                               
+
+> Calibration Recovery Core6 GSM8K HumanEval AvgGen IFEval Web Web 65.7 23.5 14.0 18.8 28.1 Web Math 65.0 35.1 14.0 24.6 26.6 Math Web 61.6 56.3 31.1 43.7 32.0
+> Math Math 60.1 60.1 25.0 42.6 27.5
+
+book models of Phi-4-mini (Tables 1 and 8). BitDistiller trains all weights and still trails no-recovery vector PTQ in generation (Figure 1b). A.8 CONTROLLED CALIBRATION –RECOVERY INTERACTION 
+
+To test additivity, we crossed web and math calibration bases with web and math recovery data on Phi-4-mini. All cells use codebook-only recovery with frozen assignments, 3,200 examples, context length 1,024 , a 4-bit teacher, and seed 42. IFEval is held out from main-study AvgQA/AvgGen recipe selection. Core6 averages ARC-Easy, ARC-Challenge, PIQA, HellaSwag, WinoGrande, and LAMBADA and is not directly comparable to the paper’s seven-task AvgQA. The recovery-data effect depends on the calibration base. Math recovery helps from the web base but not from the math base (Table 20; statistical summaries in Table 2). From the math base, math rather than web recovery trades higher GSM8K for lower HumanEval, Core6, and held-out IFEval (Table 20). Calibration and recovery data therefore cannot be tuned independently. 
+
+Quantity control. Holding the web base, FineWeb-Edu recovery source, context length, and all optimization settings fixed, increasing recovery data from 800 to 3,200 examples leaves Core6 nearly unchanged and improves AvgGen. The complete budget curve uses the math-calibrated base (Ta-ble 22). 
+
+Data-source control. At the same 3,200 -example budget, with every other recovery setting fixed, replacing filtered FineWeb-Edu with unfiltered C4 leaves Core6 and held-out IFEval essentially unchanged but lowers both generation tasks and AvgGen. The generation benefit is not explained by recovery-set size alone. FineWeb-Edu and C4 differ in filtering, distribution, and collection history, so this control identifies a data-source effect rather than isolating filtering quality. Over the tested range, quality and quantity both matter for recovery data. The calibration-side analogue follows. 
+
+Calibration-side controls. We also varied the Hessian calibration set of the web-calibrated Phi-4-mini YAQA base (no recovery, bfloat16 evaluation, seven-task AvgQA). At a matched 256 se-quences, filtered FineWeb-Edu and unfiltered C4 Hessians give similar QA and only small genera-tion differences. Growing the FineWeb-Edu set from 256 to the 2,048 sequences of our web base mainly improves QA while leaving AvgGen unchanged. The source effect is small and generation-side (the HumanEval gap is three problems), so we treat it only as initial experimental evidence. 
+
+Generalization to a second model family. Repeating the 2 × 2 design on Llama-3.1-8B repro-duces the same sign with smaller magnitude than Phi-4-mini. Filtered FineWeb-Edu recovery im-proves AvgGen while leaving Core6 essentially unchanged. 
+
+Recovery budget. All cells use 3,200 × 1,024 ≈ 3.3M recovery tokens. This is about 100 PFLOP at 8N per token on Phi-4-mini ( N = 3 .84 ×10 9) and roughly 1% of the ∼360 M-token main recovery run. The math-calibrated, web-recovered cell reaches the same range as the mw64 (math web 0.6 and 0.4) checkpoint under comparable protocols). The budget curve in Table 22 shows generation saturating near 3,200 examples. 
+
+Seed replicates of the 2 × 2 design. We repeat every cell of the 2 × 2 design on both models with two further recovery seeds ( 1 and 2) under the protocol of Table 20. On Llama-3.1-8B the sign is stable across recovery seeds. On Phi-4-mini every cell is similarly stable. 20 Preprint. Under Review. Table 21: Single-protocol bfloat16 evaluation of the 2 × 2 design. Mean ± sample std over three recovery seeds per cell. Every row uses bfloat16 weights and activations and the seven-task AvgQA (with MMLU). none rows are the no-recovery 2-bit YAQA bases. The BF 16 row averages two independent evaluations. See Table 2 for interaction statistics. “Math” is OpenR1-Math.                                                                                            
+
+> Calib. Recovery AvgQA GSM8K HEval AvgGen IFEval
+> Phi-4-mini (three recovery seeds)
+> BF 16 70.8 81.7 62.8 72.3 55.8 web none 63.1 15.5 6.7 11.1 29.0 web web 63 .3±0.124 .2±0.313 .6±0.918 .9±0.529 .8±1.3
+> web math 62 .8±0.133 .8±0.714 .2±0.924 .0±0.423 .4±1.6
+> math none 58.3 53.2 20.1 36.7 31.2 math web 60 .0±0.156 .9±0.634 .6±0.745 .7±0.131 .3±0.6
+> math math 58 .7±0.160 .1±0.524 .6±2.542 .3±1.027 .0±0.5
+> Llama-3.1-8B (seeds 42 ,1,2)
+> BF 16 73.2 50.2 37.8 44.0 9.4 web none 65.1 11.6 7.3 9.5 9.2 web web 64 .1±0.16.6±0.210 .8±0.78.7±0.44.7±0.2
+> web math 63 .7±0.19.9±0.211 .2±0.410 .5±0.24.3±0.1
+> math none 62.0 33.4 21.3 27.4 9.1 math web 62 .4±0.127 .4±0.817 .1±0.622 .2±0.53.9±0.3
+> math math 61 .4±0.128 .2±0.514 .6±0.621 .4±0.44.6±0.2
+
+Table 22: Recovery accuracy versus data budget (Phi-4-mini, 2-bit YAQA, math-calibrated base, FineWeb-Edu codebook-only recovery, seed 42 , P-fp16). Tokens are examples ×1,024 . PFLOP assumes 8N per token. †No-recovery base (Table 8).                         
+
+> Examples Tokens PFLOP AvgQA AvgGen
+> 0†0058.5 37.4
+> 200 0.2M 658.8 38.5
+> 800 0.8M 25 59.1 41.8
+> 3,200 3.3M 101 60.3 43.7
+> 12 ,800 13.1M 403 61.0 44.2
+
+A.9 HELD -OUT MODEL AND GENERATION BENCHMARKS 
+
+We verify our findings on interaction between calibration and recovery on the Qwen3-8B model in Table 23. We scored every 2 × 2 checkpoint and base on MBPP (3-shot), HumanEval+ (0-shot), and MATH-500 (4-shot, Minerva prompt). The three-task interaction is negative on all three models, with intervals excluding zero for Phi-4-mini and Qwen3-8B (Table 24). It is largest on HumanEval+, which reuses HumanEval’s prompts. The math-calibrated bases are much stronger than the web-calibrated ones, and on Llama-3.1-8B the no-recovery math base again beats both recovered cells. By benchmark (Table 24), the prompt-independent MBPP and MATH-500 contrast excludes zero only for Phi-4-mini. Llama’s MBPP contrast is positive, and MATH-500 shows no consistent effect. Table 23: Pre-registered Qwen3-8B 2 × 2 design (2-bit YAQA, P-bf16; mean ± std over three recovery seeds). none denotes the no-recovery base.                                                
+
+> Calib. Recovery AvgQA GSM8K HEval AvgGen IFEval
+> BF 16 70.9 87.5 61.6 74.5 25.0 web none 63.3 53.0 7.9 30.5 15.2 web web 65 .1±0.156 .2±0.414 .6±0.035 .4±0.216 .2±0.6
+> web math 64 .8±0.058 .2±0.519 .9±0.739 .0±0.216 .8±0.9
+> math none 60.7 77.9 20.1 49.0 16.5 math web 63 .9±0.178 .8±0.134 .6±0.456 .7±0.116 .8±0.9
+> math math 62 .3±0.077 .0±0.224 .8±0.750 .9±0.415 .0±0.5
+
+21 Preprint. Under Review. Table 24: Held-out interaction contrasts by benchmark (95% hierarchical bootstrap). Hu-manEval+ shares HumanEval’s prompts; MBPP and MATH-500 are independent. Bold marks in-tervals that exclude zero. 
+
+Benchmark Phi-4-mini Llama-3.1-8B Qwen3-8B MBPP −5.6 [−9.7, −1.5] +0 .9 [−3.0, 4.5] −6.8 [−10 .8, −2.7] 
+
+HumanEval+ −12 .2 [−19 .7, −4.7] −3.7 [−7.1, −0.4] −13 .0 [−20 .5, −6.1] 
+
+MATH-500 −2.7 [−6.7, 1.1] −2.0 [−4.8, 0.8] +1 .7 [−2.5, 5.9] 
+
+MBPP+MATH-500 −4.2 [−7.2, −1.3] −0.6 [−2.9, 1.8] −2.6 [−5.6, 0.5] 
+
+All three −6.8 [−10 .1, −3.6] −1.6 [−3.6, 0.3] −6.0 [−9.2, −3.0] 
+
+Table 25: Interaction across disjoint recovery-data samples (Phi-4-mini, original bases, P-bf16; GSM8K / HumanEval per cell, interaction on AvgGen). The original row is the 3,200 -example sample of Table 1 (mean over three seeds). The 20 k and 40 k rows are samples drawn through the same shuffle buffer after skipping 20 k/ 40 k source rows (seed 42 ). They share no rows with the original. 
+
+Sample web →web web →math math →web math →math Interaction original 24.2 / 13.6 33.8 / 14.2 56.9 / 34.6 60.1 / 24.6 −8.5+20 k rows 23.2 / 13.4 33.6 / 12.2 56.3 / 35.4 60.1 / 25.0 −7.9+40 k rows 25.1 / 14.6 34.4 / 14.6 58.4 / 31.7 61.5 / 27.4 −5.3
+
+A.10 MOE ROUTER PRECISION 
+
+Router precision does not explain Qwen3-MoE’s strong 2-bit retention. Across two YAQA check-points, 2-bit routers remain essentially matched to fp16 routers (Table 29). A.11 LORA-BASED RECOVERY 
+
+LoRA (Hu et al., 2022) adapters raise attainable generation accuracy for codebook recovery but change the trainable and stored parameterization, so we report them separately. HumanEval uses adapters folded into materialized weights. Across recovery datasets, QA stays stable, while the best generation task depends on recovery domain, with the same pattern on Llama (Table 30). The best folded Phi checkpoint reaches 34 .8 IFEval prompt-strict accuracy. Table 31 reports the remaining one-factor-at-a-time ablation axes. On Phi-4-mini, changing loss, temperature, logit support, or teacher precision leaves AvgQA nearly unchanged, while HumanEval varies more (Table 31). Table 26: Interaction across independently quantized bases (Phi-4-mini, 2-bit YAQA, P-bf16). Each row is one quantized base. The original row is the base of Table 1 (mean over three recovery seeds), and replicates use seed 42 . The recovery-data effect is math minus web recovery (AvgGen). 
+
+web recovery math recovery Calib. Base GSM8K HEval AvgGen GSM8K HEval AvgGen Effect web original 24.2 13.6 18.9 33.8 14.2 24.0 +5 .1
+
+web replicate 1 29.9 8.5 19.2 42.3 6.7 24.5 +5 .3
+
+web replicate 2 25.7 10.4 18.0 39.6 17.1 28.3 +10 .3
+
+math original 56.9 34.6 45.7 60.1 24.6 42.3 −3.4
+
+math replicate 1 57.3 33.5 45.4 61.0 27.4 44.2 −1.2
+
+math replicate 2 61.4 32.9 47.2 64.1 23.2 43.6 −3.6
+
+22 Preprint. Under Review. Table 27: Native versus rotated VPTQ, and YAQA on the same calibration domain (AvgQA / AvgGen, P-bf16; †P-fp16). Effective bits are 2.33 / 2.27 for VPTQ (Phi-4-mini / Llama-3.1-8B) and 
+
+2.27 / 2.26 for YAQA. 
+
+Model Method Web Instruct Math Code Mixed Phi-4-mini VPTQ-rotated 51.4 / 1.5 53.7 / 7.5 40.9 / 6.4 44.6 / 11.4 47.6 / 7.8 VPTQ-native 57.4 / 7.6 57.6 / 12.9 47.8 / 13.2 51.0 / 29.5 56.2 / 26.0 YAQA-rotated 63.1 / 11.1 56.8 / 10.9 58.3 / 36.7 55.8 / 19.2 58.8 † / 19.9 †
+
+Llama-3.1-8B VPTQ-rotated 57.5 / 2.6 59.6 / 10.3 45.8 / 8.5 53.2 / 15.8 54.4 / 13.2 VPTQ-native 63.3 / 5.5 62.4 / 11.4 57.8 / 16.0 57.6 / 19.7 62.0 / 17.1 YAQA-rotated 65.1 / 9.5 63.7 / 12.3 62.0 / 27.4 60.7 / 22.9 64.2 / 18.5 
+
+Table 28: Calibration-domain sensitivity of BitDistiller on Llama-3.1-8B. AvgQA and Hu-manEval for the five base-domain checkpoints plus the larger Mixed-500k recipe. 
+
+Method Domain AvgQA HEval BitDistiller Web 56.1 1.8 Instruct 35.9 0.0 Math 38.0 0.0 Code 32.4 0.6 Mixture 60.3 22.6 
+
+Mixed-500k 54.9 15.9 
+
+Table 29: Qwen3-MoE router-precision ablation. Expert weights remain at their vector-quantized 2-bit setting; only router precision changes. The checkpoint labels are those in the router-ablation runs, scored by their QA average. Compare only within-row precision deltas. 
+
+Checkpoint fp16 8-bit 4-bit 2-bit YAQA math+web 68.5 68.5 68.5 68.6 YAQA MWI442 68.2 68.1 68.0 68.0 
+
+Table 30: LoRA + codebook recovery by recovery dataset. Per-task accuracy after folding the adapters into each materialized checkpoint. AvgQA averages the seven QA tasks. The Phi-4-mini aggregates cover all reported configurations.                                                                                                      
+
+> Model Recovery data MMLU WG ARC-e ARC-c HS LMB PIQA GSM8K AvgQA HEval Phi-4-mini Web 55.8 65.7 76.3 51.0 65.5 61.5 75.3 45.3 64.4 17.7 Instruct 55.6 65.3 75.5 51.0 65.7 60.7 75.5 50.7 64.2 30.5 Math 54.8 64.3 76.3 50.0 65.1 60.5 74.4 63.3 63.6 19.5 Code 55.1 64.6 73.7 50.4 65.4 61.8 75.0 52.5 63.7 32.9
+> Mixture 56.0 64.6 75.0 50.9 65.0 60.5 75.2 56.9 63.9 29.3 Llama-3.1-8B Web 49.7 69.9 76.6 48.8 73.4 69.0 78.7 23.3 66.6 13.4 Math 49.7 69.2 77.4 48.3 73.3 69.2 78.2 33.7 66.5 14.6 Code 48.7 69.1 76.8 48.6 73.7 68.4 78.2 26.1 66.2 26.2
+> Mixture 50.2 70.3 78.3 48.7 74.5 67.5 78.2 30.9 66.8 19.5
+
+23 Preprint. Under Review. Table 31: LoRA + codebook one-factor-at-a-time ablations. Aggregate results for the non-data axes. The baseline uses forward KL, τ = 1 , full-vocabulary logits, a BF 16 teacher, and web recovery data. Dashes denote unavailable complete task aggregates.                                                      
+
+> Phi-4-mini Llama-3.1-8B Axis Setting AvgQA HEval AvgQA HEval Baseline Forward KL, τ= 1 , full vocab 64.4 17.7 66.6 13.4 Loss Reverse KL 64.1 21.3 66.5 15.2 Cross-entropy 64.4 19.5 66.6 14.0 Temperature τ= 0 .564.1 16.5 66.3 14.0
+> τ= 2 64.0 18.9 ––Logit support
+> k= 128 64.4 17.7 66.3 14.0
+> k= 512 64.5 17.7 66.5 13.4
+> k= 1024 64.5 16.5 66.5 13.4 Teacher 4-bit matched 64.3 15.9 66.3 13.4
+
+Table 32: Qwen3-8B (dense) at 2 bits, math+web calibration. Entries are per-task accuracy. AvgQA averages the seven QA tasks. HumanEval reports pass@1. Bold marks the better of VPTQ and YAQA per column.                                 
+
+> Method MMLU WG ARC-e ARC-c HS LMB PIQA GSM8K AvgQA HEval
+> BF 16 75.0 67.8 80.9 56.4 74.9 64.6 77.7 87.3 71.0 64.0 VPTQ 56.7 62.4 75.7 46.2 59.6 52.0 73.0 64.4 60.8 2.4 YAQA 63.7 65.7 74.1 48.3 65.4 55.6 73.2 68.6 63.7 7.9
+
+A.12 QWEN 3-8B We evaluate Qwen3-8B (Yang et al., 2025), a third dense model, at 2 bits with math+web calibration. YAQA beats VPTQ on aggregate and generation metrics, and on all evaluated tasks except ARC-Easy (Table 32). Appendix A.9 also reports web and math YAQA bases with crossed recovery. A.13 SEPARATING SPARSITY FROM MODEL SCALE WITH DENSE QWEN 3-32B As a size control for sparse Qwen3-30B-A3B, we quantize dense Qwen3-32B (Yang et al., 2025) with 2-bit VPTQ on web Hessians. The dense model retains nearly all QA and completion-style generation (Table 33). HumanEval retention rises with total size within the Qwen3 family. Qwen3-MoE is highest, dense Qwen3-32B is between it and Qwen3-8B, and OLMoE is close to the smaller dense models. IFEval retention is similar for the two ∼30 B models. We also evaluate another MoE, the OLMoE (Muennighoff et al., 2025) model both the 2-bit vector variants recover most of the 
+
+> BF
+
+16 AvgQA score (Table 34). A.14 ADDITIONAL ANALYSES 
+
+Figures 6–7 summarize two cross-cutting trends from our 2-bit sweeps. Figures 8–10 and Table 37 add four supporting analyses. First, QA and next-word prediction survive 2-bit vector PTQ, while generation is fragile. Second, generation retention is model-dependent (Figure 9). Third, vector PTQ improves the nominal quality–rate trade-off. Fourth, the scalar 2-bit cliff holds across scalar PTQ methods and different models. A.15 GENERATION UNDER THE 2-BIT CLIFF 
+
+Figure 12 reproduces the main-paper generation teaser on Phi-4-mini. AvgGen is the mean of GSM8K and HumanEval. SpinQuant collapses by 3-bit and drops to zero at 2-bit, while a vec-tor codebook (YAQA, mw64 base) restores part of the gap. Figure 1(b) adds recovery. Figures 13 and 14 extend Figure 1(b) to Llama-3.1-8B and Qwen3-30B-A3B. Each 2-bit method is plotted at its Table 4 score against training compute, with the 4-bit and 2-bit scalar ladder for reference. Vector 24 Preprint. Under Review. Table 33: Generation retention by model size and sparsity. The completion-style column gives the best 2-bit AvgGen relative to BF 16. The HumanEval column gives the range of 2-bit HumanEval retention under the chat template. Parameters are total / active (billions). ∗Single recipe (VPTQ, web). †Llama-3.1-8B is a base model without a chat template, so HumanEval uses completion-style bfloat16 evaluation. §Math-calibrated base under P-bf16. The separate math+web checkpoint uses P-fp16. 
+
+Model Type Params (B) Completion HumanEval Phi-4-mini dense 3.8 51% 19 –45% 
+
+OLMoE-1B-7B MoE 6.9 / 1.3 64% 49% 
+
+Llama-3.1-8B dense 8.0 62% 19 –73% †
+
+Qwen3-8B dense 8.2 66% § 42 –45% 
+
+Qwen3-32B dense 32 .8 100% ∗ 68% ∗
+
+Qwen3-30B-A3B MoE 30 .5 / 3.3 101% 81% 
+
+Table 34: OLMoE-1B-7B-Instruct at 2 bits. The model has 64 non-fused experts. S Expert-shared codebooks ( 2.14 effective bits, P-bf16). 
+
+Configuration AvgQA GSM8K HEval PTB ppl 
+
+> BF
+
+16 ceiling 68.3 33.7 31.1 14.7 VPTQ S web 62.7 11.8 7.9 22.2 VPTQ S web+math 63.0 18.7 11.6 21.7 YAQA web+math 64.0 26.0 15.2 19.3 
+
+PTQ (YAQA/VPTQ) matches or beats GSQ and BitDistiller at less compute. Dense Llama loses more generation at 2 bits, while Qwen3-MoE stays near its under-measured completion-prompt ref-erence and retains more under the chat template. A.16 OVERTHINKING BEHAVIOR AT 2-BITS : A DDITIONAL DETAILS 
+
+Figure 15 presents the effect of repetition penaty on accuracy and 4-gram lopp score at bf16 and 2-bit precisions. 
+
+Qualitative examples. Two representative MATH-500 generations from the 2-bit Qwen3-MoE checkpoint illustrate bounded solving and looping under default greedy decoding. 
+
+2-bit, bounded and correct (Level-4, gold = √5)
+
+“I need the radius of a right cylindrical tank filled at 20 π m3/hr while the level rises 4 m/hr. Since 
+
+V = πr 2h, dV dt = πr 2 dh dt , so 20 π = πr 2 · 4 ⇒ r2 = 5 ⇒ r = √5.” The model emits a bounded 
+
+1,740 -token chain and terminates with the correct \boxed {√5}.
+
+2-bit, looping failure (Level-5, gold = 6 − 5i)
+
+“I need to rotate z around c by π/ 4: w = ( z − c)eiπ/ 4 + c. Let me compute z − c. . . ” The chain reasons coherently at first. It then collapses into a degenerate repetition of one algebraic line (loop score 0.94 ). It fills all 8,192 tokens without ever emitting a boxed answer , so it is scored wrong. With a repetition penalty of 1.3 the same model solves this problem. 
+
+25 Preprint. Under Review. Table 35: IFEval prompt-strict accuracy (completion prompts). 
+
+Model Configuration IFEval Phi-4-mini-instruct BF 16 56.6 2-bit YAQA (math+web) 37.2 + codebook recovery 36.0 Llama-3.1-8B BF 16 8.9 2-bit YAQA 7.4 Qwen3-30B-A3B BF 16 28.3 2-bit YAQA 24.4 OLMoE-1B-7B-instruct 2-bit YAQA 25.5 
+
+Table 36: Recovered checkpoints under the chat template (bfloat16; GSM8K 5-shot, 
+
+humaneval instruct pass@1, IFEval prompt-strict). 
+
+Calib. Recovery GSM8K HumanEval IFEval 
+
+Phi-4-mini (YAQA) 
+
+> BF
+
+16 81.4 73.8 69.7 web none 13.0 15.2 43.1 web web 24.4 18.9 43.8 web math 36.5 21.3 44.2 math none 55.0 34.1 40.3 math web 58 .9 43 .9 44 .5
+
+math math 61.5 37.2 37.9 
+
+Qwen3-30B-A3B (YAQA, web calibration) 
+
+> BF
+
+16 91.1 92.7 82.6 web none 58.0 75.0 72.6 web web 62.4 76.8 74.7 20 40 60 80 
+
+Accuracy (%) across 2-bit calibration recipes 
+
+> Phi-4-mini Llama-3.1-8B Qwen3-30B-A3B
+> span 7.5
+> span 25.2
+> span 4.9
+> span 17.0
+> span 3.9
+> span 13.5
+
+Calibration barely moves QA, strongly moves generation 
+
+> QA average Generation average
+
+Figure 6: Calibration composition primarily moves generation, not QA. Across 2-bit YAQA calibration recipes, QA varies modestly while generation moves more. The full sweep is in Table 5. 26 Preprint. Under Review. Loss type Temperature Top-k Teacher bits Recovery data 
+
+0123456   
+
+> Range over sweep (max - min, pts)
+> 0.6 0.9 0.4 0.8 5.3
+> 0.2 0.2 0.0 0.1 0.9
+> only the data axis matters
+
+Recovery: data composition moves generation; KD hyperparameters do not 
+
+> AvgGen range AvgQA range
+
+Figure 7: In recovery, data composition dominates; KD hyperparameters move it little across the tested grid. Loss type, temperature, top-k, and teacher precision have smaller effects, especially for generation. MMLU WG ARC-e ARC-c HS LMB PIQA GSM8K HEval Phi-4-mini (YAQA) Llama-3.1-8B (YAQA) Qwen3-MoE (VPTQ S, web) OLMoE-1B-7B (VPTQ S, math+web)                                  
+
+> Multiple-choice QA Generation
+> 78.0 88.3 94.0 84.0 86.0 92.9 95.8 51.3 20.7 80.7 92.1 92.4 86.6 89.2 91.2 94.8 43.4 38.5 87.5 95.6 85.6 81.8 85.7 92.0 95.3 77.2 76.4 84.8 93.8 92.0 87.8 87.1 101.6 95.9 55.6 37.3
+
+2-bit vector PTQ retains multiple-choice QA; generation is the fragile axis 
+
+20 40 60 80 100 
+
+> BF16 retention (%)
+
+Figure 8: Which capabilities survive 2-bit vector PTQ. Per-task retention of one representative balanced 2-bit vector checkpoint per model relative to BF 16. QA and next-word prediction are largely retained, while generation (GSM8K, HumanEval) is fragile. Table 37: The 2-bit scalar cliff is universal across rotation methods. Best-calibration-domain AvgQA at 16, 4, and 2 bits for two scalar PTQ methods (best calibration domain, so entries can exceed the web-only values of Table 3). All methods stay near BF 16 at 4 bits and collapse at 2 bits. QuaRot is applied through expert-wise rotation on Qwen3-MoE. 
+
+Model Method BF 16 4-bit 2-bit Phi-4-mini SpinQuant 71.0 69.2 29.3 QuaRot 71.0 69.3 29.8 Llama-3.1-8B SpinQuant 73.1 71.8 29.8 QuaRot 73.1 71.7 29.3 Qwen3-MoE SpinQuant 72.6 70.8 29.4 QuaRot 72.6 70.3 29.3 
+
+27 Preprint. Under Review. 30 40 50 60 70 
+
+AvgQA (%) 
+
+010 20 30 40 50 60 70 80 
+
+> AvgGen (%)
+
+QA is recovered at 2 bits; generation retention is model-dependent 
+
+> Model Phi-4-mini Llama-3.1-8B Qwen3-MoE OLMoE-1B-7B Method BF16 YAQA VPTQ BitDistiller GSQ Scalar 2-bit
+
+Figure 9: QA and generation are distinct axes. AvgQA versus AvgGen for every method and model at 2 bits. Points are the per-metric best entries of Table 4 (QA and generation may come from different recipes). Vector PTQ recovers QA; generation stays near BF 16 only for Qwen3-MoE. Scalar 2-bit PTQ collapses on both axes. 2 4 16 
+
+Eff ective bits/weight incl. codebooks (log) 
+
+> 30 40 50 60 70
+> AvgQA (%)
+> scalar cli ff
+
+QA   
+
+> 2416
+
+Eff ective bits/weight incl. codebooks (log) 
+
+> 020 40 60
+> AvgGen (%)
+> scalar cli ff
+
+Generation At ~2 bits/weight, vector codebooks sit far above the scalar fl oor (Phi-4-mini)     
+
+> BF16 Scalar 4-bit Scalar 2-bit VPTQ (2-bit) YAQA (2-bit)
+
+Figure 10: The tested vector pipelines improve the nominal 2-bit quality–rate trade-off. Ef-fective bits-per-weight versus AvgQA and AvgGen on Phi-4-mini. At ∼ 2 bits/weight, a vector codebook (YAQA and VPTQ) sits far above the scalar 2-bit floor but below scalar 4-bit quality. 28 Preprint. Under Review. 4 3 2
+
+Weight bit-width 
+
+30 40 50 60 70 
+
+> QA accuracy (7-task avg, %)
+
+BF16 ceiling (73.1) 
+
+> near-random floor
+
++35.3 vector 
+
+Llama-3.1-8B 
+
+Scalar PTQ (SpinQuant) Vector PTQ (YAQA) 
+
+(a) Llama-3.1-8B. 4 3 2
+
+Weight bit-width 
+
+30 40 50 60 70 
+
+> QA accuracy (7-task avg, %)
+
+BF16 ceiling (72.6) 
+
+> near-random floor
+
++36.6 vector 
+
+Qwen3-30B-A3B (MoE) 
+
+Scalar PTQ (SpinQuant) Vector PTQ (YAQA) (b) Qwen3-30B-A3B (MoE). 
+
+Figure 11: The 2-bit scalar cliff on the other models (analogs of Figure 1(a)). Scalar PTQ (Spin-Quant) AvgQA falls from near-lossless at 4 bits to the random-accuracy floor at 2 bits, while a 2-bit vector codebook (YAQA, web calibration) recovers much of the gap. AvgQA is the seven-task mean. 4 3 2
+
+Weight bit-width 
+
+010 20 30 40 50 60 70 
+
+> Generation avg (GSM8K, HumanEval; %)
+
+BF16, P-fp16 (73.2) 
+
++26.7 vector 
+
+Scalar PTQ (SpinQuant) Vector PTQ (YAQA) 
+
+Figure 12: Generation cliff on Phi-4-mini. Scalar SpinQuant generation collapses by 3-bit and vanishes at 2-bit. A vector codebook restores part of the gap. AvgGen averages GSM8K and Hu-manEval. 10 0 10 1 10 2 10 3 10 4 10 5
+
+> Training compute (PFLOP , log)
+
+30 40 50 60 70 80 
+
+> AvgQA (7-task, %)  71.8 29.8 57.0 60.3 63.3 65.7 64.8
+> BF16, P-fp16 (73.1)
+
+Llama-3.1-8B 
+
+> SpinQuant 4-bit SpinQuant 2-bit GSQ 2-bit BitDistiller 2-bit VPTQ 2-bit (native) YAQA 2-bit PTQ+RFT 2-bit
+
+(a) AvgQA (7-task). 10 0 10 1 10 2 10 3 10 4 10 5
+
+> Training compute (PFLOP , log)
+
+010 20 30 40 50 
+
+> AvgGen (GSM8K, HumanEval; %)
+> 35.0 0.0 18.1 16.2 16.1 26.6 17.9
+> BF16, P-fp16 (42.9)
+
+Llama-3.1-8B  
+
+> SpinQuant 4-bit SpinQuant 2-bit GSQ 2-bit BitDistiller 2-bit VPTQ 2-bit YAQA 2-bit PTQ+RFT 2-bit
+
+(b) AvgGen (GSM8K, HumanEval). 
+
+Figure 13: Llama-3.1-8B accuracy and generation vs. training compute (analog of Figure 1(b)). Scalar = crimson, vector = teal. The x-axis is training compute (log scale). PTQ+RFT is plotted at full-pipeline cost (YAQA plus recovery; the math+web long recovery of Table 8, P-bf16). VPTQ QA is native VPTQ, and BF 16 references are P-fp16. 29 Preprint. Under Review. 10 0 10 1 10 2 10 3 10 4 10 5
+
+Training compute (PFLOP , log) 
+
+30 40 50 60 70 80 
+
+> AvgQA (7-task, %)
+
+70.3 29.4 55.9 64.8 66.7 67.8 
+
+> BF16, P-fp16 (72.6)
+
+Qwen3-30B-A3B (MoE) 
+
+> SpinQuant 4-bit SpinQuant 2-bit BitDistiller 2-bit VPTQ 2-bit (shared) YAQA 2-bit PTQ+RFT 2-bit
+
+(a) AvgQA (7-task). 10 0 10 1 10 2 10 3 10 4 10 5
+
+Training compute (PFLOP , log) 
+
+020 40 60 
+
+> AvgGen (GSM8K, HumanEval; %)
+
+66.2 0.0 45.7 53.0 62.4 60.5 
+
+> BF16, P-fp16 (61.8)
+
+Qwen3-30B-A3B (MoE)  
+
+> SpinQuant 4-bit SpinQuant 2-bit BitDistiller 2-bit VPTQ 2-bit (shared) YAQA 2-bit PTQ+RFT 2-bit
+
+(b) AvgGen (GSM8K, HumanEval). 
+
+Figure 14: Qwen3-30B-A3B (MoE) accuracy and generation vs. training compute (analog of Figure 1(b)). The MoE stays near its under-measured completion-prompt reference. Under the chat template it retains more HumanEval than the smaller dense models. VPTQ uses expert-shared codebooks ( 2.09 effective bits). PTQ+RFT is plotted at full-pipeline cost ( 15 + 32 = 47 PFLOP). 1.0 1.1 1.2 1.3 Repetition penalty 0.4 0.5 0.6 0.7 0.8 Accuracy  0.675 0.725 0.700 0.775 0.425 0.525 0.575 0.625 
+
+> BF16 (same penalty) 2-bit (VPTQ, expert-shared)
+
+1.0 1.1 1.2 1.3 Repetition penalty 0.2 0.3 0.4 0.5 0.6 0.7 4-gram loop score 
+
+> 0.39 0.32 0.28 0.22 0.66 0.51 0.40 0.30
+
+Qwen3-30B-A3B, MATH-500 (n=40): the penalty helps BF16 and 2-bit alike 
+
+Figure 15: A repetition penalty helps BF 16 and 2-bit alike (Qwen3-30B-A3B, 40 MATH-500 level-4/5 problems, greedy, same penalty for both models; the 2-bit model is expert-shared VPTQ). The penalty improves both precisions and lowers the 4-gram loop score for both. The matched-decoding gap remains ( 0.15 at 1.3). 30

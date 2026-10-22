@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-11</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-22</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 7 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>1</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-22 15:15:28 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-22 22:42:14 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精选 7 篇，精读 1 篇，重点梳理低比特推理模型校准与量化压缩前沿。最值得看的是 RECAP 对低比特推理模型“读史校准”的思路（8.0 分），以及 HGA-Quant、E8 格键量化在视觉生成与 KV-Cache 压缩上的量化实践（均 7.0 分）。普通读者可先读 RECAP 把握校准主线，再按兴趣选读两篇量化应用，留意精度与效率的权衡。</p>
+<p>今天筛完17篇论文，精读6篇、速读11篇，重点锁定LLM量化与GUI智能体提效。</p>
+<p>最值得看两篇9分工作：SpectrumQuant用频谱对齐做LLM量化，STP-GUI用空间感知token剪枝提升Web-GUI智能体效率；速读区则集中讨论VLM token剪枝的评测与可靠性。</p>
+<p>普通读者可先读两篇9分精读，再挑8分速读中“评测不能只看准确率和token数”的讨论，建立对剪枝收益边界的判断。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">1 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="RECAP: Calibrating Low-Bit Reasoning Models on the History They Read">RECAP: Calibrating Low-Bit Reasoning Models on the History They Read</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="SpectrumQuant: Spectrum Alignment for LLM Quantization">SpectrumQuant: Spectrum Alignment for LLM Quantization</span></li><li><span class="dpr-home-dashboard-paper-title" title="STP-GUI: Spatially-Aware Token Pruning for Efficient Web-GUI Agents">STP-GUI: Spatially-Aware Token Pruning for Efficient Web-GUI Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="CatchUp: Depth-Aware Re-Admission of Visual Tokens for Efficient Large Vision-Language Models">CatchUp: Depth-Aware Re-Admission of Visual Tokens for Efficient Large Vision-Language Models</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>6</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="HGA-Quant: Heterogeneity-Aware Quantization for AutoRegressive Visual Generation Models">HGA-Quant: Heterogeneity-Aware Quantization for AutoRegressive Visual Generation Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="E8 Lattice Key Quantization for Low-Bit KV-Cache Compression">E8 Lattice Key Quantization for Low-Bit KV-Cache Compression</span></li><li><span class="dpr-home-dashboard-paper-title" title="WUSPruner: Second-Moment-Optimal Transforms for Structured Pruning">WUSPruner: Second-Moment-Optimal Transforms for Structured Pruning</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Hierarchical and Query-Aware Visual Token Pruning for High-Resolution LVLMs">Hierarchical and Query-Aware Visual Token Pruning for High-Resolution LVLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="Are We Evaluating VLM Token Pruning Right? Looking Beyond Accuracy and Token Count">Are We Evaluating VLM Token Pruning Right? Looking Beyond Accuracy and Token Count</span></li><li><span class="dpr-home-dashboard-paper-title" title="Visual Sufficiency Landscapes: Understanding Query-Conditioned Reliability in Visual Token Pruning">Visual Sufficiency Landscapes: Understanding Query-Conditioned Reliability in Visual Token Pruning</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>6</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>11</strong></span></div>
 </section>
 </div>
 
