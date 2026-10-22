@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-10</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-11</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 4 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 7 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>1</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>6</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-21 08:23:11 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-22 15:15:28 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读2篇、速读2篇，重点考察超低比特量化如何保住模型预测保真度，以及2-Bit向量量化LLM的实用性提升。最值得看的是《FidelityQ》的9.0分保真度方案和《SAGE》的8.0分2-Bit落地路径。普通读者可先读这两篇精读文章，速读文章中的INT4 KV Cache和变长编码可作为补充参考。</p>
+<p>今日精选 7 篇，精读 1 篇，重点梳理低比特推理模型校准与量化压缩前沿。最值得看的是 RECAP 对低比特推理模型“读史校准”的思路（8.0 分），以及 HGA-Quant、E8 格键量化在视觉生成与 KV-Cache 压缩上的量化实践（均 7.0 分）。普通读者可先读 RECAP 把握校准主线，再按兴趣选读两篇量化应用，留意精度与效率的权衡。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">1 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="FidelityQ: Preserving Predictive Fidelity in Ultra-Low-Bit Language Model Quantization">FidelityQ: Preserving Predictive Fidelity in Ultra-Low-Bit Language Model Quantization</span></li><li><span class="dpr-home-dashboard-paper-title" title="SAGE: Pushing 2-Bit Vector-Quantized LLMs toward Real-World Usability">SAGE: Pushing 2-Bit Vector-Quantized LLMs toward Real-World Usability</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="RECAP: Calibrating Low-Bit Reasoning Models on the History They Read">RECAP: Calibrating Low-Bit Reasoning Models on the History They Read</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>1</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="KV4-RL: Unlocking Faster Asynchronous Rollouts for RLVR with INT4 KV Cache Quantization">KV4-RL: Unlocking Faster Asynchronous Rollouts for RLVR with INT4 KV Cache Quantization</span></li><li><span class="dpr-home-dashboard-paper-title" title="VLCQ: Post-training quantization for deep neural networks using variable length coding">VLCQ: Post-training quantization for deep neural networks using variable length coding</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="HGA-Quant: Heterogeneity-Aware Quantization for AutoRegressive Visual Generation Models">HGA-Quant: Heterogeneity-Aware Quantization for AutoRegressive Visual Generation Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="E8 Lattice Key Quantization for Low-Bit KV-Cache Compression">E8 Lattice Key Quantization for Low-Bit KV-Cache Compression</span></li><li><span class="dpr-home-dashboard-paper-title" title="WUSPruner: Second-Moment-Optimal Transforms for Structured Pruning">WUSPruner: Second-Moment-Optimal Transforms for Structured Pruning</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>6</strong></span></div>
 </section>
 </div>
 
