@@ -1,0 +1,662 @@
+Title: N-Gram Memories at Two Bits: Quantizing Lookup Tables in Large Language Models
+
+URL Source: https://arxiv.org/pdf/2610.21810v3
+
+Published Time: Thu, 22 Oct 2026 00:29:48 GMT
+
+Number of Pages: 27
+
+Markdown Content:
+# N-Gram Memories at Two Bits: Quantizing Lookup Tables in Large Language Models 
+
+Donghoon Han 1 Minseop Jung 1 Dong Woo Kwak 1 SeungJae Lee 1 Junhoo Lee 2*
+
+> 1
+
+Dnotitia Inc. 2KAIST 
+
+{dhk1349, msjung, HelloDongWoo, seungjae.lee}@dnotitia.com junhoo.lee@kaist.ac.kr 
+
+Abstract 
+
+Conditional memory expands language-model capacity through selective lookup, but the full embedding table must remain available for ev-ery possible input. We introduce Conditional Program (CP), a compressed representation that reconstructs only the rows an input re-quests. CP represents each row by a short code and a local scale, with a reconstruction program shared across the table. We instan-tiate this representation with a Gaussian trel-lis, norm restoration and independently decod-able row records. CP’s two-bit code lowers out-put KL by 41–63% relative to 2-bit round-to-nearest. Analysis across three trained n-gram memory families shows that Gaussian-like co-ordinate statistics coexist with learned relation-ships among rows; at matched storage budgets, the shared trellis outperforms the fitted code-books and low-rank residual variants we test. For DeepSeek, it reduces table storage from 203 GB to 51 GB, leaving room for larger work-loads when the table is kept on GPU. 
+
+1 Introduction 
+
+Conditional memory expands language-model ca-pacity without a proportional increase in per-token computation. It retrieves learned representations from large embedding tables, allowing a model to use only a small part of its memory for each input (Cheng et al., 2026; Liu et al., 2026). This makes higher capacity attractive under limited compute budgets, but the tables still occupy substantial stor-age. Moving them from accelerator memory to host memory changes where that cost is paid without reducing it. Compressing conditional memory presents a dif-ferent challenge from conventional LLM weight compression. Although its embedding tables con-tain learned parameters, they are accessed through sparse, input-dependent lookups rather than dense 
+
+> *Corresponding author.
+
+computation. Existing LLM compression meth-ods primarily target dense model weights, leaving the distinct access patterns of conditional memory largely unaddressed. Conditional memory instead requires reducing the footprint of the entire table while preserving independent access to individual rows and the information they provide to the model. Can conditional memory be stored more compactly while reconstructing only the entries needed by the current input? We propose Conditional Program (CP) , a rep-resentation that stores instructions for reconstruct-ing each entry through a shared decoder. Our hy-pothesis is that a compact shared reconstruction rule, together with short row-specific codes and local scales, can preserve the signal that the model consumes from the table. An input selects which en-tries to reconstruct, so the extra work is confined to the rows it accesses. This exchanges storage across the full table for reconstruction work on a small subset, carrying the selective use of conditional memory into its compressed representation. Specifically, CP represents each row with a short code and a local scale, using a decoder shared across the table. We model normalized row con-tents as the accumulation of many small learning contributions dispersed across coordinates; when these contributions are weakly dependent and none dominates, a Gaussian source approximation fol-lows from a central-limit argument. Therefore, we encode rows in their stored coordinate system with a shared Gaussian trellis (Tseng et al., 2024b). The local scale restores the decoded vector’s norm, and independently stored row records allow the run-time to fetch and reconstruct only requested entries (Figure 1). At two bits, CP reduces table storage by roughly four- to eightfold, with most reported task scores remaining close to their original values. For a 4,096-token DeepSeek prefill from host mem-ory, its row layout reduces lookup time from 10.78 to 6.54 ms compared with a QTIP tile-window de-1arXiv:2610.21810v3 [cs.LG] 21 Oct 2026 Shared trellis rule                                            
+
+> small lookup +arithmetic
+> local scale
+> Input Addresses CP memory
+> Code Scale
+> 01 10 11 …
+> Independent row records
+> Shared decoder Restore norm Existing readout +downstream model
+> (a) Offline: encode each row once (b) Online: execute only selected rows
+> Original row Low-error trellis path Row record (bf16) Record
+> Decode
+> Shared rule Restored row Row code Local scale Shared trellis Reconstructed row
+
+Figure 1: Conditional Program (CP). An input selects row addresses in the compressed memory. Each record contains a trellis code and a bf16 scale; a shared decoder reconstructs the vector, and the scale restores its norm before the existing readout. (a) Offline, the encoder selects a low-error trellis path and stores its code with the norm-restoring scale. (b) Online, only addressed records are fetched, decoded and scaled. Trellis states and paths are schematic. 
+
+coder in a layout microbenchmark. Our contributions are as follows: • We introduce Conditional Program, a repre-sentation that exchanges storage across the full memory table for reconstruction work on the few entries selected by each input. • We instantiate CP with a shared Gaussian trellis, per-row norm restoration and indepen-dently addressable records, preserving selec-tive access in the compressed representation. • We evaluate downstream performance across diverse tasks, analyze compression fidelity, and measure lookup costs and workload ca-pacity under GPU and host-memory place-ment. 
+
+2 Preliminaries 
+
+2.1 Conditional Memory as Selective Lookup 
+
+We consider conditional-memory table E ∈ RN ×d,where each row ei ∈ Rd stores a learned repre-sentation. For an input x, let A(x) ⊆ { 1, . . . , N }
+
+denote the requested row addresses. N-gram-based conditional memory determines row addresses by hashing input n-grams independently for each or-der and head. Each token retrieves a fixed number of rows, so the accessed memory is 
+
+EA(x) = {ei | i ∈ A(x)}, |A(x)| ≪ N. (1) Because the addresses are computed directly from the input tokens, retrieval does not require scanning or computing over the entire table. The retrieved embeddings are incorporated into the model’s hidden states through a readout op-eration. Let e(x) denote the concatenation of the retrieved rows and h the current hidden state. The readout can be expressed as 
+
+h′ = h + R(h, e (x)) , (2) where R is a model-specific operation that may in-volve linear projections or input-dependent gating. The resulting hidden state is passed to subsequent network layers, so errors in the retrieved embed-dings can propagate through the readout and affect the model’s final predictions. 
+
+2.2 Compressing Conditional Memory 
+
+The storage footprint of a compressed table and the cost of accessing an individual row are dis-tinct quantities. Compression can reduce storage by encoding or transforming multiple rows jointly, but such representations may couple them within a larger reconstruction unit. Consequently, accessing a single row may require fetching or decoding a larger block of data. Thus, a smaller compressed table does not necessarily imply efficient access under sparse lookup. Let C(E) denote a compressed representation of the table and D(C(E), i ) the reconstruction of row 2i. Preserving selective access requires that each re-quested row can be reconstructed without decoding unrelated rows: 
+
+ˆei = D(C(E), i ), i ∈ A(x). (3) The compressed representation must therefore re-duce the full table’s footprint while confining data fetching and reconstruction to the requested entries. Beyond selective access, compression must pre-serve the information that retrieved embeddings provide to the model. A conventional measure of reconstruction quality is the mean squared error 
+
+Drec = 1
+
+N
+
+> N
+
+X
+
+> i=1
+
+∥ei − ˆei∥22. (4) However, reconstruction errors of similar magni-tude need not produce similar changes in model predictions, since the retrieved embeddings pass through the readout and subsequent network layers. In particular, errors in embedding magnitude and direction can have different downstream effects, as examined in Section 4.3. Numerical reconstruction accuracy alone therefore does not fully characterize the quality of compressed conditional memory. Let pE (· | x) and pC (· | x) denote the out-put distributions of the original and compressed models, respectively. We formulate conditional-memory compression as minimizing expected out-put divergence under a storage budget B:
+
+min  
+
+> C
+
+Ex [DKL (pE (· | x) ∥ pC (· | x))] 
+
+where S(C) ≤ B. (5) Here, S(C) includes compressed row codes, per-row metadata, shared reconstruction information, and storage overhead. Each requested row must be independently reconstructible, while the address function and all remaining model parameters re-main fixed. 
+
+3 Conditional Programs 
+
+3.1 Conditional Program Representation 
+
+We propose Conditional Program (CP), a com-pressed representation that preserves the selective access pattern of conditional memory. Rather than storing each embedding directly, CP represents each row with a short code and a reconstruction rule shared across the table. Specifically, each row 
+
+ei is represented by a code ci and a local scale αi,and reconstructed through a shared function f :
+
+ˆei = αif (ci). (6) The reconstruction function is shared across the table, while each row retains only its code and scale. Since reconstruction is performed only for requested rows, CP exchanges storage across the full table for computation on a small subset. The key challenge is to construct a shared re-construction rule that accurately represents diverse learned embeddings using short codes. We sepa-rate each row’s magnitude from its contents and define the normalized vector zi = √d e i/∥ei∥2.For a code rate b, let Cb denote the set of admissible codes. A natural encoding objective is to select a code whose reconstruction best approximates the normalized row: 
+
+c∗ 
+
+> i
+
+= arg min 
+
+> c∈C b
+
+∥zi − f (c)∥22. (7) At low bit rates, the quality of this approximation depends on how well the shared reconstruction rule captures the statistical properties of the source. This motivates a source model for the normalized mem-ory rows. 
+
+3.2 Gaussian Source Modeling 
+
+Conditional-memory embeddings are learned through repeated updates from diverse inputs and contexts. In hashed n-gram memories, for exam-ple, multiple n-grams may map to the same row, allowing different training signals to contribute to a shared representation (Cheng et al., 2026; Liu et al., 2026). When such contributions are dis-tributed across many coordinates, an approximately isotropic direction provides a useful intuition for the resulting representation. In high dimensions, isotropically distributed directions exhibit approxi-mately Gaussian coordinate statistics after normal-ization (Diaconis and Freedman, 1987). Motivated by this intuition, we model the nor-malized row contents using a common Gaussian source while keeping row magnitudes separate. Specifically, we approximate the coordinate dis-tribution of zi by a standard Gaussian distribution 
+
+N (0 , 1) . This source model provides a common sta-tistical basis for representing different rows through a shared reconstruction rule, while row-specific codes capture their individual contents. 
+
+3.3 Encoding and Norm Restoration 
+
+To encode the Gaussian source, we instantiate the shared reconstruction rule using trellis-coded quan-tization (TCQ) (Marcellin and Fischer, 1990; Mao and Gray, 2010). TCQ represents a sequence of 3values through a path of state transitions, allowing reconstruction values to be selected jointly rather than quantizing each coordinate independently. We use a Gaussian HYB bitshift trellis with tail-biting. For each row, the encoder searches for a low-error path through the shared trellis and stores its transi-tion symbols as ci. The reconstruction function f
+
+recovers the corresponding vector from these sym-bols using a small shared lookup table and arith-metic operations. All rows use the same coding rule and code rate, without an additional coordinate ro-tation. Although the shared source model describes nor-malized row contents, the magnitude of each em-bedding also affects the signal passed to the model. A least-squares reconstruction scale can shrink the decoded vector when its direction differs from the original row. CP instead restores the original row norm by setting αi = ∥ei∥2/∥f (ci)∥2. This pre-serves the magnitude of the learned representation, even when doing so increases coordinate recon-struction error. The scale is computed once during encoding and stored with the corresponding row. 
+
+3.4 Independent Storage and Selective Execution 
+
+CP stores each row as an independently address-able record containing its compressed code and local scale. For a row of dimension d encoded at b
+
+bits per coordinate, storing one 16-bit scale gives a rate of b + 16 /d bits per parameter before align-ment. The shared reconstruction rule incurs only a table-wide storage cost. Because each record can be addressed independently, compressed rows can be fetched and cached without accessing unrelated entries. At inference time, the original address function determines the requested rows A(x). For each ad-dress i ∈ A(x), CP fetches the corresponding code and scale, reconstructs the embedding using Equa-tion 6, and passes it to the existing readout in the original lookup order. A fused kernel performs fetching and reconstruction for the selected records without decoding unrelated rows. The address func-tion, backbone parameters, and downstream com-putation remain unchanged. 
+
+4 Experiments 
+
+We evaluate how well CP preserves model qual-ity under reduced table storage. We first compare downstream task performance at low bit rates, then examine the trade-off between storage and output-distribution fidelity across a wider range of rates. 
+
+4.1 Experimental Setup Models. We evaluate Conditional Program (CP) on three models that employ n-gram lookup tables: DeepSeek, Qwen, and LongCat, as described in Section 2.1. To isolate the effect of compression, we compress only the lookup tables while keeping all other model components unchanged. 
+
+Benchmarks. To assess the impact of compres-sion across different model capabilities, we eval-uate 40 tasks spanning five categories: common-sense, knowledge, reading comprehension, mul-tilingual understanding, and math and code. Be-yond knowledge-intensive benchmarks, we include GSM8K and HumanEval to evaluate mathemati-cal reasoning and code generation, both of which require generated answers. Table 1 presents seven representative benchmark columns from this suite. 
+
+Baselines. We first compare against the origi-nal lookup tables and table removal, where every lookup returns zero, to assess the contribution of the stored entries. For quantization baselines, we include round-to-nearest (RTN), which indepen-dently rounds values to the nearest quantization level, and NVFP4 and MXFP4, which use four-bit floating-point formats (Rouhani et al., 2023). To further examine the benefits of CP’s design, we adapt the trellis quantization of QTIP (Tseng et al., 2024b), originally developed for dense weights, to lookup tables. Specifically, we construct a trellis-based baseline with within-row rotation and a global scale shared across the table, allowing us to distinguish the benefits of trellis quantization from those of CP’s row-wise magnitude separation. 
+
+4.2 Results Benchmark Performance. We first examine whether CP can substantially reduce lookup-table storage while preserving model performance. As shown in Table 1, CP compresses the original ta-bles by approximately 4 to 8 times while retaining most of their benchmark performance. In particular, CP largely preserves performance on knowledge-intensive tasks where removing the lookup table causes substantial degradation. Compared with ex-isting quantization methods, CP outperforms RTN on the knowledge benchmarks for Qwen and Long-Cat, while achieving comparable performance to QTIP in the paired evaluations. Reducing the rate 4Table 1: Lookup-table storage and downstream performance. Bits denotes code bits per value; table GB includes scales and offsets. Scores are on a 0–100 scale; Belebele averages eight languages. Overall equally weights the five task-group means. Evaluation details and all 40 tasks appear in Appendices A and B.                                                                                                                                                                                              
+
+> Task score ↑
+> Method Bits Table GB ↓PopQA TriviaQA NQ MMLU Belebele GSM8K HumanEval Overall DeepSeek-V4.1-Flash
+> Original —202.7 44.2 87.9 43.2 88.2 93.9 96.4 97.6 79.8 w/o memory —0.0 20.9 75.0 30.4 82.2 89.1 95.8 90.2 73.5 RTN 386.0 43.9 87.9 43.5 88.3 93.9 96.8 98.2 79.9 261.4 43.1 87.8 43.1 88.7 94.1 97.0 96.3 79.7 QTIP 249.2 43.8 88.2 42.9 89.5 94.0 97.6 96.3 79.8 250.7 43.7 87.7 43.3 88.5 94.1 96.4 97.6 79.9
+> CP 1.5 38.4 42.3 87.9 42.9 88.4 94.2 97.0 95.7 79.5
+> Qwen3.8-Flash-Next
+> Original —102.4 36.3 82.3 42.4 86.8 93.9 87.6 95.7 75.6 w/o memory —0.0 26.6 73.4 37.6 85.9 91.9 83.0 94.5 72.4 RTN 321.8 36.4 82.0 41.9 87.2 93.8 87.4 95.7 75.5 215.4 35.1 82.0 41.7 86.3 93.9 86.4 95.7 75.4 QTIP 212.8 36.1 82.4 42.1 87.3 93.9 86.6 95.1 75.4 213.4 36.4 82.2 42.1 86.8 94.0 86.8 95.7 75.5
+> CP 1.5 10.2 35.4 82.2 42.6 86.2 94.0 86.0 95.7 75.4
+> LongCat-Flash-Lite
+> Original —62.8 26.6 68.5 26.2 80.8 85.7 90.8 68.9 68.2 w/o memory —0.0 11.8 31.2 10.4 28.5 25.9 13.0 9.1 30.5 RTN 313.7 26.4 68.5 26.2 80.7 85.4 90.6 66.5 67.9 29.8 26.1 67.5 26.3 79.4 85.1 88.8 59.1 66.7 QTIP 27.9 26.4 69.1 26.6 81.4 86.3 90.2 63.4 67.4 28.1 26.1 68.3 26.5 80.5 85.8 89.0 63.4 67.3
+> CP 1.5 6.1 25.8 68.2 26.4 80.6 85.4 88.2 60.4 67.0
+
+further to 1.5 bits provides additional storage sav-ings, although some tasks exhibit greater perfor-mance loss. 
+
+Functional Fidelity. Benchmark scores alone may not fully capture how compression changes the behavior of a model. We therefore examine whether compressed lookup tables preserve the original model’s output distributions by measuring per-token KL( porig ∥ pquant ). We evaluate six text domains covering web, code, mathematics, chat, and multilingual data, and aggregate their KL val-ues using the geometric mean to weight each do-main equally on the logarithmic scale. As shown in Figure 2, at two bits, CP reduces KL divergence by 41 to 63% compared with RTN and achieves a further 3 to 9% reduction over QTIP, with the lat-ter improvement requiring an additional bf16 scale per row. The storage efficiency of CP also extends to higher bit rates. At 2.5 bits, CP approaches the fidelity of RTN 3-bit with less storage, while CP 3-bit further improves fidelity. At higher rates, CP also achieves lower KL divergence than four-bit 
+
+Table 2: Shared directions in frequently read rows. 
+
+Energy captured by 16 fitted directions on the 4,096 most-read held-out rows. The Gaussian reference is 
+
+16 /d .         
+
+> 2-gram table Energy (%) Gaussian ref. DeepSeek, layer 1 19.1% 6.25% DeepSeek, layer 14 21.1% 6.25% Qwen 33.3% 10.0% LongCat 10.3% 6.25%
+
+floating-point formats while requiring less storage. 
+
+4.3 Analysis 
+
+We further analyze the key design choices underly-ing Conditional Program. Specifically, we examine the effect of representation design and row-wise scaling on compression quality. 
+
+Effect of Representation Design. Although the normalized embedding coordinates are approxi-mately Gaussian, frequently retrieved rows may still share structural information that could benefit 540 60 80 100          
+
+> .02 .03 .05 .10 1.56 2.06 2.56 3.06 3.56 4.06
+> Table size (GB) Output KL DeepSeek-V4.1-Flash
+> 10 20 30
+> 1.60 2.10 2.60 3.10 3.60 4.10
+> Table size (GB) Qwen3.8-Flash-Next
+> 510 15
+> 1.56 2.06 2.56 3.06 3.56 4.06
+> Table size (GB) LongCat-Flash-Lite
+> CP RTN 2-/3-bit QTIP 2.0 (one scale per table) NVFP4 / MXFP4
+
+Figure 2: Table size versus six-domain geometric-mean output KL (log scale); lower and further left is better. CP labels include per-row scales. Dashed lines connect RTN settings. Purple markers: MXFP4 (left), NVFP4 (right), including block scales. Full values and paired comparisons are in Table 13. Table 3: Encoding at matched storage rates. Output KL on Qwen, evaluated on FineWeb-Edu. VQ labels denote codebook size × block dimension.                      
+
+> Representation bpp KL ↓
+> Shared trellis 2.10 0.0198 Fitted VQ, 256 ×42.10 0.0238 Fitted VQ, 65 ,536 ×82.10 0.0226 Mean + trellis 2.10 0.0193 Mean + four PCs + trellis 2.50 0.0188 Trellis reference †2.50 0.0144
+> †Interpolated on the trellis rate–KL curve. Rates include scales and coefficients; protocol in Appendix D.2.
+
+from a learned representation. To investigate this possibility, we first analyze the principal directions of frequently accessed rows and find substantial shared structure beyond the Gaussian reference, as shown in Table 2. We then compare CP’s shared trellis with vector quantization (VQ), which learns codebooks directly from the original memory ta-bles. Despite the observed shared structure, CP achieves lower row reconstruction error across all three models and better output fidelity than VQ at the same storage rate. We additionally examine explicit mean and principal-component representa-tions, but their improvements are limited relative to the storage required. These findings support us-ing a shared trellis rather than fitting and storing table-specific representations. 
+
+Effect of Row-wise Scaling. We next examine whether minimizing embedding reconstruction er-ror also best preserves model behavior. To isolate the effect of scaling, we compare a global scale, a row-wise least-squares scale that minimizes re-construction error, and a row-wise scale that re-
+
+Table 4: Rotation and row scaling. Geometric-mean output KL over six domains with two-bit codes.                 
+
+> Output KL ↓
+> Rotate Scale DeepSeek Qwen LongCat Yes Global 0.0414 0.0347 0.0468 No Global 0.0416 0.0346 0.0473 No Row LS 0.0404 0.0349 0.0462 No Row norm 0.0401 0.0327 0.0426 Row LS and row norm use identical codes and storage. Global: 2.00 bpp; row: 2.06/2.10/2.06 bpp. See Appendix E.
+
+stores the original norm. The latter two use identi-cal trellis codes and storage budgets, differing only in their scale values. As shown in Table 4, norm restoration consistently achieves lower output KL divergence across all three models, indicating that minimizing row reconstruction error does not nec-essarily preserve model behavior most effectively. We also find no statistically resolved benefit from within-row rotation, while frequency-based bit allo-cation does not consistently generalize across text domains. These results support CP’s use of norm restoration, without rotation, and uniform bit allo-cation. Additional experimental protocols, complete benchmark results, and ablations are provided in the Appendix. 
+
+5 Serving Efficiency 
+
+We evaluate the benefits of Conditional Programs (CPs) for model serving. We first measure the cost of reconstructing selectively requested rows, then examine how the reduced memory footprint affects serving performance and workload capacity. 6Table 5: Memory and workload capacity on DeepSeek. Backbone and lookup tables reside on H200 GPUs. Four-GPU timings report mean ± standard deviation over three runs.                                                         
+
+> (a) Four GPUs: memory and latency ↓
+> Metric / workload FP8 NVFP4 CP 2-bit
+> Table memory (GB/GPU) 50.7 27.6 12.7 Prefill, 8×4k (s) 64.66 ±2.49 13.26 ±0.28 13.27 ±0.22 Decode, batch 8 (ms/step) 795.7 ±11.1 788.9 ±10.0 792.9 ±6.3 Decode, batch 512 (s/step) OOM 4.03 ±0.03 4.05 ±0.06 Prefill, 64k tokens (s) OOM 59.81 ±4.75 18.23 ±0.01
+> (b) Eight GPUs: largest successful tested workloads
+> Format Table GB/GPU ↓Decode batch ↑Prefill tokens ↑
+> FP8 25.3 1,024 96k
+> CP 2-bit 6.3 ≥2,048 ≥128k (a) OOM: all three runs failed. (b) One run per setting; FP8 runs out of memory at batch 2,048 and encounters severe memory pressure at 128k prefill tokens. ≥denotes the largest setting tested. Workload details appear in Appendix G.
+
+5.1 Selective Lookup Lookup layouts. CP stores each row as an inde-pendent record, allowing only the requested rows to be fetched and reconstructed. In contrast, QTIP’s tiled representation distributes each row across mul-tiple code fragments. To enable selective access with this layout, we implement a tile-window de-coder that retrieves only the bit windows needed for the requested rows rather than entire tiles. We compare this decoder against our fused row-wise decoder under identical lookup requests, a two-bit code rate, and per-row scale storage. The tiled base-line uses random payloads, while CP uses encoded model tables, so this experiment isolates access cost rather than reconstruction fidelity. 
+
+Lookup latency. We replay lookup requests from 4,096-token sequences constructed from held-out FineWeb-Edu text using the DeepSeek tokenizer on a single H200 GPU. Each token requests 48 rows across two Engram layers. With tables stored in GPU high-bandwidth memory (HBM), CP com-pletes the requests in 0.190 ms, compared with 0.221 ms for the tile-window decoder. When ac-cessing pinned host DRAM over PCIe, the corre-sponding times are 6.54 ms and 10.78 ms. These results demonstrate that CP’s row-wise representa-tion supports efficient selective lookup, with partic-ularly large benefits when accessing tables across PCIe. We report the mean of five independent run medians, each measured over 100 timed calls after 20 warm-up calls. Additional comparisons and memory-access analyses are provided in Ap-pendix G.1. 
+
+5.2 Workload Capacity Experimental setup. To evaluate the serving benefits of reduced memory usage, we distribute the DeepSeek backbone and tables across four or eight H200 GPUs. Our representative workload pro-cesses eight sequences with 4,096-token prompts and generates 256 tokens per sequence. We ad-ditionally evaluate larger workloads, including a decode batch of 512 sequences and a prefill step of 65,536 tokens across 32 sequences. Table 5 sum-marizes the results. 
+
+Four-GPU serving. With four GPUs, the origi-nal FP8 tables occupy 50.7 GB per GPU, compared with 12.7 GB for CP. For the representative work-load, CP reduces prefill latency from 64.66 s to 13.27 s and enables larger workloads that otherwise run out of memory. Compared with the four-bit NVFP4 baseline, CP also reduces the 64k-token prefill time from 59.81 s to 18.23 s, while decode times remain similar. These results show that CP alleviates GPU memory pressure and improves per-formance for memory-intensive serving workloads. 
+
+Eight-GPU serving. With eight GPUs, the orig-inal FP8 tables fit comfortably for smaller work-loads, and step times differ by at most 2.4% when memory pressure is limited. However, CP frees an additional 19.0 GB per GPU, allowing substantially larger workloads. On the tested grid, the largest successful decode batch increases from 1,024 to at least 2,048 sequences, while prefill capacity in-7creases from 96k to at least 128k tokens. These results demonstrate that CP’s reduced memory foot-print translates into greater serving capacity, even when smaller workloads already fit in GPU mem-ory. Detailed workload configurations and measure-ments are provided in Appendix G. Together, these results highlight two complemen-tary benefits of CP for model serving. Its row-wise representation enables efficient selective lookup, while its compact storage reduces GPU memory pressure, improving serving performance and sup-porting larger workloads. 
+
+6 Related Work 
+
+LLM weight quantization. GPTQ (Frantar et al., 2023) and AWQ (Lin et al., 2024) use calibration activations to guide rounding or scaling, while QuIP, QuIP#, QuaRot and SpinQuant use coor-dinate transformations to make weights easier to quantize (Chee et al., 2023; Tseng et al., 2024a; Ashkboos et al., 2024; Liu et al., 2025). AQLM learns additive codebooks (Egiazarian et al., 2024); QTIP combines incoherence processing with trel-lis coding (Tseng et al., 2024b), and HIGGS uses Gaussian-optimal grids (Malinovskii et al., 2025). CP applies Gaussian trellis coding to frozen lookup rows without rotation, restoring each row’s norm and storing it independently for selective access. Because quantization can affect factual answers even when perplexity changes little (Jaiswal et al., 2024; Namburi et al., 2023; Dutta et al., 2024), we evaluate absolute task scores alongside output KL. 
+
+Embedding-table compression. Row-wise low-bit quantization is established for recommender embeddings (Guan et al., 2019; Khudia et al., 2021); other approaches use low-precision train-ing, frequency-based mixed precision, or structures fixed during training (Yang et al., 2020; Li et al., 2023, 2024; Shi et al., 2020; Yin et al., 2021; Desai et al., 2022; Tsang and Ahle, 2023). For LLM in-put embeddings, CARVQ combines grouped resid-ual VQ with a corrective MLP trained for each model (Gou et al., 2025). The hashed tables stud-ied here share rows among colliding n-grams. CP compresses these already trained tables using their row values, with a shared decoder, no model re-training and no frequency-based bit allocation. 
+
+Conditional-memory structure and placement. 
+
+TN-gram replaces hashed tables with a tensor de-composition during pretraining (Zhou et al., 2026); TF-Engram and CXL-based systems address mem-ory placement and access (Ma et al., 2026b,a). TF-Engram’s hash-based compression shares slots between n-grams, whereas CP numerically com-presses the rows of an existing table. SCONE stores n-gram embeddings computed by a separate model off the accelerator (Yu et al., 2025). Product-key memories and memory layers retrieve rows through learned key search (Lample et al., 2019; Berges et al., 2024); the tables studied here use hashes of input tokens. 
+
+7 Conclusion 
+
+CP compresses lookup tables with row codes, lo-cal scales and a shared decoder while preserving independent access to requested rows. Across three hashed-memory models, two-bit codes reduce ta-ble storage by roughly four- to eightfold, with most reported task scores close to their original values despite some task- and model-dependent losses. Under GPU memory pressure, smaller ta-bles allow larger workloads and reduce prefill time. When memory is sufficient, complete inference steps show little speed improvement in our imple-mentation. 
+
+Limitations 
+
+Coverage. Our conclusions concern post-training compression of three models with hashed lookup tables; they need not extend to other mem-ory architectures, including token-indexed tables (Appendix H). Most downstream comparisons use the two primary code rates, with less task coverage at higher rates than in the KL sweep. Small task-score differences do not establish equivalence. 
+
+Analysis. The fitted-codebook and structured-residual comparisons evaluate output KL only on Qwen, limiting their generality across models. Some equal-budget comparisons use interpolated trellis values without uncertainty estimates. The Gaussian source approximation does not establish how training produces the observed row statistics. 
+
+Deployment. Serving measurements use a single node and eager inference; optimized engines may spend a different fraction of time on lookup. Some configurations have only one measurement run, and tested workload limits are not exact capacity thresh-olds. Access counts come from English web text, so frequency-based allocation and caching results may change with the deployment distribution. 8References 
+
+Saleh Ashkboos, Amirkeivan Mohtashami, Maximil-ian L. Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. 2024. QuaRot: Outlier-free 4-bit inference in rotated LLMs. Preprint , arXiv:2404.00456. Vincent-Pierre Berges, Barlas O˘ guz, Daniel Haz-iza, Wen-tau Yih, Luke Zettlemoyer, and Gargi Ghosh. 2024. Memory layers at scale. Preprint ,arXiv:2412.09764. Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and Christopher De Sa. 2023. QuIP: 2-bit quantization of large language models with guarantees. Preprint ,arXiv:2307.13304. Xin Cheng, Rui Tian, Wangding Zeng, Damai Dai, Qinyu Chen, Bingxuan Wang, Zhenda Xie, Kezhao Huang, Xingkai Yu, Chengqi Deng, Shangyan Zhou, Chenggang Zhao, Zhewen Hao, Yukun Li, Han Zhang, Zhengyan Zhang, Yixu Wei, M. Y. Xu, Huishuai Zhang, and 2 others. 2026. Conditional memory via scalable lookup: A new axis of sparsity for large language models. In Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) .Aditya Desai, Li Chou, and Anshumali Shrivastava. 2022. Random offset block embedding array (ROBE) for CriteoTB benchmark MLPerf DLRM model: 1000 × compression and 3.1 × faster inference. In 
+
+Proceedings of Machine Learning and Systems (ML-Sys) .Persi Diaconis and David Freedman. 1987. A dozen de Finetti-style results in search of a theory. Annales de l’I.H.P. Probabilités et statistiques , 23(S2):397–423. Abhinav Dutta, Sanjeev Krishnan, Nipun Kwatra, and Ramachandran Ramjee. 2024. Accuracy is not all you need. In Advances in Neural Information Pro-cessing Systems (NeurIPS) .Vage Egiazarian, Andrei Panferov, Denis Kuznedelev, Elias Frantar, Artem Babenko, and Dan Alistarh. 2024. Extreme compression of large language mod-els via additive quantization. In Proceedings of the 41st International Conference on Machine Learning (ICML) .Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. 2023. GPTQ: Accurate post-training quan-tization for generative pre-trained transformers. In 
+
+International Conference on Learning Representa-tions (ICLR) .Dayin Gou, Sanghyun Byun, Nilesh Malpeddi, Gabrielle De Micheli, Prathamesh Vaste, Jacob Song, and Woo Seong Chung. 2025. CARVQ: Corrective adaptor with group residual vector quantization for LLM embedding compression. In Findings of the Association for Computational Linguistics: EMNLP 2025 .Hui Guan, Andrey Malevich, Jiyan Yang, Jongsoo Park, and Hector Yuen. 2019. Post-training 4-bit quantiza-tion on embedding tables. In Workshop on Systems for ML at NeurIPS .Ajay Jaiswal, Zhe Gan, Xianzhi Du, Bowen Zhang, Zhangyang Wang, and Yinfei Yang. 2024. Com-pressing LLMs: The truth is rarely pure and never simple. In International Conference on Learning Representations (ICLR) .Daya Khudia, Jianyu Huang, Protonu Basu, Sum-mer Deng, Haixin Liu, Jongsoo Park, and Mikhail Smelyanskiy. 2021. FBGEMM: Enabling high-performance low-precision deep learning inference. 
+
+Preprint , arXiv:2101.05615. Guillaume Lample, Alexandre Sablayrolles, Marc’Aurelio Ranzato, Ludovic Denoyer, and Hervé Jégou. 2019. Large memory layers with product keys. In Advances in Neural Information Processing Systems (NeurIPS) .Shiwei Li, Huifeng Guo, Lu Hou, Wei Zhang, Xing Tang, Ruiming Tang, Rui Zhang, and Ruixuan Li. 2023. Adaptive low-precision training for embed-dings in click-through rate prediction. In Proceed-ings of the AAAI Conference on Artificial Intelli-gence .Shiwei Li, Zhuoqi Hu, Xing Tang, Haozhao Wang, Shi-jie Xu, Weihong Luo, Yuhua Li, Xiuqiang He, and Ruixuan Li. 2024. Mixed-precision embeddings for large-scale recommendation models. Preprint ,arXiv:2409.20305. Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. 2024. AWQ: Activation-aware weight quantization for on-device LLM compression and acceleration. In Pro-ceedings of Machine Learning and Systems , vol-ume 6, pages 87–100. Hong Liu, Jiaqi Zhang, Chao Wang, Xing Hu, Linkun Lyu, Jiaqi Sun, Xurui Yang, Bo Wang, Fengcun Li, Yulei Qian, Lingtong Si, Yerui Sun, Rumei Li, Peng Pei, Yuchen Xie, and Xunliang Cai. 2026. Scaling embeddings outperforms scaling experts in language models. Preprint , arXiv:2601.21204. Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghuraman Krishnamoor-thi, Vikas Chandra, Yuandong Tian, and Tijmen Blankevoort. 2025. SpinQuant: LLM quantization with learned rotations. In International Conference on Learning Representations (ICLR) .Ruiyang Ma, Teng Ma, Zhiyuan Su, Hantian Zha, Xinpeng Zhao, Xuchun Shang, Xingrui Yi, Zheng Liu, Zhu Cao, An Wu, Zhichong Dou, Ziqian Liu, Daikang Kuang, and Guojie Luo. 2026a. Pooling En-gram conditional memory in large language models using CXL. In Proceedings of the Sixth European Workshop on Machine Learning and Systems (Eu-roMLSys ’26) , pages 225–231. ACM. 
+
+9Yutang Ma, Kecheng Huang, Xikun Jiang, and Zili Shao. 2026b. TF-Engram: A train-free Engram with SSD-backed memory for large language models. Preprint ,arXiv:2607.07388. Vladimir Malinovskii, Andrei Panferov, Ivan Ilin, Han Guo, Peter Richtárik, and Dan Alistarh. 2025. HIGGS: Pushing the limits of large language model quantization via the linearity theorem. In Proceed-ings of the 2025 Conference of the Nations of the Americas Chapter of the Association for Computa-tional Linguistics: Human Language Technologies (Volume 1: Long Papers) , pages 10857–10886, Al-buquerque, New Mexico. Association for Computa-tional Linguistics. Mark Z. Mao and Robert M. Gray. 2010. Stationary and trellis encoding for IID sources and simulation. In 
+
+2010 Data Compression Conference (DCC) , pages 3–12. IEEE. M. W. Marcellin and T. R. Fischer. 1990. Trel-lis coded quantization of memoryless and Gauss-Markov sources. IEEE Transactions on Communica-tions , 38(1):82–93. Satya Sai Srinath Namburi, Makesh Sreedhar, Srinath Srinivasan, and Frederic Sala. 2023. The cost of compression: Investigating the impact of compres-sion on parametric knowledge in language models. In Findings of the Association for Computational Linguistics: EMNLP 2023 .Bita Darvish Rouhani, Ritchie Zhao, Ankit More, Mathew Hall, Alireza Khodamoradi, Summer Deng, Dhruv Choudhary, Marius Cornea, Eric Dellinger, Kristof Denolf, et al. 2023. Microscaling data for-mats for deep learning. Preprint , arXiv:2310.10537. Hao-Jun Michael Shi, Dheevatsa Mudigere, Maxim Naumov, and Jiyan Yang. 2020. Compositional embeddings using complementary partitions for memory-efficient recommendation systems. In Pro-ceedings of the 26th ACM SIGKDD International Conference on Knowledge Discovery and Data Min-ing (KDD) .Henry Ling-Hei Tsang and Thomas Dybdahl Ahle. 2023. Clustering the sketch: Dynamic compression for em-bedding tables. In Advances in Neural Information Processing Systems (NeurIPS) .Albert Tseng, Jerry Chee, Qingyao Sun, Volodymyr Kuleshov, and Christopher De Sa. 2024a. QuIP#: Even better LLM quantization with Hadamard inco-herence and lattice codebooks. In Proceedings of the 41st International Conference on Machine Learning (ICML) .Albert Tseng, Qingyao Sun, David Hou, and Christo-pher De Sa. 2024b. QTIP: Quantization with trellises and incoherence processing. In Advances in Neural Information Processing Systems (NeurIPS) .Jie Amy Yang, Jianyu Huang, Jongsoo Park, Ping Tak Peter Tang, and Andrew Tulloch. 2020. Mixed-precision embedding using a cache. Preprint ,arXiv:2010.11305. Chunxing Yin, Bilge Acun, Xing Liu, and Carole-Jean Wu. 2021. TT-Rec: Tensor train compression for deep learning recommendation models. In Proceed-ings of Machine Learning and Systems (MLSys) .Da Yu, Edith Cohen, Badih Ghazi, Yangsibo Huang, Pri-tish Kamath, Ravi Kumar, Daogao Liu, and Chiyuan Zhang. 2025. Scaling embedding layers in language models. In Advances in Neural Information Process-ing Systems (NeurIPS) .Wuyang Zhou, Yuxuan Gu, Giorgos Iacovides, Yun-ing Qiu, Qibin Zhao, and Danilo Mandic. 2026. Tensorizing Engram: Sharing latents across N-gram embeddings is beneficial in LLMs. Preprint ,arXiv:2606.08347. 
+
+10 A Evaluation and Reproducibility 
+
+A.1 Models and task evaluation 
+
+Table 6 lists the dimensions and original formats of the compressed tables.                          
+
+> Model Table Rows Row Rows read Original params dim per token format DeepSeek a196.6B 768.0M 256 48 FP8 b
+> Qwen 51.2B 320.0M 160 16 BF16 LongCat 31.4B 122.7M 256 12 BF16
+> Table 6: Lookup tables studied: the DeepSeek-V4.1-Flash Engram tables and the Qwen3.8-Flash-Next and LongCat-Flash-Lite n-gram tables. Each token reads one row per hashed head. Original size 202.7, 102.4 and 62.8 GB. aTwo Engram layers, each 384.0M rows, 24 rows read per token. be4m3 with a UE8M0 scale per 32 values.
+
+The 40 tasks form five reporting groups: com-monsense (7), knowledge (7), reading comprehen-sion (2), multilingual (22), and math and code (2). The last group contains GSM8K and HumanEval. MGSM remains in the multilingual group, where its six languages are scored separately. Items are frozen files sampled once, with seed 1234 (seed 0 for subsets taken from our evaluation library), and every model sees the same items. Log-likelihood tasks are scored on raw text for every model; all generation is greedy. Qwen and DeepSeek use their chat formats (Qwen with thinking disabled), and LongCat uses base few-shot prompts. 
+
+A.2 Output fidelity and statistics 
+
+Each domain is tokenized with the model’s own tokenizer and cut into 2,047-token chunks: 128 per domain for web, code, math, chat and multi5 (262,016 tokens), and 16 per language for the 15 languages of multi15 (491,280 tokens), 880 chunks per setting. Documents are normally truncated to 4,000 characters, and those under 200 characters are dropped; short multi15 language sets fall back to untruncated documents. 
+
+Statistics. All intervals are 95% percentile boot-strap intervals with seed 0. Task scores and ben-efit retained use 2,000 item-bootstrap replicates; KL uses 2,000 replicates over 2,047-token chunks, paired across settings for ratios; paired task differ-ences use 10,000 item replicates. 
+
+A.3 Quantizers and encoding 
+
+The trellis uses a 16-bit state, two values per step and tail-biting with two Viterbi passes. Its HYB table is built from a 512-entry k-means codebook of a 2-D standard Gaussian. The code scale factor is .95 at 2–3 bits, .90 at 3.5 bits and .85 at 4 bits on DeepSeek and Qwen; LongCat uses 1.0 at 2 bits and the same values above; at 1.5 bits the fac-tors are 1.0 and 1.05. The rate is b + 16 /d bpp; the shared lookup table is not counted for DeepSeek and Qwen and adds about 6 × 10 −6 bpp for Long-Cat. RTN stores a minimum and a scale per group, counted as 2 × 16 bits. NVFP4 has an e4m3 scale per 16 values and one fp32 scale per table (4.5 bpp); MXFP4 has a power-of-two scale per 32 values (4.25 bpp). 
+
+Encoding cost and software. Encoding the 2-bit CP table takes about 3.1 h on 4 H200 GPUs for DeepSeek (about 12 GPU-hours), 0.83 h on 4 GPUs for Qwen, and 5.18 h summed over Long-Cat’s 12 tables. Software is PyTorch 2.14.0 and Transformers 5.17.0. The k-means table is not bit-reproducible across independent encodes, so the LS controls reuse the stored symbols of the norm-restoration tables. The Qwen RTN baseline keeps its scale and minimum in fp32 although its rate counts them as bf16. The table sizes in the main results are logical code and metadata sizes. SSD files may also re-quire page padding (Appendix G.1). The shared decoder state is negligible for these tables; omitting its few kilobytes does not change any displayed rate. The RTN metadata convention above is a storage-accounting convention: Qwen’s evaluated imple-mentation actually retains those values in fp32. 
+
+B Complete Downstream Results 
+
+B.1 Absolute scores and removal controls 
+
+Table 8 gives the absolute score on every task. Ta-ble 1 selects seven benchmarks from this suite and reports their scores on a 0–100 scale. The com-plete table below retains the original 0–1 scale. Table 9 splits PopQA by entity popularity, with the rarest entities in bin 1. It lets the reader check per bin where the knowledge loss of Section 4.2 falls. Pooling the binary item outcomes across all 40 DeepSeek tasks (so tasks with more items re-ceive more weight), accuracy changes by −0.07 
+
+points with CP, −0.34 with RTN 2-bit and −12 .0
+
+with the table removed. On Qwen PopQA items 11 Benchmark Evaluation set Items Scoring ARC-E / ARC-C Test 1000 / 1172 Length-normalized likelihood HellaSwag / PIQA Validation 1000 each Length-normalized likelihood WinoGrande / BoolQ Validation 1267 / 1000 Likelihood accuracy LAMBADA English test 1000 Last-word token match MMLU Stratified test 1000 Five-shot choice accuracy PopQA Test, five popularity bins 5000 Lowercase answer contains-match TriviaQA No-context validation 3000 Normalized answer contains-match Natural Questions Open validation 3610 Normalized answer contains-match EntityQuestions / SimpleQA Test / verified evaluation 3000 / 1000 Normalized answer contains-match SQuAD v1.1 validation 1000 Token F1 Belebele Nine languages 500/language Three-shot choice accuracy MKQA Nine languages 500/language Normalized answer contains-match MGSM Six languages 250/language Exact numeric match GSM8K First 500 test items 500 Exact numeric match HumanEval Full test 164 Greedy pass@1 
+
+Table 7: Evaluation suite. Counts and protocols are fixed across quantization settings. English Belebele and MKQA are separate tasks; the main table’s Belebele score averages the eight non-English languages. QA uses three-shot prompts, with chat formatting for DeepSeek and Qwen and base prompts for LongCat. SQuAD uses zero-shot passage prompting. MGSM and GSM8K use native/base few-shot reasoning prompts or zero-shot chat instructions. All generation is greedy. Output limits are 16 tokens for short-answer QA, 24 for MKQA and 32 for SQuAD; GSM8K/MGSM use 512 tokens with chat prompts and 320 with base prompts, while HumanEval uses 768 and 384, respectively. 
+
+answered correctly by the original model, a logistic regression relates errors introduced by CP to entity popularity (logistic coefficient −.43 [−.71 , −.12 ]). The corresponding coefficient for the read count of the subject’s rarest row is not statistically resolved (−.15 [−.49 , +.17 ]). Every setting has scores on all 40 tasks; the table averages non-English lan-guages within each multilingual benchmark. The paired comparisons of Section 4.2 resample the same items for every setting of a task (10,000 repli-cates; Appendix A). On DeepSeek, the 1.5-bit code has a lower knowledge-group score than QTIP 2.0 (difference −0.80 percentage points, 95% interval [−1.23 , −0.38 ]); the PopQA difference is −1.50 
+
+[−2.14 , −0.84 ] points. 
+
+B.2 Paired comparisons 
+
+Tables 10–12 give per-task score differences in per-centage points. All methods in a pair use the same sampled items in each bootstrap replicate. Inter-vals describe individual comparisons and are not adjusted for testing many tasks. A confidence in-terval containing zero does not establish that two methods are equivalent. For the seven-task knowledge group, the two-bit representation improves on RTN by 0.67 [0.27, 1.06] points on Qwen and 0.82 [0.23, 1.41] on LongCat; DeepSeek gives 0.40 [ −0.04 , 0.84]. The corresponding comparisons with QTIP in-clude zero, as do the PopQA and combined GSM8K/HumanEval comparisons in every model. 
+
+B.3 Benefit retained as a secondary measure 
+
+For a task score s, the fraction of the table’s mea-sured benefit retained is 
+
+R = sq − srem 
+
+sorig − srem 
+
+.
+
+Here sq, srem and sorig use the compressed, re-moved and original table. For a group, we sum the score gains in the numerator and denominator over its tasks before taking the ratio. This measures preservation of the removal gap; it is not accuracy relative to the original model. It can exceed one and becomes unstable when the original and removed scores are close. We use absolute scores and paired differences in the main comparison for that rea-son. We report perplexity in its original units in Appendix C. 12 DeepSeek-V4.1-Flash Qwen3.8-Flash-Next LongCat-Flash-Lite RTN CP RTN CP RTN CP Task Orig. Rem. 3 2 QTIP 2 1.5 Orig. Rem. 3 2 QTIP 2 1.5 Orig. Rem. 3 2 QTIP 2 1.5 
+
+Commonsense 
+
+ARC-E .872 .872 .881 .878 .873 .884 .875 .811 .777 .802 .809 .811 .800 .813 .821 .714 .820 .819 .823 .824 .825 ARC-C .695 .665 .686 .698 .692 .692 .691 .642 .589 .637 .642 .640 .640 .634 .616 .453 .602 .596 .605 .618 .615 HellaSwag .883 .828 .882 .880 .886 .880 .888 .890 .889 .888 .892 .895 .894 .892 .810 .614 .822 .816 .815 .826 .809 PIQA .849 .832 .846 .853 .853 .862 .857 .826 .812 .828 .832 .818 .826 .824 .806 .727 .805 .793 .814 .802 .800 WinoGrande .781 .770 .785 .785 .787 .790 .781 .711 .713 .718 .726 .715 .706 .728 .668 .614 .684 .669 .669 .673 .680 BoolQ .878 .869 .873 .879 .883 .880 .884 .798 .807 .801 .800 .797 .802 .794 .862 .765 .868 .848 .855 .862 .862 LAMBADA .740 .719 .735 .745 .744 .745 .745 .704 .712 .707 .713 .715 .719 .714 .692 .396 .693 .671 .692 .699 .695 
+
+Knowledge 
+
+MMLU .882 .822 .883 .887 .895 .885 .884 .868 .859 .872 .863 .873 .868 .862 .808 .285 .807 .794 .814 .805 .806 PopQA .442 .209 .439 .431 .438 .437 .423 .363 .266 .364 .351 .361 .364 .354 .266 .118 .264 .261 .264 .261 .258 TriviaQA .879 .750 .879 .878 .882 .877 .879 .823 .734 .820 .820 .824 .822 .822 .685 .312 .685 .675 .691 .683 .682 NQ .432 .304 .435 .431 .429 .433 .429 .424 .376 .419 .417 .421 .421 .426 .262 .104 .262 .263 .266 .265 .264 EntityQs .448 .150 .436 .425 .433 .435 .416 .372 .205 .373 .354 .372 .366 .365 .288 .101 .288 .278 .288 .284 .289 SimpleQA .176 .077 .170 .155 .161 .176 .165 .137 .077 .141 .127 .132 .139 .140 .091 .029 .091 .088 .096 .091 .088 MKQA (en) .596 .440 .608 .602 .596 .594 .582 .484 .422 .484 .490 .484 .488 .486 .438 .088 .434 .416 .418 .444 .422 
+
+Reading comprehension and multilingual 
+
+SQuAD .894 .887 .893 .896 .883 .897 .887 .953 .948 .950 .950 .952 .954 .954 .874 .786 .870 .890 .854 .853 .876 Belebele (en) .982 .974 .984 .978 .984 .982 .984 .976 .974 .974 .976 .978 .972 .984 .964 .238 .960 .962 .962 .964 .962 Belebele-8 .939 .891 .939 .941 .940 .941 .942 .939 .919 .938 .939 .939 .940 .940 .857 .259 .854 .851 .863 .858 .854 MKQA-8 .364 .201 .364 .362 .361 .362 .357 .268 .206 .270 .269 .266 .268 .263 .117 .019 .118 .116 .120 .119 .119 MGSM-6 .900 .853 .904 .903 .908 .903 .903 .711 .688 .716 .707 .705 .719 .701 .655 .156 .663 .651 .654 .652 .654 
+
+Math and code 
+
+GSM8K .964 .958 .968 .970 .976 .964 .970 .876 .830 .874 .864 .866 .868 .860 .908 .130 .906 .888 .902 .890 .882 HumanEval .976 .902 .982 .963 .963 .976 .957 .957 .945 .957 .957 .951 .957 .957 .689 .091 .665 .591 .634 .634 .604 
+
+Table 8: All task results on the 0–1 scale. Scores use the task-specific metrics in Appendix A, including token F1 for SQuAD. Orig.: original table; Rem.: table removed. RTN codes use 3 or 2 bits; QTIP uses 2 bits; CP uses 2 or 1.5 bits. Belebele-n, MKQA-n and MGSM-n average n non-English languages. Task differences and their intervals are reported in Table 10. 
+
+DeepSeek Qwen LongCat Setting 1 2 3 4 5 1 2 3 4 5 1 2 3 4 5Original .335 .333 .379 .482 .683 .261 .230 .269 .380 .674 .224 .157 .165 .243 .542 Table removed .133 .096 .108 .190 .520 .188 .132 .149 .253 .606 .149 .080 .067 .065 .228 RTN 3-bit .323 .330 .375 .481 .686 .259 .239 .272 .378 .673 .229 .155 .159 .243 .534 RTN 2-bit .310 .312 .367 .470 .694 .245 .215 .254 .376 .663 .228 .153 .153 .239 .534 QTIP 2.0 .323 .332 .370 .478 .689 .254 .232 .262 .380 .676 .224 .159 .155 .246 .537 
+
+CP, 2-bit code .318 .325 .381 .477 .685 .267 .226 .267 .385 .676 .217 .159 .155 .237 .539 CP, 1.5-bit code .300 .307 .358 .466 .686 .253 .216 .260 .372 .669 .213 .151 .152 .240 .533 
+
+Table 9: PopQA accuracy by entity popularity bin (1 = rarest). Settings match Table 8. 
+
+13 Task n CP 2 − RTN 2 CP 2 − QTIP 2 CP 1.5 − QTIP 2 CP 1.5 − RTN 2 ARC-E 1000 +0.6 [-0.7, +1.9] +1.1 [+0.0, +2.2] +0.2 [-1.1, +1.5] -0.3 [-1.6, +1.0] ARC-C 1172 -0.6 [-2.2, +1.0] +0.0 [-1.5, +1.5] -0.1 [-1.7, +1.5] -0.7 [-2.5, +1.2] HellaSwag 1000 +0.0 [-0.9, +0.9] -0.6 [-1.4, +0.2] +0.2 [-0.6, +1.0] +0.8 [-0.1, +1.7] PIQA 1000 +0.9 [-0.1, +1.9] +0.9 [-0.1, +2.0] +0.4 [-0.7, +1.5] +0.4 [-0.6, +1.4] WinoGrande 1267 +0.5 [-1.1, +2.1] +0.3 [-1.1, +1.7] -0.6 [-2.1, +1.0] -0.4 [-2.1, +1.3] BoolQ 1000 +0.1 [-0.9, +1.1] -0.3 [-1.2, +0.6] +0.1 [-0.9, +1.1] +0.5 [-0.5, +1.6] LAMBADA 1000 +0.0 [-1.3, +1.3] +0.1 [-1.3, +1.5] +0.1 [-1.3, +1.5] +0.0 [-1.3, +1.3] MMLU 1000 -0.2 [-1.1, +0.7] -1.0 [-1.8, -0.2] -1.1 [-2.1, -0.2] -0.3 [-1.2, +0.6] PopQA 5000 +0.7 [+0.0, +1.3] -0.1 [-0.7, +0.5] -1.5 [-2.1, -0.8] -0.7 [-1.4, -0.1] TriviaQA 3000 -0.1 [-0.6, +0.5] -0.5 [-1.0, +0.0] -0.3 [-0.8, +0.2] +0.1 [-0.4, +0.6] NQ 3610 +0.1 [-0.6, +0.9] +0.3 [-0.3, +1.0] -0.1 [-0.8, +0.7] -0.2 [-1.0, +0.5] EntityQs 3000 +1.0 [+0.1, +1.9] +0.3 [-0.7, +1.2] -1.7 [-2.6, -0.7] -0.9 [-2.0, +0.1] SimpleQA 1000 +2.1 [+0.5, +3.8] +1.5 [+0.0, +3.0] +0.4 [-0.9, +1.7] +1.0 [-0.7, +2.7] MKQA (en) 500 -0.8 [-2.8, +1.2] -0.2 [-2.0, +1.4] -1.4 [-3.4, +0.6] -2.0 [-4.2, +0.0] SQuAD 1000 +0.2 [-0.6, +0.9] +1.4 [+0.8, +2.1] +0.4 [-0.2, +1.0] -0.9 [-1.6, -0.1] Belebele (en) 500 +0.4 [-0.6, +1.6] -0.2 [-0.8, +0.4] +0.0 [-0.6, +0.6] +0.6 [-0.2, +1.6] belebele_zho_Hans 500 -0.8 [-1.8, +0.0] -0.8 [-1.8, +0.0] -0.8 [-1.6, -0.2] -0.8 [-1.6, -0.2] belebele_jpn_Jpan 500 -0.8 [-2.0, +0.2] -0.8 [-1.6, -0.2] -0.2 [-1.2, +0.8] -0.2 [-1.2, +0.6] belebele_arb_Arab 500 +0.0 [-1.2, +1.2] -0.4 [-1.6, +0.6] +0.6 [-0.6, +1.8] +1.0 [-0.2, +2.4] belebele_hin_Deva 500 +0.2 [-1.0, +1.6] +0.8 [-0.4, +2.0] +0.4 [-1.0, +1.8] -0.2 [-1.6, +1.0] belebele_rus_Cyrl 500 +0.2 [-0.6, +1.0] +0.4 [-0.6, +1.4] -0.4 [-1.6, +0.6] -0.6 [-1.6, +0.4] belebele_swh_Latn 500 -0.2 [-1.6, +1.2] +0.2 [-0.8, +1.2] +0.6 [-0.4, +1.6] +0.2 [-0.8, +1.2] belebele_kor_Hang 500 +0.8 [+0.2, +1.6] +1.2 [+0.4, +2.2] +0.8 [+0.2, +1.6] +0.4 [-0.4, +1.2] belebele_deu_Latn 500 +0.4 [-0.6, +1.4] +0.2 [-0.8, +1.2] +0.4 [-0.6, +1.4] +0.6 [-0.4, +1.6] mkqa_zh_cn 500 -0.6 [-2.4, +1.2] -0.6 [-2.2, +1.0] -1.6 [-3.4, +0.2] -1.6 [-3.8, +0.4] mkqa_ja 500 +0.6 [-1.4, +2.6] -0.4 [-2.2, +1.4] -1.0 [-3.0, +1.0] +0.0 [-2.2, +2.2] mkqa_ar 500 -1.0 [-3.2, +1.2] -0.2 [-2.0, +1.6] -0.6 [-2.6, +1.4] -1.4 [-3.6, +0.6] mkqa_ko 500 -1.6 [-3.8, +0.6] -1.0 [-3.2, +1.2] -0.8 [-3.0, +1.2] -1.4 [-3.6, +0.8] mkqa_ru 500 +0.6 [-1.6, +3.0] +0.8 [-1.2, +2.8] +1.2 [-0.8, +3.2] +1.0 [-1.0, +3.2] mkqa_th 500 +1.6 [-0.6, +3.8] +1.6 [-0.2, +3.4] -0.8 [-2.6, +1.0] -0.8 [-2.8, +1.2] mkqa_he 500 +0.8 [-1.0, +2.8] +0.2 [-1.4, +1.8] +1.0 [-1.0, +3.0] +1.6 [-0.4, +3.6] mkqa_de 500 -0.2 [-2.2, +1.8] +0.4 [-1.2, +2.0] -0.2 [-2.0, +1.8] -0.8 [-2.8, +1.2] mgsm_zh 250 -1.2 [-2.8, +0.0] +0.0 [-2.4, +2.4] +0.0 [-2.0, +2.0] -1.2 [-3.2, +0.4] mgsm_ja 250 +0.8 [-1.2, +3.2] +0.0 [-2.8, +2.8] -0.4 [-2.8, +2.0] +0.4 [-2.4, +3.2] mgsm_ru 250 +0.8 [-1.2, +2.8] -0.4 [-2.8, +2.0] -1.6 [-3.6, +0.0] -0.4 [-2.8, +2.0] mgsm_de 250 -0.4 [-2.0, +0.8] +0.4 [-1.2, +2.4] +0.4 [-1.2, +2.4] -0.4 [-2.0, +0.8] mgsm_sw 250 +0.0 [-2.4, +2.4] -0.4 [-3.2, +2.4] +0.0 [-2.4, +2.4] +0.4 [-2.0, +2.8] mgsm_bn 250 +0.0 [-3.2, +3.2] -2.4 [-5.6, +0.8] -1.6 [-4.4, +1.2] +0.8 [-2.0, +3.6] GSM8K 500 -0.6 [-1.6, +0.4] -1.2 [-2.4, +0.0] -0.6 [-1.6, +0.4] +0.0 [-1.2, +1.2] HumanEval 164 +1.2 [+0.0, +3.0] +1.2 [+0.0, +3.0] -0.6 [-3.7, +1.8] -0.6 [-3.7, +1.8] 
+
+Table 10: Paired task-score differences for DeepSeek-V4.1-Flash in percentage points, with 95% intervals from 10,000 paired item-bootstrap replicates. Positive values favor the first method. Differences are computed before rounding, so they may differ from subtracting the displayed scores. Intervals are per comparison, without multiplicity adjustment; isolated differences across 40 tasks require caution. 
+
+14 Task n CP 2 − RTN 2 CP 2 − QTIP 2 CP 1.5 − QTIP 2 CP 1.5 − RTN 2 ARC-E 1000 -0.9 [-2.5, +0.6] -1.1 [-2.5, +0.3] +0.2 [-1.3, +1.7] +0.4 [-1.1, +1.9] ARC-C 1172 -0.2 [-1.9, +1.5] +0.0 [-1.7, +1.7] -0.6 [-2.3, +1.0] -0.8 [-2.5, +0.9] HellaSwag 1000 +0.2 [-0.6, +1.0] -0.1 [-0.8, +0.6] -0.3 [-1.3, +0.6] +0.0 [-1.0, +1.0] PIQA 1000 -0.6 [-2.0, +0.8] +0.8 [-0.4, +2.0] +0.6 [-0.7, +2.0] -0.8 [-2.2, +0.6] WinoGrande 1267 -2.1 [-4.3, +0.2] -0.9 [-2.8, +0.9] +1.3 [-0.6, +3.2] +0.2 [-1.8, +2.3] BoolQ 1000 +0.2 [-1.4, +1.9] +0.5 [-0.9, +2.0] -0.3 [-1.8, +1.2] -0.6 [-2.2, +1.0] LAMBADA 1000 +0.6 [-0.5, +1.7] +0.4 [-0.7, +1.5] -0.1 [-1.3, +1.1] +0.1 [-1.0, +1.3] MMLU 1000 +0.5 [-0.8, +1.8] -0.5 [-1.6, +0.6] -1.1 [-2.3, +0.1] -0.1 [-1.3, +1.1] PopQA 5000 +1.4 [+0.7, +2.0] +0.3 [-0.2, +0.9] -0.7 [-1.2, -0.1] +0.3 [-0.3, +1.0] TriviaQA 3000 +0.2 [-0.4, +0.8] -0.2 [-0.8, +0.4] -0.2 [-0.8, +0.5] +0.2 [-0.4, +0.9] NQ 3610 +0.4 [-0.2, +1.1] +0.0 [-0.6, +0.6] +0.5 [-0.1, +1.1] +0.9 [+0.3, +1.6] EntityQs 3000 +1.2 [+0.2, +2.2] -0.6 [-1.4, +0.3] -0.7 [-1.6, +0.2] +1.1 [+0.1, +2.0] SimpleQA 1000 +1.2 [-0.3, +2.6] +0.7 [-0.4, +1.8] +0.8 [-0.3, +1.9] +1.3 [-0.1, +2.6] MKQA (en) 500 -0.2 [-1.6, +1.2] +0.4 [-1.0, +1.8] +0.2 [-1.0, +1.6] -0.4 [-2.0, +1.2] SQuAD 1000 +0.4 [+0.0, +0.7] +0.2 [-0.1, +0.6] +0.2 [-0.2, +0.6] +0.3 [-0.1, +0.8] Belebele (en) 500 -0.4 [-1.2, +0.4] -0.6 [-1.4, +0.0] +0.6 [+0.0, +1.4] +0.8 [+0.0, +1.8] belebele_zho_Hans 500 +0.0 [-1.0, +1.0] -0.4 [-1.6, +0.6] +0.2 [-0.4, +1.0] +0.6 [+0.0, +1.4] belebele_jpn_Jpan 500 +0.6 [-0.2, +1.6] +0.0 [-0.8, +0.8] -0.2 [-0.8, +0.4] +0.4 [-0.4, +1.2] belebele_arb_Arab 500 -0.4 [-1.2, +0.4] +0.0 [-1.0, +1.0] -0.4 [-1.4, +0.6] -0.8 [-1.8, +0.0] belebele_hin_Deva 500 +1.2 [-0.6, +3.2] +1.6 [-0.2, +3.4] +1.2 [-0.4, +2.8] +0.8 [-0.8, +2.4] belebele_rus_Cyrl 500 -0.4 [-1.0, +0.0] -0.2 [-1.0, +0.4] +0.0 [-0.8, +0.8] -0.2 [-1.0, +0.4] belebele_swh_Latn 500 -0.4 [-1.8, +1.0] -0.6 [-1.6, +0.4] +0.2 [-1.0, +1.4] +0.4 [-0.6, +1.6] belebele_kor_Hang 500 +0.0 [-0.8, +0.8] -0.2 [-1.2, +0.6] -0.2 [-1.0, +0.6] +0.0 [-0.8, +0.8] belebele_deu_Latn 500 +0.0 [-1.0, +1.0] +0.0 [-0.8, +0.8] +0.0 [-0.8, +0.8] +0.0 [-1.0, +1.0] mkqa_zh_cn 500 -1.8 [-3.4, -0.4] -0.2 [-1.4, +1.0] -1.0 [-2.4, +0.2] -2.6 [-4.4, -1.0] mkqa_ja 500 -0.4 [-2.0, +1.2] -0.8 [-2.2, +0.6] -0.6 [-2.2, +1.0] -0.2 [-1.8, +1.4] mkqa_ar 500 +0.8 [-0.6, +2.2] +0.4 [-0.4, +1.2] +0.0 [-1.4, +1.4] +0.4 [-1.2, +2.0] mkqa_ko 500 +0.6 [-1.0, +2.2] +0.2 [-1.4, +1.6] -0.4 [-2.2, +1.4] +0.0 [-1.6, +1.6] mkqa_ru 500 -0.8 [-2.4, +0.8] +0.8 [-0.6, +2.2] +0.4 [-1.2, +2.2] -1.2 [-3.2, +0.8] mkqa_th 500 +0.4 [-1.2, +2.0] +0.2 [-1.4, +1.8] -0.4 [-1.8, +1.0] -0.2 [-1.6, +1.2] mkqa_he 500 +0.0 [-1.6, +1.6] +0.6 [-1.0, +2.2] -0.2 [-1.6, +1.2] -0.8 [-2.4, +0.8] mkqa_de 500 +0.2 [-1.4, +1.8] +0.0 [-1.2, +1.2] -0.2 [-1.6, +1.4] +0.0 [-2.0, +2.0] mgsm_zh 250 -0.8 [-4.4, +2.8] -0.4 [-4.4, +3.6] +1.2 [-2.4, +4.8] +0.8 [-2.8, +4.4] mgsm_ja 250 +2.4 [-1.6, +6.8] +4.0 [-0.4, +8.4] -0.4 [-4.4, +3.6] -2.0 [-5.2, +1.2] mgsm_ru 250 +0.0 [-3.2, +3.2] +3.2 [-0.4, +6.8] +0.8 [-2.4, +4.0] -2.4 [-6.0, +1.2] mgsm_de 250 +1.2 [-1.6, +4.0] -2.4 [-5.6, +0.8] -2.0 [-5.6, +1.6] +1.6 [-2.4, +5.6] mgsm_sw 250 +2.0 [-2.4, +6.4] +1.2 [-2.8, +5.2] -1.6 [-5.6, +2.4] -0.8 [-5.6, +4.0] mgsm_bn 250 +2.0 [-2.4, +6.4] +2.8 [-1.6, +7.2] +0.0 [-4.8, +4.8] -0.8 [-5.2, +3.6] GSM8K 500 +0.4 [-1.2, +2.0] +0.2 [-1.6, +2.0] -0.6 [-2.6, +1.4] -0.4 [-2.4, +1.6] HumanEval 164 +0.0 [+0.0, +0.0] +0.6 [-1.2, +3.0] +0.6 [-1.2, +3.0] +0.0 [+0.0, +0.0] 
+
+Table 11: Paired task-score differences for Qwen3.8-Flash-Next in percentage points, with 95% intervals from 10,000 paired item-bootstrap replicates. Positive values favor the first method. Differences are computed before rounding, so they may differ from subtracting the displayed scores. Intervals are per comparison, without multiplicity adjustment; isolated differences across 40 tasks require caution. 
+
+15 Task n CP 2 − RTN 2 CP 2 − QTIP 2 CP 1.5 − QTIP 2 CP 1.5 − RTN 2 ARC-E 1000 +0.5 [-1.0, +2.0] +0.1 [-1.2, +1.4] +0.2 [-1.2, +1.6] +0.6 [-0.9, +2.1] ARC-C 1172 +2.1 [+0.4, +3.8] +1.3 [-0.2, +2.7] +1.0 [-0.5, +2.6] +1.9 [+0.2, +3.6] HellaSwag 1000 +1.0 [-0.3, +2.4] +1.1 [-0.1, +2.3] -0.6 [-2.0, +0.7] -0.7 [-2.1, +0.6] PIQA 1000 +0.9 [-0.8, +2.6] -1.2 [-2.7, +0.3] -1.4 [-2.9, +0.1] +0.7 [-0.8, +2.3] WinoGrande 1267 +0.4 [-2.3, +3.1] +0.4 [-2.0, +2.7] +1.1 [-1.4, +3.6] +1.1 [-1.5, +3.8] BoolQ 1000 +1.4 [+0.0, +2.9] +0.7 [-0.5, +1.9] +0.7 [-0.6, +2.0] +1.4 [-0.1, +2.9] LAMBADA 1000 +2.8 [+1.1, +4.5] +0.7 [-0.3, +1.8] +0.3 [-1.0, +1.6] +2.4 [+0.8, +4.0] MMLU 1000 +1.1 [-0.4, +2.6] -0.9 [-2.2, +0.4] -0.8 [-2.2, +0.5] +1.2 [-0.2, +2.6] PopQA 5000 +0.0 [-0.7, +0.7] -0.3 [-0.9, +0.3] -0.6 [-1.3, +0.0] -0.4 [-1.0, +0.3] TriviaQA 3000 +0.8 [-0.2, +1.7] -0.8 [-1.6, -0.0] -0.9 [-1.7, -0.1] +0.7 [-0.2, +1.6] NQ 3610 +0.1 [-0.7, +1.0] -0.1 [-0.9, +0.7] -0.2 [-1.0, +0.7] +0.1 [-0.9, +1.0] EntityQs 3000 +0.6 [-0.4, +1.6] -0.4 [-1.3, +0.5] +0.1 [-0.9, +1.1] +1.1 [+0.0, +2.1] SimpleQA 1000 +0.3 [-1.2, +1.8] -0.5 [-1.9, +0.8] -0.8 [-2.2, +0.6] +0.0 [-1.5, +1.5] MKQA (en) 500 +2.8 [-0.2, +5.8] +2.6 [+0.2, +5.0] +0.4 [-2.2, +3.0] +0.6 [-2.4, +3.6] SQuAD 1000 -3.7 [-4.8, -2.5] -0.1 [-1.0, +0.8] +2.2 [+1.2, +3.3] -1.4 [-2.4, -0.4] Belebele (en) 500 +0.2 [+0.0, +0.6] +0.2 [-0.6, +1.0] +0.0 [-0.6, +0.6] +0.0 [-0.8, +0.8] belebele_zho_Hans 500 +0.6 [-0.8, +2.0] +0.4 [-0.6, +1.6] -0.2 [-1.4, +1.0] +0.0 [-1.6, +1.6] belebele_jpn_Jpan 500 -0.8 [-2.4, +0.8] -1.2 [-2.8, +0.2] -0.8 [-2.2, +0.6] -0.4 [-2.2, +1.4] belebele_arb_Arab 500 +0.6 [-0.6, +1.8] -1.2 [-2.2, -0.4] -1.0 [-2.2, +0.0] +0.8 [-0.6, +2.2] belebele_hin_Deva 500 +2.0 [-0.6, +4.6] +0.0 [-2.2, +2.2] -0.6 [-2.8, +1.8] +1.4 [-1.2, +4.0] belebele_rus_Cyrl 500 -0.4 [-1.6, +0.8] -0.6 [-1.6, +0.4] -1.4 [-2.8, -0.2] -1.2 [-2.6, +0.2] belebele_swh_Latn 500 +3.2 [+0.2, +6.2] -0.8 [-3.6, +2.0] -2.2 [-5.2, +0.8] +1.8 [-1.6, +5.2] belebele_kor_Hang 500 -0.6 [-2.2, +1.0] -0.2 [-1.4, +1.0] -0.8 [-2.4, +0.8] -1.2 [-3.0, +0.6] belebele_deu_Latn 500 +1.0 [-0.6, +2.8] -0.8 [-2.0, +0.4] -0.6 [-1.8, +0.4] +1.2 [-0.4, +3.0] mkqa_zh_cn 500 +2.0 [+0.0, +4.0] +0.2 [-1.4, +1.8] -0.2 [-2.0, +1.6] +1.6 [-0.4, +3.6] mkqa_ja 500 -0.8 [-2.0, +0.4] -0.6 [-1.8, +0.6] -0.2 [-1.4, +1.0] -0.4 [-1.8, +1.0] mkqa_ar 500 -0.4 [-1.8, +1.0] -0.4 [-1.4, +0.6] +0.4 [-0.6, +1.6] +0.4 [-1.0, +1.8] mkqa_ko 500 +0.8 [-0.6, +2.2] +0.8 [-0.4, +2.2] +0.6 [-1.0, +2.2] +0.6 [-0.6, +1.8] mkqa_ru 500 -0.2 [-2.2, +1.8] -0.4 [-2.4, +1.6] -0.2 [-2.0, +1.6] +0.0 [-2.4, +2.4] mkqa_th 500 -0.4 [-1.6, +0.6] -0.2 [-1.4, +1.0] +0.6 [-0.6, +1.8] +0.4 [-0.6, +1.4] mkqa_he 500 +0.4 [-0.6, +1.6] +0.4 [-0.8, +1.6] +0.4 [-0.4, +1.2] +0.4 [-0.8, +1.6] mkqa_de 500 +0.6 [-1.8, +2.8] -0.8 [-3.0, +1.4] -2.2 [-4.4, +0.0] -0.8 [-3.0, +1.4] mgsm_zh 250 -2.0 [-6.0, +2.0] -2.8 [-6.0, +0.4] -0.4 [-3.6, +2.4] +0.4 [-2.8, +3.6] mgsm_ja 250 +0.8 [-3.6, +4.8] +2.4 [-2.0, +6.8] +1.6 [-2.8, +6.0] +0.0 [-4.0, +4.0] mgsm_ru 250 -0.8 [-4.4, +2.8] +2.0 [-1.2, +5.6] +2.8 [-0.4, +6.4] +0.0 [-3.6, +3.6] mgsm_de 250 +0.4 [-3.6, +4.4] -2.4 [-6.0, +1.2] -2.0 [-5.6, +1.2] +0.8 [-2.4, +4.0] mgsm_sw 250 +2.4 [-4.0, +8.8] -1.2 [-6.8, +4.4] +0.0 [-6.0, +6.0] +3.6 [-2.8, +9.6] mgsm_bn 250 +0.0 [-5.2, +5.2] +0.8 [-4.0, +5.6] -2.0 [-7.2, +3.2] -2.8 [-8.0, +2.4] GSM8K 500 +0.2 [-2.0, +2.4] -1.2 [-3.4, +1.0] -2.0 [-4.2, +0.0] -0.6 [-2.8, +1.6] HumanEval 164 +4.3 [-2.4, +11.0] +0.0 [-5.5, +5.5] -3.0 [-9.1, +3.0] +1.2 [-6.1, +8.5] 
+
+Table 12: Paired task-score differences for LongCat-Flash-Lite in percentage points, with 95% intervals from 10,000 paired item-bootstrap replicates. Positive values favor the first method. Differences are computed before rounding, so they may differ from subtracting the displayed scores. Intervals are per comparison, without multiplicity adjustment; isolated differences across 40 tasks require caution. 
+
+16 C Full Rate–Distortion Results 
+
+DeepSeek-V4.1-Flash Qwen3.8-Flash-Next LongCat-Flash-Lite Setting bpp GB KL KL max top-1 bpp GB KL KL max top-1 bpp GB KL KL max top-1 Original 8.25 202.7 0 0 1.000 16.00 102.4 0 0 1.000 16.00 62.8 0 0 1.000 Table removed 0 0 .773 1.08 .713 0 0 .308 .481 .815 0 0 2.89 3.57 .475 Mean row 0 0 .517 .743 .775 0 0 .310 .477 .819 0 0 3.44 4.07 .446 NVFP4 4.50 110.6 .0199 .0298 .954 4.50 28.8 .0166 .0289 .955 4.50 17.7 .0111 .0173 .968 MXFP4 4.25 104.4 .0220 .0347 .952 4.25 27.2 .0182 .0274 .953 4.25 16.7 .0144 .0216 .964 RTN 3-bit 3.50 86.0 .0293 .0573 .947 3.40 21.8 .0256 .0316 .947 3.50 13.7 .0277 .0384 .952 RTN 2-bit 2.50 61.4 .0688 .168 .925 2.40 15.4 .0588 .0990 .923 2.50 9.8 .117 .197 .903 QTIP 2.0 2.00 49.2 .0414 .0949 .939 2.00 12.8 .0347 .0476 .939 2.00 7.9 .0468 .0662 .938 CP, 4-bit code 4.06 99.8 .0184 .0275 .955 4.10 26.2 .0149 .0268 .957 4.06 16.0 .0087 .0145 .971 CP, 3.5-bit code 3.56 87.6 .0201 .0306 .954 3.60 23.0 .0167 .0274 .955 3.56 14.0 .0116 .0184 .967 CP, 3-bit code 3.06 75.3 .0235 .0401 .951 3.10 19.8 .0197 .0291 .952 3.06 12.0 .0170 .0244 .961 CP, 2.5-bit code 2.56 63.0 .0295 .0573 .947 2.60 16.6 .0250 .0324 .947 2.56 10.1 .0264 .0360 .953 
+
+CP, 2-bit code 2.06 50.7 .0401 .0884 .941 2.10 13.4 .0327 .0438 .940 2.06 8.1 .0426 .0591 .941 CP, 1.5-bit code 1.56 38.4 .0593 .144 .930 1.60 10.2 .0477 .0718 .930 1.56 6.1 .0692 .0992 .926 
+
+Paired KL ratio, geometric mean over domains [95% CI] 
+
+CP 1.5 / RTN 2-bit .863 [.856, .871] .812 [.797, .829] .596 [.587, .604] CP 2 / RTN 2-bit .585 [.579, .592] .556 [.546, .567] .366 [.360, .372] CP 2 / QTIP 2.0 .968 [.959, .977] .943 [.917, .969] .910 [.900, .919] CP 2 / RTN 3-bit 1.368 [1.352, 1.383] 1.281 [1.242, 1.319] 1.541 [1.521, 1.561] CP 2.5 / RTN 3-bit 1.009 [1.000, 1.017] .977 [.950, 1.006] .954 [.943, .966] CP 3 / RTN 3-bit .802 [.794, .811] .771 [.750, .794] .613 [.605, .621] CP 3 / NVFP4 1.180 [1.168, 1.192] 1.187 [1.143, 1.231] 1.528 [1.507, 1.550] CP 3 / MXFP4 1.066 [1.056, 1.076] 1.088 [1.055, 1.121] 1.175 [1.161, 1.190] NVFP4 / RTN 3-bit .681 [.672, .690] .651 [.634, .671] .401 [.396, .407] CP 3.5 / NVFP4 1.010 [1.003, 1.018] 1.007 [.976, 1.037] 1.048 [1.035, 1.061] CP 3.5 / MXFP4 .913 [.906, .920] .923 [.902, .941] .806 [.796, .817] CP 4 / NVFP4 .924 [.917, .932] .896 [.875, .919] .781 [.771, .792] CP 4 / MXFP4 .836 [.828, .843] .821 [.799, .843] .600 [.592, .609] 
+
+Table 13: Full storage and output-fidelity results. KL is the geometric mean over six domains; KL max is the worst domain; top-1 is next-token agreement with the original. GB counts lookup-table storage. Rates include row/group metadata. QTIP uses within-row rotation and a global scale; CP restores each row norm. RTN uses groups of 64 (80 for Qwen). NVFP4 and MXFP4 include block scales. Bottom: paired KL ratios and 95% chunk-bootstrap intervals; below 1 favors the first setting. 
+
+Table 13 includes the complete rate sweep and two controls that store no table: zeroing every row and replacing each row by the mean of its head. Removal gives geometric-mean KL values of .773, .308 and 2.89 for DeepSeek, Qwen and LongCat. A mean row preserves some output behavior in the first two models, but performs worse than removal on LongCat. The bottom block reports paired ratios: a value below one favors the first configuration. Table 14 gives WikiText-2 perplexity with-out benefit normalization. For example, LongCat changes from 13.316 to 13.538 with the two-bit code, compared with 103.539 after removal. The large removal gap should not obscure the absolute change caused by compression. 
+
+Setting DeepSeek Qwen LongCat Original 2.611 4.671 13.316 Table removed 7.703 6.476 103.539 RTN 3-bit 2.835 4.757 13.681 RTN 2-bit 3.662 5.089 14.842 QTIP 2.0 3.089 4.827 13.325 
+
+CP, 2-bit code 3.054 4.830 13.538 CP, 1.5-bit code 3.479 4.994 13.484 
+
+Table 14: WikiText-2 perplexity in its original units (lower is better). Settings match Table 1; no normaliza-tion by the table-removal baseline is applied. 
+
+17 D Source Statistics and Alternative Representations 
+
+D.1 Row statistics and access counts 
+
+Table 15 compares trained rows with dimension-matched Gaussian references. Read counts come from a sample of 726,000 fineweb-edu documents. We tokenize the sample with each model’s tok-enizer, which gives 727M–755M tokens. For each token we compute the rows it reads with our reim-plementation of the model’s address computation. The reimplementation uses each model’s per-head row offsets and table sizes, and it matches the orig-inal addresses bit for bit. We then count the reads of every row. Rows read per token is the total count divided by the number of tokens, which gives the 48, 16 and 12 of Table 6. These counts set the access skew and the read-weighted statistics of Sec-tion 4.3. They also set the frequency tiers of Ta-bles 21 and 22 and the hot-row cache of Section 5. The sample is English web text only.                               
+
+> Statistic DeepSeek Qwen LongCat Gaussian
+> d256 160 256 256/160 Kurtosis 2.99 2.94–2.95 2.96–2.97 2.98/2.96 Kurt. (read-wtd.) 2.98–2.99 2.95 2.95–2.96 2.98/2.96 Max/RMS 3.00–3.01 2.84–2.85 2.99 3.00/2.86 Cov. eff. rank 239–250 152–158 253–254 256/160 KLT gain (dB) 0.10–0.25 0.18–0.53 0.04–0.21 0Cols. kurt. >50a000
+> Table 15: Six statistics of the hashed tables. Ranges are over layers and n-gram orders (effective rank: over heads); dis the row dimension. Kurtosis and max/RMS (median over rows) are computed within each row (uni-formly sampled rows; read-weighted: rows drawn in proportion to their read count). Effective rank is that of the row covariance of each head. The Gaussian column gives the value expected for i.i.d. Gaussian rows of the same dimension. KLT gain: coding gain of a covariance KLT at 2 bits, in the value-path readout metric. Cols.: columns with kurtosis above 5, out of 12,288, 2,560 and 3,072 columns. aUniformly sampled rows; with read-weighted sampling, DeepSeek layer-14 order-2 heads have 2,048 such columns, an effect of mixing rows of different energy.
+
+Normalized coordinates and shared structure. 
+
+Across all three hashed-memory families, normal-ized within-row kurtosis differs from its Gaus-sian control by at most .02 for uniform and read-weighted samples, and .06 for the most-read 4,096 rows. For 2-gram rows, 16 directions fitted on sep-arate read-heavy rows explain 19%, 21%, 33% and 10% of the top-4,096 rows’ total squared norm in DeepSeek layers 1 and 14, Qwen and LongCat, respectively. The dimension-based references are 6.25% for the 256-dimensional rows and 10% for Qwen’s 160-dimensional rows. Thus similar within-row statistics coexist with shared directions among frequent rows. 
+
+Access frequency and magnitude. The top 1% of rows receive 35%, 48% and 33% of reads in DeepSeek, Qwen and LongCat. Mean squared co-ordinate magnitude correlates with read count pos-itively in Qwen and negatively in DeepSeek; in LongCat the correlation is positive for 2-grams (.53) and near zero for 3- and 4-grams ( −.16 , −.04 ). These measurements support separating the row gain from its normalized contents in Section 4.3. 
+
+D.2 Fitted codes and synthetic rank sweeps Fitted codes on trained tables. The row-level comparison evaluates the same frequency-stratified rows used for the statistical analysis, including unread-in-corpus, uniform, read-weighted and top-4,096 sets. Fitted codebooks use 32,768 disjoint uniform fitting rows for the offline comparison and 200,000 uniform fitting rows for Qwen KL. The codebooks fitted by k-means have 256 entries of four values and 65,536 entries of eight values. Their indices require eight bits per four values and six-teen bits per eight values, respectively, giving the same two-bit code rate. Structured variants use the full-table per-head mean and top four PCs. The byte accounting includes their shared storage and all per-row side information: 16 /d bpp for a bf16 scale and 
+
+64 /d for four bf16 coefficients. The shared code-books and basis storage are at most 1 MB per table in these settings. For Qwen, we compare the original and com-pressed models’ next-token distributions on the same observed prefixes from 256 FineWeb-Edu documents of 1,024 tokens each. These documents come from held-out shard 001 and are disjoint from the CPU-side documents of the perturbation exper-iment below. Each looked-up row receives a de-terministic coded replacement. Intervals use 2,000 paired document-bootstrap replicates. For unequal rate points, the reported trellis-only comparison is log-linear interpolation across the 1.5-, 2- and 2.5-bit code rates. The row-level tests cover the three hashed-memory families; output KL for these variants is measured on Qwen. Across frequency bins and all hashed families, the shared trellis has relative row MSE .0724– .0728, against .098–.099 for the 256 × 4 codebook 18 Representation bpp Qwen KL [95% CI] Shared trellis 2.1 .0198 [.0163, .0234] Fitted VQ, 256 × 4 2.1 .0238 [.0193, .0285] Fitted VQ, 65 ,536 × 8 2.1 .0226 [.0184, .0269] Mean + trellis 2.1 .0193 [.0160, .0229] Mean + 4 PCs + trellis 2.5 .0188 [.0156, .0220] Shared trellis curve 2.5 .0144 
+
+Table 16: Source-code comparisons on held-out Qwen text. Rates include per-row gains and structural coeffi-cients. The final row interpolates the trellis curve in log KL; its uncertainty is not reported. The fitted codebooks and structural variants use the protocol in Appendix D.2. 
+
+and .091 for the 65 ,536 × 8 codebook. Table 16 gives the corresponding Qwen KL comparisons. The mean-and-PC representation improves on the 2-bit trellis only by using more storage; at its rate, the interpolated trellis-only curve predicts lower KL. This matched-rate value was not measured in a separate run. Mean subtraction alone gives a smaller improvement of 2.4% [0.1, 4.5]. 
+
+Synthetic rank sweep. To test whether low rank alone favors fitted codebooks, a separate synthetic rank sweep uses tables of 16,384 rows with d ∈{160 , 256 } and three seeds. A rank-k table has Gaussian latents in a random k-dimensional basis, prescribed row norms and a common Haar rotation, stored in bf16. The equivalence margin of .05 on mean row kurtosis, mean max/RMS and pooled quantiles was fixed before the run. Every basis and codebook is fitted on half of the rows and evalu-ated on the other half. Byte counts include padding to whole bytes and all shared decoder state; each family’s best configuration at or below the trellis budget is chosen on the fit rows. At d = 256 , rank-k tables pass the Gaussian-coordinate equivalence test for k ≥ 16 , yet a PCA-basis code reaches .013 of the trellis MSE for k = 64 at the 2.06 bpp budget. For spiked full-rank tables with 16 strong directions, the structured-code/trellis MSE ratio is 1.19 when those directions hold a third of the energy, and .94 when they hold half. The crossover lies near a spike energy frac-tion of .45–.5 in this codec grid. The most-read real 2-gram rows place 10–33% of their energy in 16 held-out directions (Appendix D.1), consis-tent with the trellis advantage in the trained-table comparisons.                                              
+
+> Code bpp KL KL max top-1 QuIP# E8P a2.00 .0413 .0605 .934 QuIP# E8P, norm restored b2.10 .0373 .0518 .937 AQLM 1×16 c2.10 .0385 .0545 .936 AQLM 1×16 , norm restored d2.10 .0374 .0518 .937 HIGGS c2.10 .0404 .0577 .935 HIGGS, norm restored d2.10 .0391 .0544 .936 QTIP a2.00 .0347 .0476 .939 CP (trellis, norm restored b)2.10 .0327 .0438 .940
+> Paired gm-KL ratio [95% CI]
+> CP / E8P, both norm restored .877 [.857, .897] CP / AQLM, both norm restored .875 [.853, .897] CP / HIGGS, both norm restored .836 [.819, .856] E8P / QTIP 1.192 [1.173, 1.211] QTIP / AQLM .901 [.875, .927] QTIP / HIGGS .858 [.844, .874] E8P: norm restored / baseline .902 [.888, .917]
+
+Table 17: Codes considered for the Engram tables (Sec-tion 3) at about 2 bpp, on Qwen in the shared bench-mark of Section 4 (six domains). KL is the geometric mean over domains of the per-token KL to the original model, KL max the worst domain, top-1 the next-token agreement. aRotation and one scale per table. bAs in CP: no rotation, one bf16 norm-restoring scale per row. 
+
+> c
+
+One scale per row (least squares for AQLM, RMS for HIGGS); HIGGS rotates, AQLM does not. dThe same codes with each row’s norm restored. Ratios are paired, with document-chunk bootstrap 95% CIs. 
+
+D.3 Other published codes 
+
+Table 17 compares the chosen trellis with other published codes. It compares the E8P lattice code of QuIP#, AQLM and HIGGS with the trellis code on Qwen in the shared benchmark. The comparison includes baseline configurations and variants with per-row norm restoration. With norm restoration on every code, the trellis code has lower KL than E8P, AQLM and HIGGS (paired ratios .877, .875 and .836). 
+
+E Scale, Rotation, and Allocation 
+
+E.1 Scale ablation across rates 
+
+Table 18 expands Table 4 with rates, absolute KL and paired intervals. The first comparison removes rotation at a global scale; the next introduces a row-wise LS gain. The final step changes only the gain on the same codes to restore the original norm. The lower block repeats the gain comparisons at other rates. 
+
+E.2 Held-out gain test Scale choices and data. We vary only the scale applied to each decoded row, keeping its stored two-bit symbols fixed. Let ri be the original row 19 DeepSeek Qwen LongCat Step bpp KL ratio [95% CI] bpp KL ratio [95% CI] bpp KL ratio [95% CI] QTIP 2.00 .0414 – 2.00 .0347 – 2.00 .0468 –No rotation 2.00 .0416 1.005 [.995, 1.015] 2.00 .0346 .999 [.974, 1.027] 2.00 .0473 1.010 [1.000, 1.020] 
+
+Row LS gain 2.06 .0404 .972 [.964, .981] 2.10 .0349 1.008 [.984, 1.030] 2.06 .0462 .977 [.974, .981] 
+
+Norm restoration 2.06 .0401 .991 [.987, .995] 2.10 .0327 .937 [.904, .970] 2.06 .0426 .922 [.917, .928] 
+
+CP / QTIP – – .968 [.959, .977] – – .943 [.917, .969] – – .910 [.900, .919] 
+
+No rotation / rotation, both norm-restored – – .999 [.990, 1.008] – – .993 [.971, 1.015] – – 1.008 [.997, 1.019] 
+
+LS / global, 1.5-bit code 1.56 .0606 .982 [.975, .991] 1.60 .0503 .984 [.960, 1.010] 1.56 .0799 .978 [.975, .980] 
+
+Norm restoration / LS, 1.5-bit code 1.56 .0593 .979 [.975, .982] 1.60 .0477 .949 [.925, .967] 1.56 .0692 .866 [.860, .871] 
+
+LS / global, 2.5-bit code 2.56 .0295 .982 [.973, .990] 2.60 .0253 .976 [.954, .998] 2.56 .0275 .985 [.981, .988] 
+
+Norm restoration / LS, 2.5-bit code 2.56 .0295 1.000 [.995, 1.005] 2.60 .0250 .987 [.960, 1.016] 2.56 .0264 .959 [.953, .965] 
+
+Table 18: Full ablation from QTIP to CP. The first three step ratios compare each setting with the preceding one: remove within-row rotation at global scale, introduce row-wise LS gain, then restore the norm on the same codes. KL is the geometric mean over six domains. Ratio intervals use paired chunk bootstraps. The lower block repeats gain comparisons at other rates. –: not applicable (the first row has no preceding setting; ratio-only rows have no bpp or KL). 
+
+norm, vi the unit direction of its decoded recon-struction, and ρi the cosine between the original and decoded directions, clipped at zero. We set 
+
+ˆei(t) = ri[ρi + t(1 − ρi)] vi, so t = 0 gives LS scal-ing and t = 1 restores the original norm. We test 
+
+t ∈ {− .5, 0, . 25 , . 5, . 75 , 1, 1.25 , 1.5}. All settings store the same symbols and one bf16 scale per row: 2.06, 2.10 and 2.06 bpp for LongCat, Qwen and DeepSeek. We calibrate the predictions on 128 FineWeb-Edu documents and test them on 256 different doc-uments from the same held-out shard (001), using 1,024 tokens per document. We also test 96 chunks of 1,024 tokens each from CodeParrot Python code and Wikipedia in German, Russian, Chinese, Ko-rean and Hindi. These two sets reuse texts from the six-domain evaluation; they are separate from the web calibration documents, but are not independent samples of the earlier benchmark. DeepSeek inputs additionally receive a BOS token. 
+
+Predictions and evaluation. The predictions and decision rules were fixed before each test split was opened, and each test split was evaluated once. The primary predictor uses small perturbations of the original table to estimate a local quadratic approxi-mation to output KL; Appendix F.2 gives the deriva-tion. The secondary predictor fits a quadratic to the KL measured on the calibration documents. In-tervals use 2,000 paired document-bootstrap repli-cates. 
+
+Observed gains and prediction errors. Table 19 reports the comparison between norm restoration and LS on each test set. Norm restoration low-
+
+Web Code Wikipedia LongCat .904 .940 .904   
+
+> [.886, .923] [.923, .958] [.889, .918]
+
+Qwen .983 .944 .988   
+
+> [.975, .992] [.928, .958] [.970, 1.005]
+
+DeepSeek .997 .997 .988   
+
+> [.987, 1.006] [.979, 1.014] [.971, 1.004]
+
+Table 19: Norm-restoration KL divided by LS KL in the gain test, with paired 95% bootstrap intervals. Val-ues below 1 favor norm restoration. Stored codes and storage costs are fixed within each model. Web is the held-out FineWeb-Edu test split; code and Wikipedia reuse the benchmark texts described above. 
+
+ers KL relative to LS on the test split by ratios of .904–.940 on LongCat and .944–.983 on Qwen web and code; the Qwen multilingual interval and all three DeepSeek intervals include 1. The minima of quadratic fits to the test curves lie at t = .92 –
+
+1.30 across the nine model–domain combinations, and shrinking below LS ( t = −.5) raises KL in all three models. The primary predictor missed the optimum on LongCat (1.44 against .92–1.05), had the wrong sign on Qwen web and code text, and gave an off-grid value ( −7.0) on DeepSeek. Its finite-difference noise is large relative to the small change from LS to norm restoration, and router choices changed at 40–47% of token–layer posi-tions, so the local quadratic does not describe the 2-bit operating point. The secondary predictor had the right sign in all five cells where the test resolved the effect, and the effect grew under domain shift in two cells. 20 Tool DeepSeek Qwen LongCat Eval. Rotation a .999 .993 1.008 S                    
+
+> (Hadamard) [.990, 1.008] [.971, 1.015] [.997, 1.019]
+> Second-order –1.46 1.11 E
+> rounding Lloyd–Max GPTQ
+> Frequency –1.044 b–S
+> allocation [1.016, 1.076]
+> Start-row .999 –.991 S
+> protection [.995, 1.002] [.988, .993]
+
+Table 20: Supplementary tool comparisons on hashed tables (frequency allocation lowers KL only on web, the distribution its read counts come from: .915 there, 1.044 over all domains). Entries: KL with / without the tool (S rows: geometric mean over domains, 95% CI). S: shared benchmark; E: separate evaluation with its own baseline; –: not tested; details in Table 21. A pure low-rank replacement was not evaluated end to end (covariance effective rank 239–254 of d = 256 and 152–158 of d = 160 ); a mean + 4 PCs + trellis residual was (Section 4.3). aKL without / with rotation, both with norm restoration, as in Section 3. bTrellis codes in three tiers by read count (top tier 35% of rows) vs the 2-bit code alone at the same mean rate; the 10% top tier and per-domain ratios are in Table 21. 
+
+E.3 Rotation, allocation and protected rows 
+
+Tables 20 and 21 report supplementary compar-isons for the representation choices in Sections 4.3 and 3. Each row is one tool. It gives the statisti-cal motivation, the measurement on each model and the protocol. (S) marks the six-domain bench-mark described in Appendix A: 262,016 tokens in each of web, code, math, chat and multi5, and 491,280 tokens in multi15. (E) marks a separate evaluation with fewer tokens and its own baseline. Each row states the numerator and denominator of its KL ratio. A value below 1 favors the numerator setting; for example, the rotation comparison uses KL without rotation divided by KL with rotation. Per-domain ratios are point values. They show the pattern of frequency allocation: lower KL on web text and higher KL on code and multilingual text. The extended checks in Table 22 further separate average quality from distribution-specific gains. A top-10% frequency tier improves DeepSeek’s geometric-mean KL by .9% (ratio .991 [.985, .997]), while multilingual ratios rise to 1.023 and 1.016. The top-35% tier gives ratios 1.010 [1.000, 1.020] on DeepSeek and 1.006 [.995, 1.017] on LongCat; LongCat’s code ratio rises to 1.085 [1.057, 1.113]. On Qwen, restoring the rows se-lected at sequence starts improves five non-chat domains (ratios .970–.983, each interval below 1), while the chat estimate is noisy at 1.179 [.997, 1.420]. Its six-domain geometric mean is 1.008 [.980, 1.039]. These effects make the allocation depend on the deployment distribution. 
+
+F Geometry and Error Analysis 
+
+F.1 Gaussian coordinates with a fixed Gram matrix 
+
+This construction establishes compatibility be-tween Gaussian coordinates and learned geome-try, not how training produces them. Initialization and intermediate checkpoints for the target mod-els are unavailable. Rotating a fixed table Z by an orthogonal matrix R keeps its Gram matrix, 
+
+ZR (ZR )⊤ = ZZ ⊤. If R is Haar-distributed, the normalized direction of any fixed nonzero row is sphere-uniform by rotational invariance. It can be represented as h/ ∥h∥2, with h ∼ N (0 , I d). For fixed k, ∥h∥2/√d → 1 in probability, so the first k
+
+coordinates scaled by √d converge in distribution to N (0 , I k); see Diaconis and Freedman (1987) for finite-dimensional approximation results. The same rotation applies to every row, preserv-ing all learned pairwise geometry and rank. Rows can remain correlated, including a rank-one table, and a unit vector’s full coordinates obey a fixed-norm constraint. The construction is a compatibility argument for source statistics. Actual trained coor-dinates require the empirical checks in Section 4.3; it does not model the optimizer or establish that the complete network is invariant to a coordinate change with the consumer held fixed. 
+
+F.2 Fixed-shape gain and local output distortion 
+
+With e = ru , ∥u∥ = ∥v∥ = 1 and c = u⊤v ∈
+
+(0 , 1) ,
+
+∥gv − ru ∥2 = ( g − rc )2 + r2(1 − c2), (8) 
+
+D(r) − D(rc ) = r2(1 − c)2. (9) Thus rc minimizes coordinate MSE, while r pre-serves magnitude. For a local quadratic metric 
+
+H ⪰ 0 of the downstream network, holding the other rows fixed, the distortion is 
+
+DH (g) = 12 (gv − ru )⊤H(gv − ru ). (10) Writing A = v⊤Hv > 0 and B = v⊤Hu , differen-tiating the quadratic distortion gives g∗ 
+
+> H
+
+= rB/A .21 Tool Motivation Measurement Evaluation setup Rotation (random Hadamard within a row) Gaussian-like row statistics motivate testing whether within-row rotation improves reconstruction. KL ratio without/with rotation, both with norm restoration: DeepSeek .999 [.990, 1.008] †,Qwen .993 [.971, 1.015], LongCat 1.008 [.997, 1.019]. Table MSE ratio .998–1.001 on all 11 order tables. KL: shared benchmark (six domains; token counts in Appendix A), 2.06–2.10 bpp. MSE: CPU encode, 2,048–4,096 read-weighted rows per table. Second-order rounding (GPTQ, LDLQ, metric-aware scalar) A readout-only surrogate metric is W ⊤W :condition number 2.5 (LongCat), metric effective rank 243–254/256 and 155–158/160. This surrogate omits gates and subsequent layers. KL with vs without the metric: LongCat GPTQ .128 vs .115 (vs RTN, 2.5 bpp); Qwen metric-whitened Lloyd–Max .1502 vs .1027 (2.1 bpp). Not tested on DeepSeek. (E) Separate evaluation: about 32k web tokens, own baseline per row. Low-rank decomposition Covariance effective rank 239–254/256 and 152–158/160: high global rank; frequent-row structure is examined separately in Section 4.3. Global covariance alone does not determine compression value. A pure low-rank replacement was not evaluated end to end. A mean + 4 PCs + trellis residual was, at equal bytes (Section 4.3). Qwen KL (Section 4.3) Frequency-based bit allocation Frequently read rows have the same distribution (read-weighted kurtosis), so equal rate gives equal relative error (LongCat: .0737 unread vs .0722 for 10–99 reads). (S) Qwen, KL with / without tiers: trellis codes at 2.6/2.1/1.6 bpp by read count vs the 2-bit code alone, same mean rate: top tier 35% of rows (89% of web reads) 1.044 [1.016, 1.076]; web .915, code 1.074, multilingual 1.092–1.123. With top tier 10% of rows (72% of web reads) 1.012 [.980, 1.046]; web .929, code 1.027, multilingual 1.016–1.048. (E) Scalar code, 2.1 bpp, vs the same code at a uniform rate: web .0853 vs .1030 ( −17%), but 1.33–1.44 × higher on code, Chinese and Japanese. (S) Shared benchmark (six domains; token counts in Appendix A), 2.10 bpp. (E) Separate evaluation (131,071 web tokens, plus code, Chinese, Japanese). Start-of-sequence row protection Protection tests whether repeatedly accessed start rows warrant additional precision. Rows read at every sequence start kept at original precision (DeepSeek 24 per Engram layer, LongCat 27,811). KL ratio vs CP: DeepSeek .999 [.995, 1.002] (random-row control 1.000 [1.000, 1.000]); LongCat .991 [.988, .993] (control .999 [.997, 1.001]). Shared benchmark (six domains; token counts in Appendix A), on top of CP at 2.06 bpp. 
+
+Table 21: Detail of Table 20 (Appendix E). Supplementary tool comparisons on hashed lookup tables (frequency allocation lowers KL only on web, the distribution its read counts come from, and raises it on code and multilingual text). KL ratios are geometric means over the six domains with paired chunk-bootstrap 95% CIs; per-domain ratios are point values; rotation: KL without / with rotation; frequency allocation and start-row protection: KL with / without the tool. (S): shared benchmark of Section 4.1; (E): a separate evaluation with fewer tokens and its own baseline, given in the last column. †The expected outcome was fixed before this measurement. 
+
+The difference between norm restoration and LS is 
+
+DH (r) − D H (rc ) = 12 r2(1 − c)(1 + c)A − 2B.
+
+(11) For c ∈ (0 , 1) , norm restoration beats LS in this metric exactly when 
+
+2v⊤Hu > (1 + c)v⊤Hv. (12) For H = I, LS is optimal. Equation 12 identifies when preserving magnitude is preferable despite the extra coordinate error. This is an unconstrained fixed-shape result. If the gain is restricted, its opti-mum is projected onto the allowed interval. For output KL, a local metric at the original table can be written H = Ex[J⊤ 
+
+> x
+
+FxJx], where 
+
+Jx differentiates model logits with respect to the table and Fx = diag( px) − pxp⊤ 
+
+> x
+
+is the categorical Fisher matrix. The expectation includes selective and repeated row use. A single-row block treats the other rows as fixed; simultaneous table changes 22 Step DeepSeek Qwen LongCat Top-35% tiers / uniform 1.010 1.044 1.006           
+
+> [1.000, 1.020] [1.016, 1.076] [.995, 1.017]
+> Top-10% tiers / uniform .991 1.012 –
+> [.985, .997] [.980, 1.046]
+> Start rows / uniform –1.008 –
+> [.980, 1.039]
+> Random rows / uniform –1.035 –
+> [.994, 1.087]
+
+Table 22: Extended allocation checks. Entries are geometric-mean KL ratios to uniform CP with paired 95% chunk-bootstrap intervals over six domains. Fre-quency tiers keep the same mean rate; the top-tier frac-tion refers to rows. Qwen start-row protection restores 37,750 selected rows to bf16 and adds .0019 bpp; the random-row control uses the same count. 
+
+also involve cross-row terms. The readout surrogate 
+
+W ⊤ 
+
+> v
+
+Wv omits the gate and subsequent network. For a fixed-code gain sweep, define 
+
+ˆei(t) = ri[ρi + t(1 − ρi)] vi, (13) where ρi = u⊤ 
+
+> i
+
+vi is the row cosine. Stacking all row errors gives ϵ(t) = ϵ0 + ts . The local approxi-mation is 
+
+KL( t) ≈ 12 ϵ⊤ 
+
+> 0
+
+Hϵ 0 + at + 12 bt 2, (14) with a = s⊤Hϵ 0 and b = s⊤Hs . For b > 0, it predicts t∗ = −a/b and a norm-restoration–LS difference of a + b/ 2. Appendix E.2 tests this pre-diction on held-out text. Large distortion, expert-routing changes and a poorly estimated metric can invalidate the local approximation. 
+
+F.3 Perturbations through the readout 
+
+A separate perturbation experiment adds to every looked-up Qwen row an error with squared norm 
+
+0.05 ∥e∥2 or 0.2∥e∥2. The error lies along a cho-sen subspace: norm only, direction only, isotropic, or the top or bottom 16 right-singular directions of each head’s value or key projection. A row has the same error wherever it is read. We compare next-token distributions on identical observed pre-fixes from 256 held-out FineWeb-Edu sequences of 1,024 tokens. These come from shard 001, ex-cluding the first 400 documents used for the CPU readout analysis; KL ratios are paired on the same tokens. Qwen’s raw rows have kurtosis 2.94, while the value outputs Wve have kurtosis 93.5. At error en-ergy 0.2∥e∥2, perturbations along the top 16 right-singular directions of the value projection change the memory readout 1.6 times as much as perturba-tions along the bottom 16, yet give slightly lower KL (ratio .92 [.88, .96]). Pure norm errors incur more KL than equal-energy direction errors (direc-tion/norm .86 [.83, .88]). 
+
+F.4 LongCat damage model 
+
+The damage model summarizes codec error with a direction-error proxy S and a relative norm-change proxy dN . For each codec, D is the arithmetic mean over LongCat’s twelve tables of P 
+
+> i
+
+∥ˆei − ei∥2/ P 
+
+> i
+
+∥ei∥2. For LS-scaled codes we use S = D and dN = √1 − D − 1; norm-restored variants retain the corresponding LS value of S and set dN = 0 . For the norm-expanding family, we use S = D/ (1 + D) and dN = √1 + D − 1; a uniform multiplicative gain 1 + g gives S = 0 and 
+
+dN = g. These are codec-level approximations, not direct averages of measured row angles and norm changes. The pure-direction controls set S
+
+explicitly and preserve each row’s norm. Output KL is evaluated on 32,768 FineWeb-Edu tokens, arranged as sixteen 2,048-token sequences, from the stream after its first 200,000 documents. The model is 
+
+KL = c0 + k S p + k∥ dN 2. (15) The offset c0 = .0021 is the KL measured after a very small pure-direction perturbation ( S = 10 −5)on LongCat. It represents a measured perturbation response, rather than a universal lower bound on KL; an unperturbed repeat in the same process gives zero KL. The other constants are k = .198 ,
+
+p = .79 and k∥ = 2 .19 . We fit them once on 29 LongCat codec configurations, with a log-RMSE of .053. Figure 3 plots KL against S for these con-figurations. It provides a descriptive comparison with the fixed-code gain tests. The model matches the codecs it was fitted on to within about 10%. It also predicts the held-out pure direction edits, the triangles in the figure. For S
+
+from 10 −5 to .3, measured KL is 0.89–1.01 times the prediction. The model fails in three cases. It overpredicts the gain of norm restoration at 1.5 bits about twofold. It underpredicts errors that inflate the norm at relative MSE .13–.3 by 1.3–2.0 ×. It also misses a coherent gain of ±3% on all rows by 1.5–2.0 ×. We fitted and checked the model on LongCat only, so we use it as a description. 23 10 −5 10 −4 10 −3 10 −2 10 −1           
+
+> 10 −2
+> 10 −1
+> offset c0=.0021
+> Direction error S
+> KL per token
+> model, norm kept ( dN = 0 )model, MSE scale ( dN =√1−S−1)MSE-scaled codecs (fit) norm-restored codecs (fit) pure direction edits (held out)
+
+Figure 3: LongCat damage model KL = c0 + k S p +
+
+k∥ dN 2 with the measured small-perturbation offset 
+
+c0 = .0021 and k = .198 , p = .79 , k∥ = 2 .19 fit-ted once on 29 codec configurations (LM, VQ and TCQ at 0.5–4 bits with the MSE-optimal scale or with norm restoration, plus one global gain, not drawn). Pure di-rection edits that keep every row norm (triangles) are out of sample. S and dN summarize direction and norm error using the codec-level approximations defined in the text; the direction controls set S explicitly. 
+
+G Storage Format and Systems Measurements 
+
+End-to-end serving runs and the unfused lookup controls use one node with 8 H200 GPUs, two Xeon Platinum 8462Y+ CPUs, 2 TB of DRAM and 6 local PM1733a NVMe drives in RAID-0. Each H200 has 141 GB of HBM nominally; nvidia-smi reports 143,771 MiB, or 150.8 ×10 9 bytes. Peak GPU memory in Section 5 and Table 23 is Py-Torch’s max_memory_allocated in units of 10 9
+
+bytes, taken on the GPU with the largest value. It counts allocated tensors only, not memory the allocator has reserved but not handed out. 
+
+G.1 Records and lookup kernels 
+
+Each CP row is a fixed-size record. The record holds the trellis bitstream of the row and one bf16 scale αi (Section 3). A b-bit code on a d-value row takes bd/ 8 bytes, and the scale adds 2 bytes. The rate is therefore b + 16 /d bpp. For DeepSeek at 
+
+b = 2 and d = 256 , a record is 64 + 2 = 66 B, or 2.06 bpp. For Qwen at d = 160 , it is 40 + 2 = 42 B, or 2.10 bpp. On SSD the records are aligned so that no record crosses a 4 KB page, and one row is one read. Table 24 compares lookup layouts on DeepSeek. The fused comparison uses one H200 on a four-GPU node with Xeon Platinum 8462Y+ CPUs, Py-Torch 2.14.1+cu130 and Triton 3.8.0. CPU execu-tion and host allocations are bound to NUMA node 0; GPU clocks are not locked. The full 768,022,850-row tables use real CP codes and random tile pay-loads, with the same real row scales and decoder lookup table. Each kernel passes bit-exact checks against its own reference decoder on 8,192 rows, including table boundaries; the two layouts are not matched for output KL. Lookup requests come from the DeepSeek-tokenized first 30,000 documents of held-out FineWeb-Edu shard 001. We test prefill lengths of 1,024, 4,096 and 16,384 tokens and decode batches of 1 and 64, using five independent pro-cesses per placement. Each workload has 20 warm-up requests and 100 timed requests per method; identical requests are paired across methods with alternating execution order. Different runs use dif-ferent request seeds, so between-run variation in-cludes both execution and input variation. Timing uses a host clock with GPU synchronization be-fore and after each call, including output allocation but excluding data loading and request transfer. No cache flush is used. We report the mean and sam-ple standard deviation of the five run medians, not statistics treating all 500 calls as independent runs. At 4,096 tokens, CP and tile windows take 
+
+0.1905 ± 0.0034 and 0.2210 ± 0.0034 ms in HBM, and 6.544 ±0.022 and 10 .781 ±0.091 ms from host DRAM. The per-run tile-window/CP time ratios average 1.160 ± 0.003 and 1.648 ± 0.017 , respec-tively. Randomizing the CP code payload while preserving scales gives ratios of 1.163 ± 0.003 and 
+
+1.674 ± 0.031 under the same protocol, retaining the direction and approximate size of the prefill advantage. All 20 processes across both payload conditions and placements pass correctness checks, with 20,000 timed calls in total. HBM decode differ-ences are small, and the batch-64 ordering reverses in one of five runs with real CP codes; we do not claim a consistent HBM decode advantage. The unfused controls in the top block use sepa-rate gather and decode kernels on the eight-GPU node described above; compare layouts within each block. The row-window decoder needs 7.3 KB of window bits per token, spanning 24.6 KB of 32-byte sectors, 5.3 × the sectors of row records. These byte counts are computed from the layout, since hardware memory counters were unavailable. A separate CP–FP8 benchmark on the eight-GPU node uses a Triton kernel that reads and de-codes each row in one pass. With the DeepSeek table in HBM, lookup takes 0.04 ms for one decode 24 Tier Who needs it What 2 bpp changes (measured) What it does not change GPU HBM, 4 GPUs RL rollouts and public inference code that keep the table on the GPU FP8 needs 50.7 GB/GPU and runs out of memory at decode batch 512 and at 64k-token prefill; in the representative setting its prefill takes 64.66 ± 2.49 s (peak 147.0 GB). NVFP4 (27.6 GB/GPU) runs both, but its 64k-token prefill step takes 59.81 ± 4.75 s. CP needs 12.7 GB/GPU, runs every workload, and prefills in 13.27 ± 0.22 s (peak 109.5 GB) and 64k tokens in 18.23 ± 0.01 s. Decode step time (795.7 vs. 792.9 ms, representative setting) and prefill steps up to 16k tokens (within 0.9%). Prefill slows when a large table leaves little HBM (left). GPU HBM, 8 GPUs Same, with the model spread over a full node Both fit (25.3 vs. 6.3 GB/GPU); CP leaves 19.0 GB/GPU more for KV cache and raises the per-step ceiling from decode batch 1024 to 
+
+≥2048 and from 96k to ≥128k prefill tokens. Step time (within 2.4% at every point both ran). Host DRAM Several model replicas per node; hosts with little RAM Table size: 202.7 → 50.7 GB; Peak node RSS 225 → 75 GB. Lookup alone at 64k tokens: 53.5 → 19.4 ms. Smallest host that holds the table (calc.): 256 GB → 64 GB. End-to-end time: the lookup is ≤0.8% of a forward step. SSD DRAM smaller than the table (long tail on SSD) Nothing per read: each row is one 4 KB read in both formats, 48 reads per decoded token. Lookup latency; with prefetch the exposed lookup at 16k-token prefill is 2.7 ms (FP8) and 1.5 ms (CP), vs. 199.2 ms without. Hot-row cache (HBM) + SSD Same, with spare HBM At 12.9 GB the cache serves 50.6% → 70.7% of reads; a 51.5 GB cache holds the whole 50.7 GB CP table and serves 100% of reads (FP8 rows: 70.7%). Simulated SSD reads/token at 32 GB: 19.4 → 2.7. Decode still misses every step (FP8 with 12.9 GB cache: 20.8 SSD reads/token at batch 64), so the off-GPU round trip stays on the critical path. 
+
+Table 23: Placement summary (detail for Section 5): what compressing the DeepSeek tables to 2 bpp changes in each memory tier, and what it does not (8 ×H200 node, reference inference code; representative setting: batch 8, 4k-token prompt, 256 decode steps). 4-GPU timings are mean ± s.d. over 3 runs; other settings are one run each. Peak: maximum over GPUs of PyTorch’s allocated memory, in 10 9 bytes (an H200 has 141 GB nominal). “Calc.” marks a calculation (table only, 87.5% of installed RAM usable); everything else is measured.                      
+
+> HBM (ms) DRAM (ms) Layout KB/token decode prefill prefill Rows (CP) 3.2 0.0357 0.228 6.70 Tiles, whole tile 50.7 ( 16 ×)0.133 3.64 ( 16 ×) 9.90 ( 1.48 ×)+ Hadamard, 256 rows 811 ( 256 ×)1.66 101 ( 443 ×)187 ( 28 ×)
+> Fused gather and decode: mean of run medians
+> Rows (CP) 3.2 0.0252 0.19 6.54 Tiles, row windows 7.3 0.0255 0.221 10.8
+
+Table 24: DeepSeek lookup costs at two code bits (48 rows/token; one H200). HBM: GPU memory; DRAM: pinned host memory over PCIe. Decode: batch 64; pre-fill: 4,096 tokens. Top: separate gather/decode, single-session medians; parentheses give factors over row records. Bottom: mean of five independent run medians (100 calls after 20 warm-ups each); row windows use random payloads, CP uses model codes. Blocks use dif-ferent nodes and protocols and should be compared only within each block. KB/token is computed code traffic, not measured bandwidth; this test does not compare output KL. 
+
+token and 0.83 ms for a 16k-token prefill. Reading the FP8 table takes 0.075 ms and 2.45 ms, measured on a quarter shard that fits on one GPU. 
+
+G.2 Memory tiers and workload measurements 
+
+SSD reads pass through host memory because GPUDirect Storage was unavailable on the test system. Table 25 lists the memory tiers of this node, as summarized in Section 5. It gives bandwidth, read unit, latency and lookup time for each tier. We measured the SSD with fio 3.38 using io_uring, O_DIRECT and 4 KB random reads. At queue depth 1 it gives 10.8k IOPS and 91 μs per read. With 32 jobs at queue depth 64 it gives 2.56M IOPS, and 64 KB reads reach 40 GB/s. O_DIRECT reads below 4 KB are not possible on this path, so every format needs one 4 KB read per row. Table 23 summarizes effects across memory tiers, complementing the GPU measurements in Table 5. It lists for each tier who needs it, what 25 Tier Capacity (node) Bandwidth (measured) Read unit Latency Lookup, 64k tok (ms) FP8               
+
+> →CP What compression changes GPU HBM 1,128 GB (8 ×H200) 4,579 GB/s read per GPU
+> ≤64 B a–9.70 →
+> 3.23 b
+> Whether the table fits next to the model weights. DRAM 2 TB STREAM triad 191–315 GB/s c;host →GPU 55.2 GB/s 64 B a1.16 μs(PCIe round trip) 53.5 →
+> 19.4 Host RAM per replica (202.7 →
+> 50.7 GB) and PCIe traffic (12.7 →
+> 3.2 KB per token). Local SSD 6 NVMe, RAID-0 4 KB random 2.56M IOPS; 64 KB reads 40 GB/s 4 KB 91 μs(QD1) 1,243 →
+> 1,048 Nothing on the read path: one 4 KB read per row in every format (16k-token prefill: reads 232 vs 228 ms). The gap is CPU-side row extraction (15.2 vs 1.0 ms). More rows fit in the same cache.
+
+Table 25: Memory tiers (detail for Section 5): one 8 ×H200 node and the effect of compressing the DeepSeek Engram tables from FP8 (264 B/row) to CP at 2.06 bpp format (66 B/row). Lookup is the median time to fetch the 48 rows of each of 64k tokens on one GPU. Bandwidths: nvbandwidth (HBM, PCIe) and STREAM (DRAM); fio (SSD). aAccess granularity of the memory system, not measured. bFP8 uses a quarter shard of the table, since the full FP8 table does not fit one GPU. cOne NUMA node to both nodes; measured while other jobs used host memory, so a lower bound. 
+
+2 bpp changes and what it leaves unchanged. On 4 GPUs it separates decode, where step time does not change, from prefill, which slows when a large table leaves little HBM for activations. 
+
+G.3 Caching and host placement 
+
+In the DeepSeek host-memory tests, compressing the table from 202.7 to 50.7 GB saves capacity and speeds up isolated lookups. Lookup accounts for less than 1% of a forward step in our eager implementation without graph capture, so complete step time changes little; the backbone remains on the GPU. Figure 4 comes from a simulation of a static hot-row cache. The cache holds the rows with the highest FineWeb-Edu read counts (Appendix D.1), and we evaluate it on held-out FineWeb-Edu reads. Each missed row costs one 4 KB read. The simu-lation uses the fio constants above, 2.56M IOPS and 91 μs at queue depth 1. These constants set only the throughput limits, and the hit rates do not depend on them. At a cache capacity of 12.9 GB, CP serves 70.7% of held-out reads from the cache, compared with 50.6% for FP8. Compression improves the hit rate by fitting more rows in the same cache capacity, while the 4 KB minimum read unit leaves the cost of an indi-vidual row miss unchanged. A decode step requests many rows, and the tested caches still require off-GPU reads at each step. Higher hit rates therefore reduce simulated traffic without necessarily elimi-       
+
+> 1416 64
+> 20 40 60 80 100
+> .506 .707
+> Cache size (GB) Reads served (%) (a) HBM cache hit rate
+> FP8 rows 2-bpp rows .25 1416 64 256
+> 020 40
+> Cache size (GB) 4 KB reads / token (b) SSD reads per token
+
+Figure 4: DeepSeek tables behind a static hot-row cache (rows ranked by read count, fineweb held-out reads). (a) Share of reads served by a cache of a given size hold-ing FP8 or 2-bpp rows (CP, 2.06 bpp); circles mark the 12.9 GB/node cache of the end-to-end runs. (b) Simu-lated SSD reads per token (one 4 KB read per missed row, 48 rows per token) for the FP8 table (202.7 GB) and the CP table (2.06 bpp, 50.7 GB); colors as in (a). 
+
+nating the wait for those reads. On Qwen (2 H200 GPUs, Hugging Face ea-ger inference), keeping the 102.4 GB bf16 table in pinned host DRAM costs little time. Decoding one token takes 83.7 ms, against 79.3 ms with a 13.8 GB trellis-coded table on GPU (2.15 bpp, a trellis with a 10-bit state and a stored lookup table). At 2.1 bpp, CP would shrink this table to 13.4 GB. 
+
+H Token-Indexed Tables (Gemma PLE) 
+
+Gemma’s per-layer embedding (PLE) assigns one row to each token and multiplies the retrieved vec-26 No rotation Rotation Model QTIP +BOS +top-100 QTIP +top-100 E2B .106 .031 .027 .033 .026 E2B-it .227 .198 .140 .126 .123 E4B .162 .030 .028 .029 .026 E4B-it .067 .067 .061 .059 .056 3n-E4B .108 .109 .105 .123 .116 
+
+> Table 26: Worst-domain KL of Gemma PLE tables at 2.0 bpp (six domains) when the BOS row, or the BOS row and the 100 most-read token rows (+top-100), are kept in bf16 in every layer (+0.006 bpp), without and with rotation. Models: Gemma-4 E2B, E4B and their instruction-tuned (-it) versions, gemma-3n-E4B. Bold: lowest of the first four columns.
+
+tor elementwise by a gate. This changes both the ac-cessed rows and their consumer, providing a bound-ary test for the results on hashed memories. 
+
+Sensitive rows. Most PLE rows have per-row kurtosis 3.3–3.5, moderately above the Gaussian value of 3. The BOS row and the rows of about 100 frequent tokens have heavy tails. These rows are read in a few sensitive layers, and they dominate the loss. At 2.0 bpp without rotation, QTIP gives a worst-domain KL of .106 on E2B and .162 on E4B (Table 26). Keeping the BOS row and the top-100 rows in bf16 costs 0.006 bpp and lowers these to .027 and .028. This gives similar worst-domain KL to QTIP with rotation (.033 and .029). On E2B-it, rotation is better (.126 against .140). These token-indexed tables therefore require a different treat-ment of sensitive rows from the uniform, unrotated representation in Section 3. In the tested hashed ta-bles, protecting sequence-start rows changes aggre-gate KL by at most 1% on DeepSeek and LongCat (Table 20 in Appendix E.3). 
+
+Predicting model sensitivity. Table statistics alone did not predict this effect. Before measur-ing E4B-it, we fixed a prediction of the rotation KL ratio from per-layer kurtosis. The prediction was .21, and the measurement was .877. The table-side part was right: the MSE ratio without and with ro-tation was 1.74 predicted and 1.78 measured. The step from MSE to KL failed. When only layer 10 is quantized without rotation, KL is .121 on E4B and .004 on E4B-it. The two layers have similar statistics, so the gap lies in model sensitivity. We found this explanation after the prediction missed, so it is post hoc. A second prediction, also fixed be-fore the measurement, gave the correct decision for both gemma-3n models and the correct magnitude for neither. 
+
+Layer-level norm adjustment. On PLE, a layer-mean norm adjustment on top of QTIP’s global scale changes worst-domain KL in both directions. It raises it by 6.3% and 9.0% on E2B-it and by 6.0% on E4B without rotation. In the other five settings (E2B, E4B with rotation, gemma-3n) it lowers it by 3.9–79.8%. This adjustment differs from the per-row norm restoration of CP. 27
