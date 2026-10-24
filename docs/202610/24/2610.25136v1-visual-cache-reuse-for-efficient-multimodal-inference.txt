@@ -1,0 +1,733 @@
+Title: Visual Cache Reuse for Efficient Multimodal Inference
+
+URL Source: https://arxiv.org/pdf/2610.25136v1
+
+Published Time: Tue, 20 Oct 2026 01:43:18 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+# Visual Cache Reuse for Efficient Multimodal Inference 
+
+Shuheng Gao 1,2∗‡ , Yuankai Fan 2∗, Jiaqiang Ma 2,3, Jiawei Shao 2, Yongkun Li 1†, Xuelong Li 2†
+
+> 1
+
+University of Science and Technology of China 2Institute of Artificial Intelligence (TeleAI), China Telecom 
+
+> 3
+
+National University of Defense Technology 
+
+Abstract 
+
+Vision-language model (VLM) inference incurs substantial prefill latency and memory overhead due to the long vi-sual token sequences of large visual inputs. Existing serv-ing systems typically exploit exact cache reuse through pre-fix caching or position-independent caching, overlooking the potential of approximate caching in real-world work-loads. However, directly reusing an approximate cache entry may introduce spurious visual information, which naïve ap-proaches that select a subset of important visual tokens for recomputation fail to adequately mitigate this risk. We present VisMemo, an efficient serving system that en-ables approximate KV cache reuse for modern VLMs. Its core is a system-algorithm co-design that combines an entropy-aware KV cache reuse algorithm with differentiated cache management. Specifically, VisMemo uses patch entropy to identify reuse candidates and warmup attention to prioritize recomputation based on the current query. To support the large cache capacity across GPU memory, CPU memory, and SSD storage, VisMemo applies distinct I/O and cache poli-cies to exact and approximate hits: sparse patch-level I/O for approximate hits, prioritized retention for exact hits, and a reserved CPU victim cache for preset entries selected using offline workload priors and online reuse observations. Vis-Memo further optimizes the memory access path between the inference engine and the storage backend, eliminating redundant caching and unnecessary data movement. Ex-periments on multiple public datasets show that VisMemo preserves output quality under approximate reuse. On a real-world production trace, VisMemo increases the overall cache hit rate from 27.78% to 61.45% and reduces prefill latency by up to 48.3% at 8K input tokens. 
+
+1 Introduction 
+
+Vision-language models (VLMs) are widely deployed in in-teractive real-time applications such as visual question an-swering (VQA) [36, 37, 54], UI agent automation [4, 18, 56], and multimodal search [2, 14, 20, 28], where a low time-to-first-token (TTFT) is required to provide a responsive user experience [42, 66]. In these models, high-resolution images and videos are first encoded into long sequences of visual to-kens [7], which are then concatenated with the text tokens [8, 16, 58]. During prefilling, the resulting attention computation grows quadratically with input sequence length [51], making 
+
+> ∗
+
+Equal contribution. 
+
+> †
+
+Corresponding authors. 
+
+> ‡
+
+Work done during internship at TeleAI. How many pages  are  
+
+> returned for "Ice cream"?
+> How many pages are
+> returned for "Pastry"?
+> Text Input
+> Visual Input Cache Hit
+> (Exact )
+> Embedding
+> “6 pages are returned”
+> ... ...
+> Attention Map
+> LLM Backbone
+> (Transformer)
+> Identical Identical
+> Cache Hit (Exact )
+> Embedding
+> LLM Backbone (Transformer)
+> Text Input Visual Input
+
+(a) Position-independent KV caching. How many pages  are       
+
+> returned for "Ice cream"?
+> What is the shortest
+> path from A to E?
+> Text Input
+> Visual Input Cache Hit
+> (Approximate )
+> Embedding
+> “6 pages are returned”
+> ... ...
+> Attention Map
+> LLM Backbone
+> (Transformer)
+> Similar Similar
+> Cache Hit
+> (Approximate )
+> Embedding
+> LLM Backbone (Transformer)
+> Text Input Visual Input Text token Visual token Reuse Recompute
+
+(b) Approximate KV caching. 
+
+Figure 1. Illustration of two KV cache reuse strategies. visual inputs a major source of latency while their key-value (KV) cache occupies substantial GPU memory and strains both computation and memory resources [23, 39, 49, 52]. To accelerate VLM inference, as with large language mod-els (LLMs), existing serving systems commonly employ pre-fix caching, reusing KV caches across requests that share the same prefix [17, 60, 65]. Considering that the prefix-match requirement is often unmet when textual prompts vary, position-independent KV caching has emerged to ex-pand cache-reuse opportunities by selectively recomputing cache for only a small fraction of visual tokens to account for changed positional contexts [19, 35, 41, 59, 64] (as depicted in Figure 1a). Nevertheless, these approaches still rely on 
+
+exact token-level matching and can reuse visual KV caches only when the visual token sequences are identical [35, 41]. In practice, VLM workloads often contain highly similar visual inputs, such as partially modified screenshots. Exact token-level matching therefore treats these requests as cache misses, even when most visual patches remain unchanged, leaving substantial reusable visual KV cache unexploited (see 
+
+§2.1 for more details). This reveals approximate KV reuse opportunities beyond the identical visual match. However, approximate caching for VLMs is non-trivial .Visual similarity alone does not imply that the entire (vi-sual) KV cache remains valid: an approximate match may differ in fine-grained details (e.g., a single table entry) that are critical to the query [37]. In addition, visual KV repre-sentations also depend on the preceding textual context; changes to the textual prefix can therefore alter these rep-resentations and compromise cache reuse [19, 59]. A naïve 
+
+1arXiv:2610.25136v1 [cs.OS] 18 Oct 2026 approach to approximate caching is recomputation [8, 16]. Similar to position-independent KV caching methods, re-computation provides a naïve form of approximate caching: it recomputes a larger fraction of high-importance tokens while reusing the KV caches of low-importance counterparts (Figure 1b). Unfortunately, severe token sinks and attention noise make the selection unreliable for estimating the im-portance of visual tokens [22, 55] (more details can be seen in §2.2). In this paper, we introduce VisMemo, an efficient VLM in-ference system that leverages approximate KV cache reuse to reduce serving latency while preserving generation quality. VisMemo is motivated by our observation that entropy [45] provides a stable signal for estimating the risk of reusing visual patches 1: low-entropy patches generally encode lim-ited visual information and are more likely to remain stable when reusing, whereas high-entropy patches capture richer visual details and therefore require more conservative treat-ment. Based on this insight, we develop an entropy-aware algorithm for approximate KV cache reuse. It selects patches that have low entropy in both images as reuse candidates, then uses the normalized attention score collected during a short warmup phase [41, 59] to prioritize recomputation among the remaining patches according to the current user query. By using entropy to identify reusable patches and attention to prioritize recomputation, it avoids solely relying on a noisy attention map while preserving visual information relevant to the current query ( §3.3). Although the proposed entropy-aware algorithm preserves output quality, realizing the benefits of approximate caching requires accommodating a substantially larger KV cache foot-print. This, in turn, necessitates the system-level optimiza-tion atop existing hierarchical KV cache architectures [15, 23, 30, 40, 57] that incorporates heterogeneous storage tiers while maintaining low-latency performance. First, a unified system must support two cache-reuse modes with distinct access patterns: exact reuse retrieves an entire KV cache en-try and exhibits strong locality, whereas approximate reuse retrieves only the KV caches of selected patches and ex-hibits weaker locality. To accommodate these differences, we propose a differentiated cache-management mechanism that efficiently supports both reuse modes within a hierarchical KV cache architecture. Second, we introduce a prior-guided placement strategy that combines offline workload priors with online reuse signals to determine which cache entries to retain in a dedicated CPU-side victim cache ( §3.4). To evaluate the performance of VisMemo we conduct comprehensive experiments on a real-world conversational VLM workload [11] and four public visual understanding benchmarks [25, 31, 36, 37], using the Qwen3-VL [4] and GLM-4.6V [18] models. The experiment results show that 
+
+> 1A patch is an image region encoded as a visual token. Here, entropy serves as a proxy for model uncertainty.
+
+VisMemo outperforms existing solutions in approximate-hit quality, improving ANLS by up to 19.72 points over the stronger baseline while maintaining comparable exact-hit quality. Notably, approximate matching increases the overall cache-hit rate from 27.23% to 60.28% , while approximate reuse reduces prefill latency by up to 48.3% compared with full prefill on the real-world workload. Our system-level optimizations further accelerate both exact and approximate hits relative to the original Mooncake backend [40]. We summarize our main contributions as follows: 
+
+• Approximate KV cache reuse for VLMs . We identify substantial opportunities for KV cache reuse beyond exact visual matches in real-world VLM workloads, to the best of our knowledge, are the first to introduce approximate caching for efficient VLM inference. 
+
+• System-algorithm co-design . We propose VisMemo, an approximate caching system for VLM inference that com-bines an efficient KV cache reuse algorithm with effec-tive hierarchical cache management. At the algorithmic level, VisMemo introduces an entropy-aware method that selects high-relevant patches for recomputation and low-entropy patches for reuse. At the system level, VisMemo designs a differentiated cache management scheme to sup-port both exact and approximate reuse via sparse I/O at patch-granular, coupled with prioritized retention and evic-tion policies. 
+
+• Practical system implementation and evaluation . We implement VisMemo by extending SGLang [65] and Moon-cake. VisMemo achieves the highest overall scores in the five datasets, increases the total cache hit rate from 27.78% to 61.45%, and reduces prefill latency by up to 48.3%. 
+
+2 Background and Motivation 
+
+2.1 VLM Inference with Visual KV Cache Reuse 
+
+VLM inference extends the autoregressive LLM paradigm by incorporating a visual encoder (e.g., Vision Transform-ers for images/video) to support multimodal understand-ing [4, 50, 54]. It proceeds in three stages: visual encoding, prefilling, and decoding [46], as illustrated in Figure 2. (1) During visual encoding, the image is divided into patches and transformed by the visual encoder into a sequence of visual tokens (i.e., embedding tensors). These visual tokens are stored as the encoder cache , indexed by a multimodal hash, and concatenated with the text tokens for prefilling. Here, a single image may produce thousands of visual to-kens, depending on its resolution [3, 6, 8, 44, 58, 62], often far exceeding the number of text tokens. (2) During prefilling, each transformer layer projects the hidden state into query, key, and value vectors for every input token. Self-attention computes weights from queries and keys to aggregate the values; the resulting key and value vectors are retained as the KV cache , while the attention output is passed through the feed-forward network (FFN) to produce hidden states in 
+
+> 2Patch
+> Visual Encoding
+> Multi-Modal Embeds Please briefly describe the image.
+> Prefilling
+> Vision Tokens Text Causal Attention Mask Attention Computation
+> Decoding
+> A small knitted monkey-like doll wearing a blue face mask sits in a miniature wooden chair outdoors.
+> Q/K/V
+> Encoder / KV Cache Pool
+
+Figure 2. Three-stage VLM inference process, including visual encoding, prefilling, and decoding. the next layer [51]. (3) During decoding, the model gener-ates one token at a time and reads the KV cache rather than recomputing prior tokens [23]. It’s worth noting that incorporating visual tokens into the input sequence substantially increases both the computa-tional and memory requirements during prefill [1, 13, 65, 66]. First, attention complexity grows rapidly with sequence length, requiring every transformer layer to process the full visual token sequence before generating the first output token. Second, the visual KV cache imposes a substantial memory burden with its footprint growing linearly with the sequence length [26, 32, 34, 40, 49, 53]. This growth quickly exhausts available memory and limits long-horizon inference [10, 24, 27, 29, 47, 63]. These costs are reflected in Figure 3a: for Qwen3-VL-32B [4] on two NVIDIA H100 GPUs, prefill latency increases sharply with input length and reaches ∽2.5 × the latency of vision encoding. Visual prefill therefore constitutes a major computational and memory bottleneck in VLM serving. To reduce visual prefill overhead, serving systems com-monly employ prefix caching [17, 57, 60], which reuses the KV cache when requests share an identical prefix. This re-quirement is restrictive: even identical visual inputs (e.g., images) incur cache misses when their surrounding tex-tual prefixes differ [19, 35]. Representative systems such as VLCache [41] and CacheBlend [59] address this limita-tion through position-independent KV cache reuse , retrieving cached image representations whenever an image recurs at the prefix or elsewhere in the sequence. Because directly reusing the visual KV cache skips cross-attention from visual tokens to the current textual prefix, the systems selectively recompute the KV cache of critical visual tokens [41, 59]. At each transformer layer, selected tokens perform atten-tion and FFN computations conditioned on the current pre-fix, while the remaining tokens retain their cached states. Specifically, CacheBlend identifies the high deviation tokens by comparing cached and newly computed KV cache af-ter a lightweight first-layer warm-up, then progressively reduces the recomputation set across layers [59]. VLCache instead uses offline layer-sensitivity profiling to determine 256 512 1K 2K 4K 
+
+> Pre fi ll length (tokens)
+> 50 100 150 200
+> Latency (ms)
+> Pre fi ll Visual Encoding
+
+(a) Encoding and prefill latency 1 4 16 64 256 1K 4K  
+
+> Cache capacity (GB)
+> 0.39
+> 0.64
+> Hit rate
+> Approx. (thr=0.8) Approx. (thr=0.9) Approx. (thr=0.95) Exact-reuse
+
+(b) Cache hit rate vs. capacity 
+
+Figure 3. Two motivating observations: (a) Prefill latency increasingly dominates with sequence length; (b) Scaling trend of cache hit rates with increasing storage capacity. per-layer recomputation ratios and prioritizes early visual tokens, whose reuse errors may propagate to subsequent tokens [41]. Both systems focus on the most effective token computation to minimize reuse errors. 
+
+2.2 Approximate Reuse Opportunities 
+
+Position-independent caching allows an identical visual in-put to reuse its KV cache across different input positions [33], but still requires an exact match. This constraint misses common reuse opportunities in real-world VLM workloads, where visual inputs often undergo localized modifications .For example, UI screenshots may retain navigation bars, pan-els, and backgrounds while changing only a widget or sta-tus indicator [56]; document revisions may preserve page templates and table structures while altering limited con-tent [11]; and consecutive video frames typically retain most of the scene while modifying a foreground object or lo-cal state [16]. Although such inputs are assigned distinct multimodal hash keys, their visual content often remains largely unchanged, leading us to posit that this shared con-tent can be approximately reused. Figure 3b quantifies this approximate-reuse opportunity by sampling 10,000 requests from VisionArena [11] and using Qwen3-VL-32B with a LRU eviction strategy: under an approximate-reuse criteria with a semantic-similarity threshold of 0.8, the system increases the cache hit rate from 35.6% to 56.1% with a 1024 GB cache and further reaches 63.5% with a larger capacity (8192 GB). These results reveal a scaling trend between cache capacity and approximate-reuse hit rate, revealing substantial reuse opportunities missed by exact hash-based matching. These observations place approximate reuse between ex-act hits and complete misses. The unchanged regions may preserve substantial visual prefill computation, but the mod-ified regions prevent the cached entry from being treated as uniformly valid. Global similarity alone cannot resolve this tension because a large unchanged region may dominate the similarity score and obscure a small modification that is critical to the current prompt. Approximate cache reuse thus offers substantial potential to expand reuse, but together     
+
+> 3Prompt: Why the $103.85 debit?
+> Prompt: What is the last balance?
+> Pixel match ×
+> Misalignment
+> Full KV ×
+> Prompt change
+> Attention ×
+> Token sink
+> Ours ✓
+> Entropy + attn. Input Approximate
+> Reuse Recompute Prompt: Why the $103.85 debit?
+> Prompt: What is the last balance?
+> Pixel match ×
+> Misalignment
+> Full KV ×
+> Prompt change
+> Attention ×
+> Token sink
+> Ours ✓
+> Entropy + attn. Input Approximate
+> Reuse Recompute Prompt: Why the $103.85 debit?
+> Prompt: What is the last balance?
+> Pixel match ×
+> Misalignment
+> Full KV ×
+> Prompt change
+> Attention ×
+> Token sink
+> Ours ✓
+> Entropy + attn. Input Approximate
+> Reuse Recompute Prompt: Why the $103.85 debit?
+> Prompt: What is the last balance?
+> Pixel match ×
+> Misalignment
+> Full KV ×
+> Prompt change
+> Attention ×
+> Token sink
+> Ours ✓
+> Entropy + attn. Input Approximate
+> Reuse Recompute
+
+Figure 4. Representative cases motivating VisMemo that combines entropy and attention to distinguish reusable patches from patches requiring recomputation. with an unresolved validity question: how reliable is reuse when only part of the visual content changes? 
+
+2.3 Challenges of Approximate KV Cache Reuse 
+
+Approximate caching retrieves a candidate KV entry, select-ing which portions of the entry to reuse without compromis-ing quality remains challenging. We identify three challenges by examining three intuitive strategies and their limitations, as illustrated in Figure 4. 
+
+Challenge 1: Textual-prefix changes cause unreliable cross-attention (1st column, Figure 4 ). A straightforward approach is naïve full KV reuse , which directly reuses the entire visual KV cache of a matched image. However, full KV reuse neither computes cross-attention from visual tokens to a changed textual prefix nor updates the KV cache for modified image regions. As shown in the first column of Figure 4, a nearly iden-tical bank statement is queried for different information: the last balance in the cached request and the reason for the $103.85 debit in the current request. When the changed prompt precedes the visual tokens, direct reuse will miss cross-attention from visual tokens to the current textual pre-fix [41, 59]. Reusing the whole entry also retains the KV cache associated with the modified image regions. 
+
+Challenge 2: Patch misalignment causes false-negative reuse decisions (2nd column, Figure 4 ). Another naïve ap-proach is patch-based matching , which selects the KV cache corresponding to the matched patches for approximate reuse. That is, it compares the pixel values at the same grid posi-tions in the current and a similar image, treating patches with identical or sufficiently similar pixels as reuse candidates. This approach assumes that shared visual content remains aligned with the patch grid; however, a slight displacement of the entire image may shift unchanged content across patch boundaries, causing patch-based matching to fail. As shown in the second column of Figure 4, changes in camera viewpoint cause the same visual content to fall into different patches. The highlighted patches (red boxes) cover different regions of the table. Thus, even when the table content remains unchanged, a positional shift can lead patch-based matching to produce false-negatives [12, 48]. 
+
+Challenge 3: Visual-token sinks cause misguided re-computation (3rd column, Figure 4) . Intuitively, reusing the KV cache from a similar request may retain states that do not accurately reflect the current request. Recomputation [59] addresses this issue by recomputing the visual tokens most relevant to the current prompt (while reusing the remaining cached tokens), and the attention mechanism provides an intuitive signal for selecting these tokens: those receiving higher attention scores are recomputed, whereas the others are reused. However, attention scores alone can be mislead-ing; some visual tokens attract a disproportionate amount of attention despite contributing little relevant information to the current prompt [22, 55]. This phenomenon, termed as 
+
+visual-token sinks [22], may cause such tokens to be incor-rectly prioritized for recomputation. The third column of Figure 4 shows a document page (top) and its visual-token attention map (bottom), where darker red denotes higher attention to the corresponding image patches. Notably, several patches in the blank top margin receive high attention scores despite containing little visual information. Thus, an attention-only policy may “mistakenly” select these patches for recomputation, wasting part of the budget on low-information regions and reducing the budget available for content relevant to the current prompt. These observations motivate separating patch-level reuse risk from relevance to the user input. VisMemo uses patch entropy to identify low-risk reuse candidates and warmup at-tention to guide selective recomputation. The fourth column of Figure 4 illustrates this distinction: the shared interface regions marked in blue are selected for reuse, while the table region marked in orange is selected for recomputation. 
+
+3 System Design 
+
+3.1 Overview 
+
+VisMemo extends visual KV cache reuse in VLM serving systems beyond exact matching to support approximate matches. As illustrated in Figure 5, VisMemo comprises three main components ( green blocks ): Two-Stage Encoder Cache Lookup , Entropy-Aware KV Selection and Differentiated Cache Management . We first provide an overview of each compo-nent and detail its design in the following subsections. 
+
+Two-Stage Encoder Cache Lookup identifies any “avail-able” cached entries whose visual KV cache can be reused for a given visual input. Here, “available” refers either to exact-matched images or to visually approximate cached aliases retrieved via two-stage semantic approximate match-ing ( §3.2) after an exact-match miss. 
+
+Entropy-Aware KV Selection determines the associated KV cache entries that can be reused and those that must be recomputed for a matched encoder-cache alias. Entries   
+
+> 4Encoder Cache Lookup
+> ...
+> Requests
+> Entropy-Aware KV Selection
+> Prefill Execution
+> Answer
+> Differentiated Cache Management
+> Exact Hit Approximate Hit
+> Placement Strategy
+> Inference Engine Hierarchical Cache Storage
+> ④
+> §3.2 §3.3
+> Exact: full I/O Approx.: sparse I/O
+> Encoder Cache
+> §3.4
+> ②③
+> Exact hit Approx hit
+> Location & Load
+> ①⑤⑥
+> Miss: full prefill
+> Exact lookup Coarse to Fine Search
+> KV cache retrieval Decode
+
+Figure 5. Overview of VisMemo. requiring recomputation are selected by probing attention distributions in warmup layers, whereas reusable entries are selected based on entropy theory ( §3.3). 
+
+Differentiated Cache Management serves exact and ap-proximate hits with distinct I/O ( §3.4.1) and cache policies (§3.4.2) across the GPU, CPU, and storage tiers, as the two hit types differ in temporal locality and data volume. In addition, a unified storage backend is implemented that jointly man-ages L2 memory and L3 storage for KV offloading, thereby supporting a substantially larger KV cache footprint ( §3.4.3). 
+
+Workflow . Based on VisMemo the general workflow of VLM inference is as follows: Given an incoming request, such as a text prompt with an associated image, 1 Each incoming multimodal request first performs an exact image lookup using the input image hash. 2 Once the exact match misses, the encoder-cache lookup performs a coarse-to-fine search, with the differentiated cache manager locating and loading cached encoder features for comparison. An exact hit bypasses this search and proceeds directly to the KV cache retrieval. 3 If an approximate match is found, the entropy-aware reuse module compares patches in the input image with the corresponding patches in the approximate image, treating patches with low entropy as low-risk candidates for KV reuse. For the remaining patches, it uses warmup attention to select high-attention patches for recomputation. 4 The differentiated cache manager then handles requests according to their access characteristics: exact hits retrieve the complete KV cache and receive higher retention prior-ity, while approximate hits retrieve only selected patches through sparse I/O. It further combines offline workload pri-ors with online reuse observations to determine which preset entries are retained in the reserved CPU victim cache. 5 Requests without a valid match instead follow the normal prefill path. After placing the required KV cache in the GPU cache, the SGLang engine skips visual prefill for exact hits, combines cached KV reuse with selective patch recompu-tation for approximate hits, and performs full visual prefill and cache insertion for misses. 6 Subsequently, all types of requests enter the normal decoding path, which generates and returns the final answers. 
+
+3.2 Two-Stage Encoder Cache Lookup 
+
+When a query arrives and its associated visual input is being encoded, the first thing VisMemo does is check if any histor-ical requests can be reused. A naïve lookup that compares the query’s patch embeddings against every cached entry is impractical: an encoder cache typically contains thousands of tokens, and full-granularity comparison requires load-ing the complete encoder cache and computing token-level similarities for all candidates, all on the prefill critical path. VisMemo therefore searches for the approximate match with a coarse-to-fine lookup to identify an entry whose visual KV cache can be reused. It first checks the hash key for exact matches; upon an exact miss, VisMemo uses the current encoder output to search for approximate matches. 
+
+Coarse-grained Searching. Patch-level comparison requires the query and a cached image to share the same token-grid geometry, so VisMemo searches the group of cached images whose visual token count and grid aspect ratio match the query. Within this group, VisMemo compares compact re-gional descriptors. The patch grid for each image is divided into four regions in a 2×2 layout. Patch embeddings are indi-vidually normalized and averaged within each region to pro-duce four regional descriptors. A candidate passes the coarse filter only if the cosine similarity of every corresponding descriptor is greater than the threshold 𝜏 . Passing candidates are ranked by their mean regional similarities, and at most k are retained (k=5 in our configuration). This stage filters out unsuitable candidates with only four descriptor comparisons per image, without accessing their full encoder embeddings. 
+
+Fine-grained Ranking. For each remaining candidate, Vis-Memo retrieves the full encoder embeddings and computes the cosine similarity between the patch embeddings at each corresponding token position. The fine-ranking score is com-puted as the average cosine similarity over all visual tokens, and the candidate with the highest score is selected as the approximate image. A search without a usable candidate is a cache miss. A successful lookup provides a matched image for the entropy-aware algorithm in §3.3, which determines the patch-level reuse and recomputation strategy. 
+
+3.3 Entropy-Aware KV Cache Selection 
+
+Once the two-stage lookup identifies an approximate match, VisMemo decides which visual patches to recompute, reuse, or mask in later transformer layers. As shown in Figure 6, it first identifies corresponding patches in the input and cached images as reuse candidates, then uses warmup attention to select patches for recomputation, and finally assigns the remaining patches to reuse or masking.   
+
+> 5... Please briefly describe the image. Attention Logits
+> Warm-up Layer
+> Attention Sink ... Patches Entropy High-Importance Patch (Recompute Needed) Low-Entropy Patch (Reuse) Masked Patch
+
+Figure 6. Entropy-aware KV-cache selection process. 
+
+3.3.1 Reuse Candidate Identification. VisMemo lever-ages patch entropy to estimate reuse risk without consider-ing relevance to the current prompt. Approximate images commonly share blank margins, uniform backgrounds, and other regions with little visual variation, whose KV cache is less risky to retain than patches containing high informa-tion density. For patch 𝑖 , let 𝑃 𝑖 denote its pixels and 𝑥 𝑝,𝑐 the value of pixel 𝑝 in channel 𝑐 . VisMemo first measures the maximum channel-wise pixel range, 
+
+𝐷 𝑖 (𝑥 ) = max 
+
+> 𝑐
+
+
+
+max  
+
+> 𝑝 ∈𝑃 𝑖
+
+𝑥 𝑝,𝑐 − min  
+
+> 𝑝 ∈𝑃 𝑖
+
+𝑥 𝑝,𝑐 
+
+
+
+.
+
+Here, 𝛿 denotes a predefined threshold for pixel-level vari-ation. A patch is considered uniform when 𝐷 𝑖 (𝑥 ) ≤ 𝛿 , in-dicating that its pixel values have limited variation across all color channels. However, this pixel-range selection only filters out visually rich regions. For each uniform patch, Vis-Memo further computes its grayscale Shannon entropy [45] to distinguish among the remaining uniform patches, 
+
+𝐻 𝑖 (𝑥 ) = −
+
+> 255
+
+∑︁ 
+
+> 𝑣 =0
+
+𝑝 𝑖,𝑣 (𝑥 ) log 2 𝑝 𝑖,𝑣 (𝑥 ),
+
+where 𝑝 𝑖,𝑣 (𝑥 ) is the fraction of pixels in patch 𝑖 with grayscale value 𝑣 . Based on these entropy values, VisMemo stores the entropy scores and a bounded list of the lowest-entropy uniform patch indices for each image. For an approximate hit, let L( 𝑎 ) denote the stored low-information patch indices of the matched image 𝑎 . A patch enters the paired candidate set only if its index belongs to L( 𝑎 ) and the corresponding patch in the input image 𝑥 is also uniform. This paired condition prevents stale reuse when a location that is blank in the cached image contains newly added text, a number, or an object in the input image. The paired candidate set is 
+
+C0 = {𝑖 ∈ L( 𝑎 ) | 𝐷 𝑖 (𝑥 ) ≤ 𝛿 }.
+
+VisMemo assigns each candidate a combined entropy score 
+
+𝐸 𝑖 (𝑥, 𝑎 ) = 𝐻 𝑖 (𝑥 ) + 𝐻 𝑖 (𝑎 ). A low value indicates that the corresponding patch contains little visual variation in both images and is therefore a conservative candidate for KV reuse. 
+
+3.3.2 Recompute Token Selection. Entropy alone can-not determine which patches matter to the current request. VisMemo executes the first 𝑊 transformer layers normally 0 20 40 60 
+
+> Time interval (min)
+> 010k 20k 30k 40k
+> Count
+
+(a) Exact-hit intervals 0 20 40 60  
+
+> Time interval (min)
+> 0500 1000 1500 2000
+> Count
+
+(b) Approximate-hit intervals 
+
+Figure 7. Distributions of cache-hit time intervals. Exact-hit intervals are predominantly short, whereas approximate-hit intervals exhibit a broader, heavier-tailed distribution. and measures the attention received by each visual patch at the last warmup layer. Let 𝐴 (ℎ) 
+
+> 𝑗,𝑖
+
+denote the attention from causal query position 𝑗 to visual patch 𝑖 at head ℎ, and let 
+
+Q𝑖 contain the query positions that can attend to patch 𝑖 .VisMemo computes the normalized importance score 
+
+𝐼 𝑖 = 1
+
+𝐻 |Q 𝑖 |
+
+> 𝐻
+
+∑︁ 
+
+> ℎ=1
+
+∑︁ 𝑗 ∈ Q 𝑖 
+
+𝐴 (ℎ) 
+
+> 𝑗,𝑖
+
+,
+
+where 𝐻 is the number of attention heads. Normalizing by 
+
+|Q 𝑖 | removes the positional bias caused by earlier visual patches being visible to more subsequent positions. The re-sulting score reflects the attention assigned to each patch under the current request and guides computation in the remaining layers. VisMemo combines the two signals by constructing the recompute set before the reuse set. Given a recomputation ratio 𝜌 , it allocates 𝑘 r = ⌈𝜌𝑁 ⌉ patches and first selects the highest-attention patches from the non-uniform set V ( 𝑥 ) =
+
+{𝑖 | 𝐷 𝑖 (𝑥 ) > 𝛿 }:
+
+R = TopK 𝑖 ∈ V ( 𝑥 ) (𝐼 𝑖 , 𝑘 r).
+
+If |V ( 𝑥 )| < 𝑘 r, the remaining budget is filled using the highest-attention patches outside V ( 𝑥 ). This prevents uni-form backgrounds from consuming the recomputation bud-get when they receive spuriously high attention, thus pre-venting the visual token sink problem. 
+
+3.3.3 Reuse and Mask Assignment. Given a reuse ratio 
+
+𝛽 , VisMemo then removes R from the paired candidates and selects the patches with the lowest combined entropy: 
+
+C = C0 \ R ,
+
+B = BottomK 𝑖 ∈ C (𝐸 𝑖 (𝑥, 𝑎 ), min {⌈ 𝛽𝑁 ⌉, |C|}) .
+
+In the remaining transformer layers, VisMemo recomputes patches in R, reuses the KV cache of patches in B, and masks all other visual patches by a sparse attention mask. Recom-pute takes priority over reuse, allowing a low-entropy patch to be refreshed whenever the current request assigns it suffi-cient attention.      
+
+> 6Exact Hit
+> FULL I/O
+> retain fi rst retain fi rst
+> Approx Hit
+> SPARSE I/O
+> L2 CPU L1 GPU L3 Storage Hierarchical I/O
+> masked recompute sparse I/O reuse
+> evict fi rst
+
+Figure 8. Differentiated hierarchical I/O in VisMemo. Exact hits use full I/O, while approximate hits use sparse I/O to retrieve only the selected patches. 
+
+3.4 Differentiated Hierarchical Cache Management 
+
+Patch selection determines which KV cache an approximate hit needs, while cache management further determines how to retrieve and retain them. In real-world VLM serving work-loads, exact and approximate hits exhibit substantially dif-ferent temporal locality. Figure 7 shows that approximately 82% of exact hits occur within the first 3-minute interval. In contrast, only about 46% of approximate hits occur within 6 minutes, while more than 20% occur after 21 minutes. Ex-act hits therefore benefit from retention in the upper cache tiers, whereas approximate reuse requires a broader capac-ity across CPU memory and SSDs. The two cache-hit types also move different amounts of data: an exact hit consumes the complete visual KV cache, while an approximate hit consumes only patches selected by the entropy-aware reuse algorithm. Applying the same I/O and eviction policy to both would pollute the upper cache tiers and allow approximate reuse to displace entries with stronger exact-reuse locality. VisMemo therefore differentiates full I/O, sparse I/O, and retention decisions across its GPU, CPU, and storage tiers. 
+
+3.4.1 Patch-Level Sparse I/O. As shown in Figure 8, exact hits use full I/O to retrieve the complete visual KV cache into the current request’s GPU KV slots, loading SSD-resident entries into the CPU cache first. Approximate hits compute the first 𝑊 warmup layers normally and use sparse I/O to retrieve only the subsequent-layer KV cache for patches in the reuse set B. The respective transfer volumes are 
+
+𝑉 full = 2𝐿𝑁𝑑𝑏, 𝑉 sparse = 2(𝐿 − 𝑊 )|B| 𝑑𝑏, 
+
+where 𝐿 is the total number of transformer layers, 𝑁 the number of visual patches, 𝑑 the hidden dimension of KV vector, and 𝑏 the bytes per element. The cache hierarchy uses a patch-first layout in CPU mem-ory and SSD storage to directly locate each patch’s complete KV cache. For sparse I/O, the CPU tier transfers only the selected patches, while the SSD tier reads only the corre-sponding byte ranges. The complete alias entry remains in its original tier instead of being promoted because of partial Exact-Priority LRU               
+
+> tE1
+> b=2 A3 A2 E2
+> b=1 A1 E1 b: 2 →1→
+> MRU A3 →evict A2 E2
+> b=1 A1 E1
+> b=1 t+1
+> Of fl ine Prior Set + Online Reuse
+> entry
+> ere
+> Prepeat (g) P(e) > min P res
+> reserved CPU victim cache Pmin
+> > 0
+> reject Pcold (g)
+> = 0
+
+Figure 9. Differentiated cache retention in VisMemo: exact-priority LRU (left) and CPU victim cache retention using offline priors and online reuse observations (right). access, reducing both transfer traffic and cache pollution. Figure 10d shows the cumulative I/O of sparse and full cache retrieval under the real-world request trace. 
+
+3.4.2 Cache Retention Policies. Sparse I/O reduces the KV cache transfer latency, but limited cache capacity still re-quires careful retention decisions [21]. Standard least-recently used (LRU) eviction exploits temporal locality by ordering entries according to their most recent access. However, treat-ing exact and approximate hits equally ignores the shorter reuse intervals of exact hits shown in Figure 7. VisMemo therefore uses exact-priority LRU , as illustrated in Figure 9 (left). Each exact-hit entry receives a bounded protection budget: when eviction reaches a protected entry, its budget is decremented and the entry is moved to the most-recently used position. Approximate-only entries are evicted first. This bounded budget prevents stale exact entries from re-maining resident indefinitely, while reducing displacement of KV caches with stronger full-reuse locality. Exact-priority LRU favors entries with short-term exact reuse, while approximate reuse can benefit from retaining entries over longer intervals. In real-world workloads, preset images are provided in advance for users to select, and their accesses are scattered over time with weak temporal locality. Figure 10c shows that preset accesses are strongly skewed across the six categories, with access frequencies ranging from 43.9% to 0.01%. To extend approximate-match coverage without polluting the general CPU cache, VisMemo reserves a CPU victim cache for preset entries and manages it using offline workload priors and online reuse observations. Offline traces estimate two reuse priors for each category and vision-token bucket: a cold prior for entries without observed reuse and a repeat prior for entries that have already been reused 2.The priors are fixed before the evaluation and do not use future access records from the evaluation trace. Each online request includes its workload class and vision-token bucket, which determine 𝑔 (𝑒 ), while 𝑟 𝑒 is updated only from reuse observations available before the current retention decision. As shown in Figure 9 (right), the online reuse count selects     
+
+> 2The prior training trace is completely separated from the evaluation trace.
+> 7010 20 30 40 Time (min) 010 20 30 40 Refault (kpages/s)  Refault PSI full 0.0 0.5 1.0 1.5 2.0 2.5 PSI full (%)
+
+(a) Mooncake memory pressure 0 10 20 30 40 Time (min) 0100 200 300 400 500 Memory (GiB) Mooncake Limit  
+
+> Quilt
+
+(b) Total memory usage New Yorker TextVQA ChartQA WikiArt DocVQA RealWorldQA 010 20 30 40 50   
+
+> Access freq. (%)  43.9% 16.0% 14.9% 14.2% 11.1% 0.01%
+> Hot →Cold
+
+(c) Preset label access frequency 0 250 500 750 1000 1250 1500 Elapsed time (s) 020 40 60 80 100 Cumulative I/O (GiB)  Sparse I/O Full I/O (d) Cumulative sparse I/O 
+
+Figure 10. Memory pressure, preset image access frequency, and I/O volume in VLM workloads. the applicable prior. For an entry 𝑒 , the retention priority is 
+
+𝑃 (𝑒 ) =
+
+(
+
+𝑃 cold (𝑔 (𝑒 )) , 𝑟 𝑒 = 0,𝑃 repeat (𝑔 (𝑒 )) , 𝑟 𝑒 > 0,
+
+where 𝑔 (𝑒 ) is the workload bucket of the entry and 𝑟 𝑒 is its observed online reuse count. A new entry is admitted when the CPU victim cache has enough free space. Otherwise, it replaces the lowest-priority resident entries needed to make room only if its priority exceeds each of theirs. The cold prior addresses the absence of online history, while the repeat prior incorporates evidence that an entry has been useful in the running workload. Together, sparse I/O bounds the cost of approximate reuse, exact-aware protection preserves entries with strong full-reuse locality, and the reserved victim cache expands long-tail approximate coverage. 
+
+3.4.3 Unified Memory and Storage Backend. We con-sider a common deployment in which SGLang serves as the inference engine, and Mooncake provides the storage back-end [9, 40, 65]. In this case, the resulting cache hierarchy consists of GPU HBM and privately-owned CPU memory managed by SGLang, as well as the remaining CPU mem-ory and SSDs managed by Mooncake. This hierarchy intro-duces three sources of overhead for VLM workloads. First, as shown in Figure 11, the Mooncake SSD backend uses 
+
+buffered I/O , causing written data to enter the Linux page cache [38]. As the explicitly managed DRAM cache and the page cache grow simultaneously, the total memory usage gradually approaches the limit. As shown in Figure 10a, fre-quent page faults and reclamation can stall inference and increase long-tail prefill latency. Second, after KV caches are fetched from Mooncake memory to SGLang CPU memory, (a) SGLang + Mooncake   
+
+> SGLang
+> CPU memory
+> KV cache Embedding
+> GPU KV
+> slots
+> Mooncake
+> Mooncake
+> DRAM
+> Linux
+> page cache SSD
+> Buffered I/O
+> Duplicate KV copies
+> (b) VisMemo
+> SGLang
+> GPU KV slots
+> uni fi ed memory and storage backend
+> KV cache
+> Embedding cache
+> VisMemo DRAM
+> SSD
+> Direct I/O
+> Single managed copy
+
+Figure 11. Differences in memory access paths between Mooncake and VisMemo integrated with SGLang. both levels retain identical host-to-host copies. This dupli-cation reduces the effective cache capacity and introduces additional data movement. Finally, SGLang does not imple-ment a dedicated memory pool for the encoder cache [43]. Thus, encoder caches reside mainly in the GPU and Moon-cake. Once a miss occurs, the data must first be read into a pinned staging buffer and then copied to HBM, introducing an additional memory copy and staging-slot wait time. To eliminate these redundancies, VisMemo designs a uni-fied and explicitly managed memory access pattern. The KV cache and the embedding cache share a unified mem-ory pool in VisMemo, replacing duplicate copies previously maintained in SGLang memory and Mooncake DRAM. The storage backend uses variable-size allocation to accommo-date objects generated by different numbers of visual tokens. It also centrally manages indexing, placement, eviction, and SSD-to-DRAM promotion, preventing the configured DRAM budget from being consumed by redundant copies across different software layers. For the KV cache, VisMemo registers the backend DRAM as CUDA pinned memory and stores KV cache in a patch-first layout. For writes, a customized kernel transfers KV cache directly from GPU memory to its final DRAM allocation. For reads, the backend returns an object view from which the restoration kernel can either reconstruct the complete KV cache or selectively restore the KV cache of later layers for patches chosen for approximate reuse. For contiguous embedding caches, VisMemo uses the CUDA copy engine to asynchronously transfer data between the unified memory pool and GPU memory, eliminating the intermediate staging copy required by Mooncake. In the SSD layer, VisMemo uses direct I/O to bypass the page cache managed by the operating system. It manages SSD data through asynchronous batched writes, parallel I/O across multiple shards, and explicit DRAM admission control. VisMemo explicitly determines whether a hot object remains in DRAM or is promoted from SSD, 
+
+> 8
+
+Table 1. Overall output-quality results using Qwen3-VL-8B [4].                                                                        
+
+> VLCache CacheBlend VisMemo Dataset Metric Overall Exact Hit Approx Hit Overall Exact Hit Approx Hit Overall Exact Hit Approx Hit VisionArena [11] ANLS 73.10 77.39 40.17 84.83 75.66 41.29 85.02 76.79 57.43 InfographicVQA [36] ANLS 60.04 41.42 31.35 60.95 40.14 39.37 62.09 40.74 59.09 DocVQA [37] ANLS 52.66 56.62 44.94 44.28 55.23 32.94 64.30 56.11 62.21 MMBench [31] Accuracy 80.34 80.27 67.83 81.65 79.78 82.38 81.88 80.03 83.74 SEED-Bench [25] Accuracy 59.59 54.40 53.24 58.48 54.25 49.24 60.74 54.35 58.57 Average 65.15 62.02 47.51 66.04 61.01 49.04 70.81 61.60 64.21
+
+rather than relying on uncontrolled kernel page residency. This design reduces redundant caching and unnecessary data movement, while isolating inference from OS-driven page reclamation, thereby ensuring predictable memory usage and tail latency. 
+
+4 Evaluation 
+
+4.1 Evaluation Setup Software and Hardware . All experiments are conducted on a server equipped with an Intel Xeon Platinum processor with 48 cores, 500 GB of DRAM, and two NVIDIA H100 GPUs, each with 80 GB of HBM, connected via NVLink with a bidirectional bandwidth of 400 GB/s. The server runs Ubuntu 24.04 with CUDA 12.8, PyTorch 2.9.1. VisMemo is implemented on SGLang [65] and uses FlashInfer [61] as the attention backend. We run the backend VLMs with tensor parallelism of 2. For KV cache capacity in each TP rank, we allocate 10 GB of GPU memory to L1 and 100 GiB of CPU memory to L2. L3 is configured with 4 TB of SSDs. For the memory pressure experiment ( §4.4), we impose a 500 GB CPU memory limit and configure VisMemo with 4 TB of SSD capacity. 
+
+Models and Workloads . We employ Qwen3-VL-32B [4] as our primary model and additionally evaluate Qwen3-VL-8B [4] and GLM-4.6V-Flash [18] in the system efficiency eval-uation ( §4.3). We use the real-world VLM conversational workload VisionArena [11], which preserves the original re-quest order and temporal locality, along with four public datasets, InfographicVQA [36], DocVQA [37], MMBench [31], and SEED-Bench [25], which cover open-ended visual queries, document understanding, and multimodal reasoning. 
+
+Baselines . We use VLCache [41] and CacheBlend [59] as base-lines to evaluate output quality, while evaluating VisMemo against Mooncake [40] for system efficiency. All comparisons use the same request order, prompts, model configuration, cache capacities, and output length limit. 
+
+Metrics . We evaluate both quality and efficiency. For quality, we report average normalized levenshtein similarity (ANLS) [5], which measures the textual similarity between a model’s prediction and the ground-truth for VisionArena, Infograph-icVQA, and DocVQA, and accuracy for others. For efficiency, we compare with Mooncake in terms of average prefill la-tency for exact and approximate hits. We further report cache hit distributions across tiers and analyze latency savings from individual system components. 
+
+Implementation Details . We retain up to five candidates from cache lookup with cosine similarity above 𝜏 = 0.8. For approximate hits, we use 𝑊 = 3 warmup layers with a recomputation ratio of 𝜌 = 0.3 and a reuse ratio of 𝛽 = 0.1. 
+
+4.2 Overall Quality Improvement 
+
+Table 1 reports the output quality of Qwen3-VL-8B, with Vis-Memo achieving the highest overall scores on every dataset. Compared with the strongest baseline on each dataset, the overall gains are 0.19 points on VisionArena, 1.14 points on InfographicVQA, 11.64 points on DocVQA, 0.23 points on MMBench, and 1.15 points on SEED-Bench. Notably, the largest gain is on DocVQA, where VisMemo reaches an ANLS of 64.30—22.1% higher than VLCache and 45.2% higher than CacheBlend. Across the five datasets, VisMemo averages 70.81 overall and 64.21 on approximate hits, surpassing the best baseline averages by 4.77 and 15.17 points, respectively. The approximate-hit subset directly measures the qual-ity of reusing a non-identical image. VisMemo obtains the highest approximate-hit score in the five datasets. Compared with the strongest baseline for each dataset, it improves the accuracy of approximate hits by 16.14 points in Vision-Arena, 19.72 points in InfographicVQA, and 17.27 points in DocVQA. The approximate-hit accuracy improves by 1.36 points in MMBench and 5.33 points in SEED-Bench. For ex-act hits, VisMemo remains within 0.68 points of the best exact-hit baseline on all datasets 3. These results show im-proved approximate-hit quality and comparable exact-hit quality of VisMemo. 
+
+4.3 System Efficiency 
+
+Figure 12 shows that the benefit of visual KV cache reuse in-creases with visual input length under Qwen3-VL-8B, Qwen3-VL-32B, and GLM-4.6V-Flash. At 8K input tokens, cache miss requests take 138.2, 323.0, and 118.3 ms of average prefill 
+
+> 3Minor exact-hit fluctuations are expected because some exact hits are classified as approximate hits by VisMemo.
+> 9
+
+Qwen3-VL-8B 256 512 1K 2K 4K 8K  
+
+> Pre fi ll length (tokens)
+> 025 50 75 100 125
+> Pre fi ll latency (ms)  Miss Exact Approx
+
+Qwen3-VL-32B 256 512 1K 2K 4K 8K  
+
+> Pre fi ll length (tokens)
+> 050 100 150 200 250 300
+> Pre fi ll latency (ms)  Miss Exact Approx
+
+GLM-4.6V-Flash 256 512 1K 2K 4K 8K                
+
+> Pre fi ll length (tokens)
+> 020 40 60 80 100 120
+> Pre fi ll latency (ms)  Miss Exact Approx 256 512 1K 2K 4K 8K
+> Prefill length (tokens)
+> 050 100 150 200
+> Prefill latency (ms)
+> Mooncake-Exact VisMemo-Exact Mooncake-Approx VisMemo-Approx 256 512 1K 2K 4K 8K
+> Pre fi ll length (tokens)
+> 050 100 150 200 250
+> Average pre fi ll latency (ms)  Mooncake-Exact VisMemo-Exact Mooncake-Approx VisMemo-Approx 256 512 1K 2K 4K 8K
+> Pre fi ll length (tokens)
+> 020 40 60 80 100 120
+> Average pre fi ll latency (ms)  Mooncake-Exact VisMemo-Exact Mooncake-Approx VisMemo-Approx
+
+Figure 12. Prefill latency across varying input lengths (top row) and comparison of Mooncake (bottom row) on VisionArena. latency on the three models, respectively. Exact hits reduce these latencies to 51.1, 117.0, and 61.7 ms, corresponding to 2.7 ×, 2.8 ×, and 1.9 × speedups. The approximate hits take 76.5, 166.9, and 82.3 ms, reducing the miss latency by 44.6%, 48.3%, and 30.5%, respectively. At 2K tokens, approximate reuse reduces latency from 43.8 to 38.5 ms on Qwen3-VL-8B and from 108.0 to 98.3 ms on Qwen3-VL-32B. On GLM-4.6V-Flash, the approximate-hit latency is 53.7 ms compared to 48.2 ms for a miss at 2K tokens, but it falls below the miss la-tency at 4K tokens, reducing the latency from 72.3 to 62.6 ms. These results show that the crossover point depends on the model, while exact hits consistently achieve the lowest la-tency because they avoid warmup and recomputation. Combined with Table 1, these results show that VisMemo converts the additional approximate hits into prefill savings while maintaining the higher output quality for requests served through approximate reuse. The benefit becomes pro-nounced once the avoided prefill computation dominates the fixed costs of approximate lookup, warmup attention, and selective recomputation. Figure 12 compares Mooncake with VisMemo’s unified memory and storage backend across the three models. On Qwen3-VL-8B, the exact-hit latencies are nearly identical through 2K tokens. At 4K and 8K tokens, VisMemo reduces exact-hit latency from 54.2 to 48.2 ms and from 68.5 to 59.7 ms, corresponding to reductions of 11.1% and 12.8%. The improvement is larger for approximate hits: at 2K, 4K, and 8K tokens, latency decreases from 79.8 to 56.1 ms, from 104.9 to 69.3 ms, and from 157.2 to 103.7 ms, respectively. On Qwen3-VL-32B, exact-hit latencies remain within 3.5% through 2K tokens, but the gap widens as the visual KV cache grows. At 4K and 8K tokens, VisMemo reduces latency from 115.6 to 92.3 ms and from 159.2 to 117.0 ms, correspond-ing to reductions of 20.2% and 26.5%. For approximate hits, VisMemo is faster at every input length. At 2K, 4K, and 8K tokens, it reduces latency by 22.4%, 23.3%, and 18.7%, respec-tively. On GLM-4.6V-Flash, the two backends have a similar exact-hit latency. Approximate-hit latency is also similar for short inputs and begins to favor VisMemo at longer lengths. At 4K and 8K tokens, VisMemo reduces approximate-hit latency from 67.1 to 63.6 ms and from 88.9 to 85.6 ms, cor-responding to reductions of 5.3% and 3.7%. Across the three models, the unified memory and storage backend provides the largest gains for the Qwen models while maintaining comparable performance on GLM-4.6V-Flash. Exact and approximate hits exercise different parts of the design. Exact hits use full I/O to retrieve complete entries. Their long-input gains come from the unified memory pool and the restoration kernel, which eliminate duplicate copies. For approximate hits, the patch-first layout and the sparse I/O at patch granularity retrieve only the late-layer KV cache associated with the reuse set B. The complete alias entry remains in its original tier instead of being promoted after partial access. These results show that the differentiated full I/O and sparse-I/O paths reduce memory access overhead by offsetting the computational savings of visual KV cache reuse as the visual sequence grows. 
+
+4.4 Performance Evaluation Cache Behavior . In the VisionArena trace, approximate matching increases the overall cache hit rate from 27.23% to       
+
+> 10 L1 L2 L3 00.5 11.5 2
+> Hit count (k)
+> 1830 687 203 677 1070 1538
+> Exact Approximate
+> Exact Approximate 020 40 60 80 100
+> Share of hits (%)
+> 67.3% 20.6% 25.3% 32.6% 7.5% 46.8%
+> L1 L2 L3
+
+Figure 13. Cache-tier usage by hit type: cache hit counts (left) and tier-wise hit shares (right). 60.28%, adding 33.05 percentage points beyond exact match-ing. Figure 13 shows that the two types of hits have distinct distributions across the cache hierarchy. Here, L1 is the GPU memory tier, while L2 and L3 are the CPU memory and SSD-backend storage tiers managed by VisMemo. The exact hits are concentrated in the upper tiers: 67.3% are served by L1, and L1 and L2 together account for 92.5%. The approxi-mate hits depend more on the lower storage tier, with 79.4% served by L2 or L3, and L3 alone accounting for 46.8%. This difference is consistent with the short exact-hit intervals and the long-tailed approximate-hit intervals in Figure 7. These access patterns support prioritizing exact entries for upper-tier retention while using the larger capacity of lower tiers to extend approximate reuse. The tier distribution evolves differently over the trace. As shown in Figure 14, the L1 share of exact hits remains dom-inant and converges to 67.3%, while L2 and L3 stabilize at 25.3% and 7.5%. The approximate hits initially concentrate on L1 and L2, but the L3 share increases over time. L3 over-takes L2 after approximately 50 minutes and ends at 46.8%, compared to 32.6% for L2 and 20.6% for L1. Approximate reuse exhibits weaker temporal locality, making matching entries less likely to remain in the upper tiers. The larger capacity of L3 allows it to retain more cached images, pro-viding a broader candidate pool for approximate matching. This behavior is consistent with our insight in §3.3: exact reuse exhibits stronger temporal locality and benefits from upper-tier retention, while approximate reuse benefits from the larger pool of cached images retained in SSDs. 
+
+Performance Breakdown . Figure 15 represents the prefill latency breakdown of approximate hits for different visual sequence lengths. Selective recomputation dominates the total prefill latency. Its cost increases from 67 ms in the 1K sequence length to 128 ms in the 8K sequence length, while the total prefill latency increases from 78 ms to 167 ms. Lookup measures the time spent finding a similar cached image for approximate reuse. Its latency increases with visual sequence length as approximate matching requires retriev-ing and comparing more visual tokens. Warmup executes the first three layers to collect attention scores for selective 0 20 40 60      
+
+> Elapsed time (min)
+> 020 40 60 80 100
+> Share of hits (%)
+> 020 40 60
+> Elapsed time (min)
+> L1 L2 L3
+
+Figure 14. Cache-hit distributions over the VisionArena trace: exact hits (left) and approximate hits (right). recomputation. Its latency also increases with visual input. Together, lookup and warmup account for about 10% of total prefill latency at 1K tokens and 19% at 8K tokens, accounting for most of the remaining prefill latency. Mask construction and KV fetch wait remain relatively small. KV retrieval starts asynchronously and overlaps with the warmup to hide KV cache transfer latency from lower cache tiers. KV fetch wait records only the remaining stall before the KV cache can be used. The small waiting component therefore does not represent the full KV retrieval latency. Figure 16 shows the cumulative benefits of system op-timizations for approximate-hit prefill of Qwen3-VL-32B. The baseline runs the approximate KV-reuse algorithm on SGLang with Mooncake. We progressively enable preset retention, sparse I/O, and I/O–warmup overlap, and the op-timized memory and storage access path used in full Vis-Memo ˙ Preset retention prioritizes KV entries to retain in the reserved CPU cache using offline workload priors and online reuse observations, reducing approximate-hit prefill latency by 9.14%. Sparse I/O increases the cumulative reduc-tion to 34.15% by reading only the KV cache selected for reuse, while I/O–warmup overlap raises it to 41.47% by over-lapping L3 cache retrieval with warmup computation. Finally, the optimized access path, including direct I/O and elimi-nating redundant memory copies, reduces prefill latency to 122.04 ms—a cumulative reduction of 61.83%. 
+
+SSD Capacity Scaling . Figure 17 shows the cache hit rates as the SSD capacity scales from 128 GB to 4 TB. The exact hit rate remains almost constant around 27.8% across all capacities: exact reuse exhibits strong temporal locality, and the exact-priority retention policy further keeps repeated entries in the upper tiers, making exact hits insensitive to SSD capacity. In contrast, the approximate hit rate increases from 20.33% at 128 GB to 33.35% at 2 TB, overtaking the exact hit rate at 1 TB. A larger SSD retains more cached images and enlarges the candidate pool for approximate matching, confirming that approximate reuse is primarily capacity-bound. Both curves saturate at 2 TB where the total hit rate reaches 61.45%. Beyond this point, the SSD capacity is no longer the bottleneck, and doubling it to 4 TiB         
+
+> 11 020 40 60 80 100 120 140 160
+> Prefill latency (ms)
+> 1K 4K 8K
+> Prefill length (tokens)
+> Lookup Recompute Warmup KV fetch wait Mask
+
+Figure 15. Approximate-hit prefill la-tency breakdown for Qwen3-VL-32B with 1K, 4K, and 8K-token inputs. Baseline +Preset +Sparse I/O +Overlap VisMemo 020 40 60 0.00% 9.14% 34.15% 41.47% 61.83% 
+
+> Cumulative components
+> Prefill latency reduction (%)
+
+Figure 16. Cumulative approximate-hit prefill latency reduction for Qwen3-VL-32B relative to baseline. 128 256 512 1K 2K 4K   
+
+> Capacity (GiB)
+> 20 30 40 50
+> 61.45
+> Hit rate (%)
+> 33.67% 27.78%
+> Total Approx. Exact
+
+Figure 17. Cache hit rates with SSD capacity scales, where Total is the sum of exact and approximate hit rates. 60 80 100 120 140           
+
+> Pre fi ll latency (ms)
+> 40 45 50 55 60 65 70 75
+> ANLS score
+> 10% 20% 30% 40% 50%
+> Recomputation ratio ρ=10% 20% 30% 40% 50% Emax
+> (a)
+> DocVQA InfographicVQA
+> 0510 15 20 25 30
+> Reuse ratio β(%)
+> 60 62 64 66
+> ANLS score  65.33 62.93
+> (b)
+> DocVQA InfographicVQA
+
+Figure 18. Sensitivity to hyperparameters. adds only 0.48 percentage points, as the remaining misses find no approximate match passing the similarity threshold. This scaling behavior confirms the capacity-scaling trend predicted by the simulation in Figure 3b. 
+
+4.5 Sensitivity Analysis 
+
+In this section, we analyze the sensitivity of our system to two key hyperparameters, namely the approximate recom-putation ratio 𝜌 and the reuse ratio 𝛽 , on the DocVQA and InfographicVQA datasets. The results are shown in Figure 18. 
+
+Recomputation Ratio . Figure 18(a) shows the empirical Pareto trade-off among the approximate recomputation ratio, ANLS score, and prefill latency. Increasing the recomputa-tion ratio consistently improves answer quality, but incurs progressively higher prefill overhead. Beyond 30%, quality improvements become marginal and no longer offset the latency overhead. Accordingly, the normalized efficiency 
+
+𝐸 peaks at a 30% recomputation ratio, indicating the best balance between output quality and system efficiency. 
+
+Reuse Ratio . Figure 18(b) evaluates the impact of the reuse ratio on the ANLS score. The scores exhibit a non-monotonic trend : increasing the reuse ratio initially improves perfor-mance, with the best results observed at round 15%—65.33 on DocVQA and 62.93 on InfographicVQA. This improvement indicates that reusing a moderate number of low-entropy tokens can effectively provide beneficial cached information. Beyond this point, the scores decline as increasing the reuse ratio introduces progressively more relatively high-entropy tokens, which add unexpected noise and degrade predic-tion quality. Overall, VisMemo can still maintain high ANLS quality (above 61%) at reuse ratios below 30%. 
+
+5 Related Work 
+
+Visual KV Cache Compression. Prior VLM inference opti-mizations primarily reduce visual prefill computation within each request. These works prune visual tokens according to redundancy or attention, while TokenMerging [6] and FrameFusion [16] combine similar representations to shorten the visual sequence [3, 8, 58, 62]. VL-Cache [49] and LOOK-M [53] instead reduce the memory cost of the visual KV cache. These methods reduce the prefill computation or KV cache memory, whereas VisMemo extends the visual KV cache reuse across requests with approximate images. 
+
+Visual KV Cache Reuse. Existing systems avoid repeated prefill via prefix caching [17, 60, 65]. Later works of position-independent caching relax prefix restriction for textual and multimodal inputs [19, 35, 41, 59], but visual reuse still re-quires identical visual matching. VisMemo extends reusing to similar caches via patch reuse and recomputation. 
+
+Hierarchical KV Cache Management. Existing memory management systems improve the memory utilization and access efficiency of LLM serving [23, 32, 40, 57], while ap-proximate visual reuse introduces a different access pattern. Approximate hits require sparse KV cache reads and exhibit weaker temporal locality than exact hits, motivating Vis-Memo’s differentiated cache management. 
+
+6 Conclusion 
+
+This paper presented VisMemo, an efficient serving system for approximate KV cache reuse for VLM inference. Moti-vated by the visual redundancy missed by exact matching, VisMemo combined an entropy-aware KV cache reuse algo-rithm with differentiated hierarchical cache management. Our results showed that approximate caching improved cache hit rates and reduced prefill latency while preserving output quality. We view VisMemo as a step toward broader KV cache reuse in VLM serving at scale. As workloads grow, new opportunities will emerge to exploit shared visual con-tent across requests. 
+
+> 12
+
+References 
+
+[1] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav Gulavani, Alexey Tumanov, and Ramachandran Ram-jee. 2024. Taming Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . USENIX Association, 117–134. 
+
+https://www.usenix.org/conference/osdi24/presentation/agrawal 
+
+[2] H. An, W. Hu, S. Huang, S. Huang, R. Li, Y. Liang, J. Shao, Y. Song, Z. Wang, C. Yuan, et al. 2026. AI Flow: Perspectives, Scenarios, and Approaches. Vicinagearth 3, 1 (2026), 1. [3] Kazi Hasan Ibn Arif, JinYi Yoon, Dimitrios S. Nikolopoulos, Hans Vandierendonck, Deepu John, and Bo Ji. 2025. HiRED: Attention-Guided Token Dropping for Efficient Inference of High-Resolution Vision-Language Models. Proceedings of the AAAI Conference on Arti-ficial Intelligence 39, 2 (2025), 1773–1781. doi: 10.1609/aaai.v39i2.32171 
+
+[4] Shuai Bai, Yuxuan Cai, Ruizhe Chen, Keqin Chen, Xionghui Chen, Ze-sen Cheng, Lianghao Deng, Wei Ding, Chang Gao, Chunjiang Ge, Wen-bin Ge, Zhifang Guo, Qidong Huang, Jie Huang, Fei Huang, Binyuan Hui, Shutong Jiang, Zhaohai Li, Mingsheng Li, Mei Li, Kaixin Li, Zicheng Lin, Junyang Lin, Xuejing Liu, Jiawei Liu, Chenglong Liu, Yang Liu, Dayiheng Liu, Shixuan Liu, Dunjie Lu, Ruilin Luo, Chenxu Lv, Rui Men, Lingchen Meng, Xuancheng Ren, Xingzhang Ren, Sibo Song, Yuchong Sun, Jun Tang, Jianhong Tu, Jianqiang Wan, Peng Wang, Pengfei Wang, Qiuyue Wang, Yuxuan Wang, Tianbao Xie, Yiheng Xu, Haiyang Xu, Jin Xu, Zhibo Yang, Mingkun Yang, Jianxin Yang, An Yang, Bowen Yu, Fei Zhang, Hang Zhang, Xi Zhang, Bo Zheng, Humen Zhong, Jingren Zhou, Fan Zhou, Jing Zhou, Yuanzhi Zhu, and Ke Zhu. 2025. Qwen3-VL Technical Report. doi: 10.48550/arXiv.2511.21631 
+
+[5] Ali Furkan Biten, Ruben Tito, Andres Mafla, Lluis Gomez, Marcal Rusinol, C. V. Jawahar, Ernest Valveny, and Dimosthenis Karatzas. 2019. Scene Text Visual Question Answering. In 2019 IEEE/CVF International Conference on Computer Vision . IEEE, 4290–4300. doi: 10.1109/ICCV. 2019.00439 
+
+[6] Daniel Bolya, Cheng-Yang Fu, Xiaoliang Dai, Peizhao Zhang, Christoph Feichtenhofer, and Judy Hoffman. 2023. Token Merging: Your ViT But Faster. In The Eleventh International Conference on Learning Represen-tations . doi: 10.48550/arXiv.2210.09461 
+
+[7] Qingqing Cao, Bhargavi Paranjape, and Hannaneh Hajishirzi. 2023. PuMer: Pruning and Merging Tokens for Efficient Vision Language Models. In Proceedings of the 61st Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) . Association for Computational Linguistics, 12890–12903. doi: 10.18653/v1/2023.acl-long.721 
+
+[8] Liang Chen, Haozhe Zhao, Tianyu Liu, Shuai Bai, Junyang Lin, Chang Zhou, and Baobao Chang. 2024. An Image is Worth 1/2 Tokens Af-ter Layer 2: Plug-and-Play Inference Acceleration for Large Vision-Language Models. In Computer Vision – ECCV 2024 . Springer Nature Switzerland, 19–35. doi: 10.1007/978-3-031-73004-7_2 
+
+[9] X. Chen, J. Luo, Y. Fan, et al. 2026. Generative Transmission: Rethinking Computation, Bandwidth, and Memory in Communication. In WAICA .[10] Yilong Chen, Xiang Bai, Zhibin Wang, Chengyu Bai, Yuhan Dai, and Ming Lu. 2026. StreamKV: Streaming Video Question-Answering with Segment-based KV Cache Retrieval and Compression. Proceedings of the AAAI Conference on Artificial Intelligence 40, 4 (2026), 3120–3128. doi: 10.1609/aaai.v40i4.37305 
+
+[11] Christopher Chou, Lisa Dunlap, Koki Mashita, Krishna Mandal, Trevor Darrell, Ion Stoica, Joseph E. Gonzalez, and Wei-Lin Chiang. 2025. Vi-sionArena: 230K Real World User-VLM Conversations with Preference Labels. In 2025 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) . IEEE, 3877–3887. doi: 10.1109/CVPR52734.2025. 00367 
+
+[12] Johan Edstedt, Qiyu Sun, Georg Bökman, Mårten Wadenbäck, and Michael Felsberg. 2024. RoMa: Robust Dense Feature Matching. In 
+
+2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) . IEEE, 19790–19800. doi: 10.1109/CVPR52733.2024.01871 
+
+[13] Y. Fan, Q. Weng, and X. Li. 2026. Computation-Bandwidth-Memory Trade-offs: A Unified Paradigm for AI Infrastructure. Vicinagearth 3, 1 (2026), 11. [14] Manuel Faysse, Hugues Sibille, Tony Wu, Bilel Omrani, Gautier Viaud, Céline Hudelot, and Pierre Colombo. 2025. ColPali: Efficient Document Retrieval with Vision Language Models. In ICLR . doi: 10.48550/arXiv. 2407.01449 
+
+[15] Shaoting Feng, Hanchen Li, Kuntai Du, Zhuohan Gu, Yuhan Liu, Ji-ayi Yao, Siddhant Ray, Samuel Shen, Yihua Cheng, Ganesh Anantha-narayanan, and Junchen Jiang. 2025. AdaptCache: KV Cache Native Storage Hierarchy for Low-Delay and High-Quality Language Model Serving. arXiv:2509.00105 [cs.OS] doi: 10.48550/arXiv.2509.00105 
+
+[16] Tianyu Fu, Tengxuan Liu, Qinghao Han, Guohao Dai, Shengen Yan, Huazhong Yang, Xuefei Ning, and Yu Wang. 2025. FrameFusion: Com-bining Similarity and Importance for Video Token Reduction on Large Vision Language Models. In 2025 IEEE/CVF International Conference on Computer Vision (ICCV) . IEEE, 22654–22663. doi: 10.1109/ICCV51701. 2025.02103 
+
+[17] In Gim, Guojun Chen, Seung seob Lee, Nikhil Sarda, Anurag Khandelwal, and Lin Zhong. 2024. Prompt Cache: Mod-ular Attention Reuse for Low-Latency Inference. In Pro-ceedings of Machine Learning and Systems , Vol. 6. 325–338. 
+
+https://proceedings.mlsys.org/paper_files/paper/2024/hash/ a66caa1703fe34705a4368c3014c1966-Abstract-Conference.html 
+
+[18] GLM-V Team, Wenyi Hong, Wenmeng Yu, Xiaotao Gu, Guo Wang, Guobing Gan, Haomiao Tang, Jiale Cheng, Ji Qi, Junhui Ji, Lihang Pan, Shuaiqi Duan, Weihan Wang, Yan Wang, Yean Cheng, Zehai He, Zhe Su, Zhen Yang, Ziyang Pan, Aohan Zeng, Baoxu Wang, Bin Chen, Boyan Shi, Changyu Pang, Chenhui Zhang, Da Yin, Fan Yang, Guoqing Chen, Haochen Li, Jiale Zhu, Jiali Chen, Jiaxing Xu, Jiazheng Xu, Jing Chen, Jinghao Lin, Jinhao Chen, Jinjiang Wang, Junjie Chen, Leqi Lei, Letian Gong, Leyi Pan, Mingdao Liu, Mingde Xu, Mingzhi Zhang, Qinkai Zheng, Ruiliang Lyu, Shangqin Tu, Sheng Yang, Shengbiao Meng, Shi Zhong, Shiyu Huang, Shuyuan Zhao, Siyan Xue, Tianshu Zhang, Tianwei Luo, Tianxiang Hao, Tianyu Tong, Wei Jia, Wenkai Li, Xiao Liu, Xiaohan Zhang, Xin Lyu, Xinyu Zhang, Xinyue Fan, Xuancheng Huang, Yadong Xue, Yanfeng Wang, Yanling Wang, Yanzi Wang, Yifan An, Yifan Du, Yiheng Huang, Yilin Niu, Yiming Shi, Yu Wang, Yuan Wang, Yuanchang Yue, Yuchen Li, Yusen Liu, Yutao Zhang, Yuting Wang, Yuxuan Zhang, Zhao Xue, Zhengxiao Du, Zhenyu Hou, Zihan Wang, Peng Zhang, Debing Liu, Bin Xu, Juanzi Li, Minlie Huang, Yuxiao Dong, and Jie Tang. 2025. GLM-4.5V and GLM-4.1V-Thinking: Towards Versatile Multimodal Reasoning with Scalable Reinforcement Learning. arXiv:2507.01006 [cs.CV] doi: 10.48550/arXiv.2507.01006 
+
+[19] Junhao Hu, Wenrui Huang, Weidong Wang, Haoyi Wang, Tiancheng Hu, Qin Zhang, Hao Feng, Xusheng Chen, Yizhou Shan, and Tao Xie. 2024. EPIC: Efficient Position-Independent Caching for Serving Large Language Models. arXiv:2410.15332 [cs.LG] doi: 10.48550/arXiv.2410. 15332 
+
+[20] Ziyan Jiang, Rui Meng, Xinyi Yang, Semih Yavuz, Yingbo Zhou, and Wenhu Chen. 2025. VLM2Vec: Training Vision-Language Models for Massive Multimodal Embedding Tasks. In ICLR . doi: 10.48550/arXiv. 2410.05160 
+
+[21] Chao Jin, Zili Zhang, Xuanlin Jiang, Fangyue Liu, Shufan Liu, Xuanzhe Liu, and Xin Jin. 2026. RAGCache: Efficient Knowledge Caching for Retrieval-Augmented Generation. ACM Transactions on Computer Systems 44, 1 (2026), 1–27. doi: 10.1145/3768628 
+
+[22] Seil Kang, Jinyeong Kim, Junhyeok Kim, and Seong Jae Hwang. 2025. See What You Are Told: Visual Attention Sink in Large Multimodal Models. arXiv:2503.03321 [cs.CV] doi: 10.48550/arXiv.2503.03321 
+
+[23] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. 
+
+> 13
+
+2023. Efficient Memory Management for Large Language Model Serv-ing with PagedAttention. In Proceedings of the 29th Symposium on Op-erating Systems Principles . ACM, 611–626. doi: 10.1145/3600006.3613165 
+
+[24] Wonbeom Lee, Jungi Lee, Junghwan Seo, and Jaewoong Sim. 2024. InfiniGen: Efficient Generative Inference of Large Language Models with Dynamic KV Cache Management. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . USENIX Association, 155–172. https://www.usenix.org/conference/osdi24/ presentation/lee 
+
+[25] Bohao Li, Rui Wang, Guangzhi Wang, Yuying Ge, Yixiao Ge, and Ying Shan. 2023. SEED-Bench: Benchmarking Multimodal LLMs with Generative Comprehension. arXiv preprint arXiv:2307.16125 (2023). doi: 10.48550/arXiv.2307.16125 
+
+[26] Kunxi Li, Zhonghua Jiang, Zhouzhou Shen, Zhaode Wang, Chengfei Lv, Shengyu Zhang, Fan Wu, and Fei Wu. 2025. MadaKV: Adaptive Modality-Perception KV Cache Eviction for Efficient Multimodal Long-Context Inference. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) . As-sociation for Computational Linguistics, 13306–13318. doi: 10.18653/ v1/2025.acl-long.652 
+
+[27] Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. 2024. SnapKV: LLM Knows What You are Looking for Before Gener-ation. In Advances in Neural Information Processing Systems , Vol. 37. 22947–22970. doi: 10.52202/079017-0722 
+
+[28] Sheng-Chieh Lin, Chankyu Lee, Mohammad Shoeybi, Jimmy Lin, Bryan Catanzaro, and Wei Ping. 2025. MM-Embed: Universal Multi-modal Retrieval with Multimodal LLMs. In ICLR . doi: 10.48550/arXiv. 2411.02571 
+
+[29] Di Liu, Meng Chen, Baotong Lu, Huiqiang Jiang, Zhenhua Han, Qianxi Zhang, Qi Chen, Chengruidong Zhang, Bailu Ding, Kai Zhang, Chen Chen, Fan Yang, Yuqing Yang, and Lili Qiu. 2025. RetrievalAt-tention: Accelerating Long-Context LLM Inference via Vector Re-trieval. In Advances in Neural Information Processing Systems 38 . Neu-ral Information Processing Systems Foundation, Inc., 60539–60566. doi: 10.52202/085713-1816 
+
+[30] Yuhan Liu, Yihua Cheng, Jiayi Yao, Yuwei An, Xiaokun Chen, Shaoting Feng, Yuyang Huang, Samuel Shen, Rui Zhang, Kuntai Du, and Junchen Jiang. 2025. LMCache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference. arXiv:2510.09665 [cs.LG] doi: 10.48550/arXiv.2510. 09665 
+
+[31] Yuan Liu, Haodong Duan, Yuanhan Zhang, Bo Li, Songyang Zhang, Wangbo Zhao, Yike Yuan, Jiaqi Wang, Conghui He, Ziwei Liu, Kai Chen, and Dahua Lin. 2024. MMBench: Is Your Multi-modal Model an All-Around Player?. In Computer Vision – ECCV 2024 (Lecture Notes in Computer Science, Vol. 15064) . Springer, 216–233. doi: 10.1007/978-3-031-72658-3_13 
+
+[32] Yuhan Liu, Hanchen Li, Yihua Cheng, Siddhant Ray, Yuyang Huang, Qizheng Zhang, Kuntai Du, Jiayi Yao, Shan Lu, Ganesh Anantha-narayanan, Michael Maire, Henry Hoffmann, Ari Holtzman, and Junchen Jiang. 2024. CacheGen: KV Cache Compression and Stream-ing for Fast Large Language Model Serving. In Proceedings of the ACM SIGCOMM 2024 Conference . ACM, 38–56. doi: 10.1145/3651890.3672274 
+
+[33] Yilin Liu, Rui Meng, Wangze Ni, Jianxin Yan, Heng Cao, Libin Zheng, Peng Cheng, and Jinfei Liu. 2026. QV-PIC: Query-Aware Visual Position-Independent Caching for Efficient RAG Serving. arXiv:2608.12121 [cs.CL] doi: 10.48550/arXiv.2608.12121 
+
+[34] Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu. 2024. KIVI: A Tuning-Free Asymmetric 2bit Quantization for KV Cache. In Proceedings of the 41st International Conference on Machine Learning (Proceedings of Machine Learning Research, Vol. 235) . PMLR, 32332–32344. https: //proceedings.mlr.press/v235/liu24bz.html 
+
+[35] Bole Ma, Jan Eitzinger, Harald Koestler, and Gerhard Wellein. 2026. Kamera: Unified Position-Invariant Multimodal KV Cache for Training-Free Reuse. arXiv:2606.23581 [cs.DC] doi: 10.48550/arXiv.2606.23581 
+
+[36] Minesh Mathew, Viraj Bagal, Rubèn Tito, Dimosthenis Karatzas, Ernest Valveny, and C. V. Jawahar. 2022. InfographicVQA. In 2022 IEEE/CVF Winter Conference on Applications of Computer Vision (WACV) . IEEE, 2582–2591. doi: 10.1109/WACV51458.2022.00264 
+
+[37] Minesh Mathew, Dimosthenis Karatzas, and C. V. Jawahar. 2021. DocVQA: A Dataset for VQA on Document Images. In 2021 IEEE Winter Conference on Applications of Computer Vision (WACV) . IEEE, 2199– 2208. doi: 10.1109/WACV48630.2021.00225 
+
+[38] Mooncake Project. 2026. Mooncake. GitHub repository. https://github. com/kvcache-ai/Mooncake Accessed 2026-08-17. [39] Xiaohuan Pei, Tao Huang, and Chang Xu. 2024. Cross-Self KV Cache Pruning for Efficient Vision-Language Inference. arXiv:2412.04652 [cs.CV] doi: 10.48550/arXiv.2412.04652 
+
+[40] Ruoyu Qin, Zheming Li, Weiran He, Jialei Cui, Heyi Tang, Feng Ren, Teng Ma, Shangming Cai, Yineng Zhang, Mingxing Zhang, Yongwei Wu, Weimin Zheng, and Xinran Xu. 2025. Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving. ACM Transac-tions on Storage (Nov. 2025). doi: 10.1145/3773772 
+
+[41] Shengling Qin, Hao Yu, Chenxin Wu, Zheng Li, Yizhong Cao, Zhengyang Zhuge, Yuxin Zhou, Wentao Yao, Yi Zhang, Zhengheng Wang, Shuai Bai, Jianwei Zhang, and Junyang Lin. 2025. VLCache: Computing 2% Vision Tokens and Reusing 98% for Vision-Language Inference. arXiv:2512.12977 [cs.CV] doi: 10.48550/arXiv.2512.12977 
+
+[42] Haoran Qiu, Anish Biswas, Zihan Zhao, Jayashree Mohan, Alind Khare, Esha Choukse, Íñigo Goiri, Zeyu Zhang, Haiying Shen, Chetan Bansal, Ram Ramjee, and Rodrigo Fonseca. 2025. ModServe: Modality- and Stage-Aware Resource Disaggregation for Scalable Multimodal Model Serving. In Proceedings of the 2025 ACM Symposium on Cloud Comput-ing . ACM, 817–830. doi: 10.1145/3772052.3772254 
+
+[43] SGLang Project. 2026. SGLang. GitHub repository. https://github. com/sgl-project/sglang Accessed 2026-08-17. [44] Yuzhang Shang, Mu Cai, Bingxin Xu, Yong Jae Lee, and Yan Yan. 2025. LLaVA-PruMerge: Adaptive Token Reduction for Efficient Large Multi-modal Models. In Proceedings of the IEEE/CVF International Conference on Computer Vision . IEEE, 22857–22867. doi: 10.1109/ICCV51701.2025. 02122 
+
+[45] Claude E. Shannon. 1948. A Mathematical Theory of Communication. 
+
+Bell System Technical Journal 27, 3 (1948), 379–423. doi: 10.1002/j.1538-7305.1948.tb01338.x 
+
+[46] Gursimran Singh, Xinglu Wang, Yifan Hu, Timothy Tin Long Yu, Linzi Xing, Wei Jiang, Zhefeng Wang, Bai Xiaolong, Yi Li, Ying Xiong, Yong Zhang, and Zhenan Fan. 2025. Efficiently Serving Large Mul-timodal Models Using EPD Disaggregation. In Proceedings of the 42nd International Conference on Machine Learning (Proceedings of Machine Learning Research, Vol. 267) . PMLR, 55740–55756. https: //proceedings.mlr.press/v267/singh25d.html 
+
+[47] Jiaming Tang, Yilong Zhao, Kan Zhu, Guangxuan Xiao, Baris Kasikci, and Song Han. 2024. QUEST: Query-Aware Sparsity for Efficient Long-Context LLM Inference. In Proceedings of the 41st International Conference on Machine Learning (Proceedings of Machine Learning Research, Vol. 235) . PMLR, 47901–47911. https://proceedings.mlr.press/ v235/tang24l.html 
+
+[48] Luming Tang, Menglin Jia, Qianqian Wang, Cheng Perng Phoo, and Bharath Hariharan. 2023. Emergent Correspondence from Image Diffusion. In Advances in Neural Information Processing Systems , Vol. 36. 1363–1389. doi: 10.52202/075280-0068 
+
+[49] Dezhan Tu, Danylo Vashchilenko, Yuzhe Lu, and Panpan Xu. 2024. VL-Cache: Sparsity and Modality-Aware KV Cache Compression for Vision-Language Model Inference Acceleration. arXiv:2410.23317 [cs.CV] doi: 10.48550/arXiv.2410.23317 
+
+> 14
+
+[50] Pavan Kumar Anasosalu Vasu, Fartash Faghri, Chun-Liang Li, Cem Koc, Nate True, Albert Antony, Gokula Santhanam, James Gabriel, Peter Grasch, Oncel Tuzel, and Hadi Pouransari. 2025. FastVLM: Effi-cient Vision Encoding for Vision Language Models. In 2025 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) . IEEE, 19769–19780. doi: 10.1109/CVPR52734.2025.01841 
+
+[51] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin. 2017. Attention Is All You Need. In Advances in Neural Information Processing Systems , Vol. 30. Curran Associates, Inc., 5998–6008. doi: 10.48550/arXiv. 1706.03762 
+
+[52] Zhongwei Wan, Hui Shen, Xin Wang, Che Liu, Zheda Mai, and Mi Zhang. 2025. MEDA: Dynamic KV Cache Allocation for Efficient Multimodal Long-Context Inference. In Proceedings of the 2025 Con-ference of the Nations of the Americas Chapter of the Association for Computational Linguistics: Human Language Technologies (Volume 1: Long Papers) . Association for Computational Linguistics, 2485–2497. doi: 10.18653/v1/2025.naacl-long.125 
+
+[53] Zhongwei Wan, Ziang Wu, Che Liu, Jinfa Huang, Zhihong Zhu, Peng Jin, Longyue Wang, and Li Yuan. 2024. LOOK-M: Look-Once Op-timization in KV Cache for Efficient Multimodal Long-Context In-ference. In Findings of the Association for Computational Linguistics: EMNLP 2024 . Association for Computational Linguistics, 4065–4078. doi: 10.18653/v1/2024.findings-emnlp.235 
+
+[54] Peng Wang, Shuai Bai, Sinan Tan, Shijie Wang, Zhihao Fan, Jinze Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin Ge, Yang Fan, Kai Dang, Mengfei Du, Xuancheng Ren, Rui Men, Dayiheng Liu, Chang Zhou, Jingren Zhou, and Junyang Lin. 2024. Qwen2-VL: Enhancing Vision-Language Model’s Perception of the World at Any Resolution. doi: 10.48550/arXiv.2409.12191 
+
+[55] Gongli Xi, Ye Tian, Mengyu Yang, Huahui Yi, Liang Lin, Xiaoshuai Hao, Kun Wang, and Wendong Wang. 2026. Large Vision-Language Models Get Lost in Attention. In Forty-Third International Conference on Machine Learning . arXiv:2605.05668 [cs.AI] doi: 10.48550/arXiv.2605. 05668 
+
+[56] Tianbao Xie, Danyang Zhang, Jixuan Chen, Xiaochuan Li, Siheng Zhao, Ruisheng Cao, Toh Jing Hua, Zhoujun Cheng, Dongchan Shin, Fangyu Lei, Yitao Liu, Yiheng Xu, Shuyan Zhou, Silvio Savarese, Caim-ing Xiong, Victor Zhong, and Tao Yu. 2024. OSWorld: Benchmarking Multimodal Agents for Open-Ended Tasks in Real Computer Environ-ments. In Advances in Neural Information Processing Systems , Vol. 37. Curran Associates, Inc., 52040–52094. doi: 10.52202/079017-1650 
+
+[57] Huan Yang, Renji Zhang, Mingzhe Huang, Weijun Wang, Yin Tang, Yuanchun Li, Yunxin Liu, and Deyu Zhang. 2025. KVShare: An LLM Service System with Efficient and Effective Multi-Tenant KV Cache Reuse. arXiv:2503.16525 [cs.CL] doi: 10.48550/arXiv.2503.16525 
+
+[58] Senqiao Yang, Yukang Chen, Zhuotao Tian, Chengyao Wang, Jingyao Li, Bei Yu, and Jiaya Jia. 2025. VisionZip: Longer is Better but Not Necessary in Vision Language Models. In 2025 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) . IEEE, 19792–19802. doi: 10.1109/CVPR52734.2025.01843 
+
+[59] Jiayi Yao, Hanchen Li, Yuhan Liu, Siddhant Ray, Yihua Cheng, Qizheng Zhang, Kuntai Du, Shan Lu, and Junchen Jiang. 2025. CacheBlend: Fast Large Language Model Serving for RAG with Cached Knowledge Fu-sion. In Proceedings of the Twentieth European Conference on Computer Systems . ACM, 94–109. doi: 10.1145/3689031.3696098 
+
+[60] Lu Ye, Ze Tao, Yong Huang, and Yang Li. 2024. ChunkAttention: Efficient Self-Attention with Prefix-Aware KV Cache and Two-Phase Partition. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) . Association for Computational Linguistics, 11608–11620. doi: 10.18653/v1/2024.acl-long.623 
+
+[61] Zihao Ye, Lequn Chen, Ruihang Lai, Wuwei Lin, Yineng Zhang, Stephanie Wang, Tianqi Chen, Baris Kasikci, Vinod Grover, Arvind Krishnamurthy, and Luis Ceze. 2025. FlashInfer: Efficient and Customizable Attention Engine for LLM Inference Serving. arXiv:2501.01005 [cs.DC] doi: 10.48550/arXiv.2501.01005 
+
+[62] Yuan Zhang, Chun-Kai Fan, Junpeng Ma, Wenzhao Zheng, Tao Huang, Kuan Cheng, Denis Gudovskiy, Tomoyuki Okuno, Yohei Nakata, Kurt Keutzer, and Shanghang Zhang. 2025. SparseVLM: Visual Token Sparsification for Efficient Vision-Language Model Inference. In Pro-ceedings of the 42nd International Conference on Machine Learning .doi: 10.48550/arXiv.2410.04417 
+
+[63] Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Ré, Clark Barrett, Zhangyang Wang, and Beidi Chen. 2023. H2O: Heavy-Hitter Oracle for Efficient Generative Inference of Large Language Models. In Advances in Neural Information Processing Systems , Vol. 36. 34661– 34710. doi: 10.52202/075280-1506 
+
+[64] Shiju Zhao, Junhao Hu, Rongxiao Huang, Jiaqi Zheng, and Guihai Chen. 2025. MPIC: Position-Independent Multimodal Context Caching System for Efficient MLLM Serving. arXiv:2502.01960 [cs.LG] doi: 10. 48550/arXiv.2502.01960 
+
+[65] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. 2024. SGLang: Effi-cient Execution of Structured Language Model Programs. In Advances in Neural Information Processing Systems , Vol. 37. Curran Associates, Inc., 62557–62583. doi: 10.52202/079017-2000 
+
+[66] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xu-anzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . USENIX Association, 193–210. https: //www.usenix.org/conference/osdi24/presentation/zhong-yinmin

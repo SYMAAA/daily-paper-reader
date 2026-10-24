@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-23</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-24</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 13 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 8 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>0</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>8</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-23 21:48:52 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-24 22:13:13 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精选 13 篇论文，精读 2 篇，聚焦医学视觉问答与超低比特量化中的信息保留。最值得关注 MedSTP 在医学 VQA 中保留子空间与转移证据，以及 ProQuant 在 MoE 超低比特量化下守住专家质量。普通读者可先读这两篇精读论文，再按兴趣浏览速读中的查询自适应分词与眼动驱动视频问答降 token 方法。</p>
+<p>今日速读 8 篇论文，聚焦长视频理解、量化模型推理恢复与多模态推理效率。最值得看的是《Write Once, Query Many》提出的可复用长视频记忆机制，以及《Right On Q》通过自生成轨迹恢复量化后推理能力。普通读者可优先从这两篇入手，关注方法与实验设置，再按需扩展阅读。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">0 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="MedSTP: Preserving Subspace and Transition Evidence for Medical VQA Token Pruning">MedSTP: Preserving Subspace and Transition Evidence for Medical VQA Token Pruning</span></li><li><span class="dpr-home-dashboard-paper-title" title="ProQuant: Preserving Expert Quality over Quantity in Ultra-Low-Bit Quantization of Mixture-of-Experts Models">ProQuant: Preserving Expert Quality over Quantity in Ultra-Low-Bit Quantization of Mixture-of-Experts Models</span></li></ul>
+<p class="dpr-home-dashboard-empty">今日暂无推荐。</p>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>2</strong></span></div>
+
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">11 篇</strong>
+    <strong class="dpr-home-dashboard-count">8 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Query-adaptive Recurrent Tokenization">Query-adaptive Recurrent Tokenization</span></li><li><span class="dpr-home-dashboard-paper-title" title="GazeLens for Efficient Egocentric Video Question Answering with Simple Gaze-Driven Adaptive Token Reduction">GazeLens for Efficient Egocentric Video Question Answering with Simple Gaze-Driven Adaptive Token Reduction</span></li><li><span class="dpr-home-dashboard-paper-title" title="Multi-Scale Latent Temporal Compression Attention and Video-Text Cross Attention Fusion for Video Action Detection">Multi-Scale Latent Temporal Compression Attention and Video-Text Cross Attention Fusion for Video Action Detection</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Write Once, Query Many: Evolving Compact Reusable Memory for Long Videos">Write Once, Query Many: Evolving Compact Reusable Memory for Long Videos</span></li><li><span class="dpr-home-dashboard-paper-title" title="Right On Q: Recovering Reasoning under Quantization via Self-Generated Trajectories">Right On Q: Recovering Reasoning under Quantization via Self-Generated Trajectories</span></li><li><span class="dpr-home-dashboard-paper-title" title="Visual Cache Reuse for Efficient Multimodal Inference">Visual Cache Reuse for Efficient Multimodal Inference</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>11</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>8</strong></span></div>
 </section>
 </div>
 
