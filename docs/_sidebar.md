@@ -1,6 +1,9 @@
 * <a class="dpr-sidebar-root-link" href="#/">首页</a>
 * <a class="dpr-sidebar-root-link dpr-sidebar-noactive-link" href="javascript:void(0)" data-dpr-hash="#/tutorial/README">使用教程</a>
 * Daily Papers
+  * 2026-10-25 <!--dpr-date:20261025-->
+    * 速读区
+      * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202610/25/2610.28773v1-building-a-nested-ladder-for-llm-unstructured-post-training-pruning" data-sidebar-item="{&quot;title&quot;: &quot;Building a Nested LADDER for LLM Unstructured Post-Training Pruning&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2610.28773v1-building-a-nested-ladder-for-llm-unstructured-post-training-pruning&quot;, &quot;score&quot;: &quot;6.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;el&quot;}], &quot;evidence&quot;: &quot;面向大模型的后训练非结构化剪枝与逐层稀疏分配&quot;}">Building a Nested LADDER for LLM Unstructured Post-Training Pruning</a>
   * 2026-10-24 <!--dpr-date:20261024-->
     * 速读区
       * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202610/24/2610.24537v1-write-once-query-many-evolving-compact-reusable-memory-for-long-videos" data-sidebar-item="{&quot;title&quot;: &quot;Write Once, Query Many: Evolving Compact Reusable Memory for Long Videos&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2610.24537v1-write-once-query-many-evolving-compact-reusable-memory-for-long-videos&quot;, &quot;score&quot;: &quot;7.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;el&quot;}], &quot;evidence&quot;: &quot;基于时间锚定观测的可复用紧凑视频记忆，保留时序导航能力&quot;}">Write Once, Query Many: Evolving Compact Reusable Memory for Long Videos</a>

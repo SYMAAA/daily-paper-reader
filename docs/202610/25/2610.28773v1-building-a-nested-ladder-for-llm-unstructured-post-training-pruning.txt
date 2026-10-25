@@ -1,0 +1,1222 @@
+Title: Building a Nested LADDER for LLM Unstructured Post-Training Pruning
+
+URL Source: https://arxiv.org/pdf/2610.28773v1
+
+Published Time: Thu, 22 Oct 2026 00:07:04 GMT
+
+Number of Pages: 25
+
+Markdown Content:
+# Building a Nested LADDER for LLM Unstructured Post-Training Pruning 
+
+Nicolas M. Cuadrado ´ Avila Ivo Gollini Navarrete Martin Tak´ aˇ c Samuel Horv´ ath 
+
+Mohamed bin Zayed University of Artificial Intelligence, Abu Dhabi, United Arab Emirates 
+
+Abstract 
+
+Non-uniform allocation can improve post-training pruning of large language mod-els, yet quality can still degrade sharply at high sparsity. To control degradation as sparsity increases, we introduce LADDER (Layer-Wise Allocation via Damage-Driven 
+
+Evaluation and Refinement), which allocates sparsity incrementally. At each step, it evalu-ates pruning an additional fraction of weights from each eligible layer and commits the layer update that causes the least end-to-end degradation per removed parameter. This process produces non-uniform sparsity pro-files and exactly nested masks across mul-tiple budgets. We evaluate LADDER on five OPT, Llama, and Qwen models across 10–90% sparsity, using SparseGPT as its candidate-generation backend and compar-ing against uniform and adaptive allocation baselines. Results reveal a clear operating-regime trade-off: LADDER is comparable or slightly weaker at benign sparsity but be-comes substantially more robust from 70% onward. This high-sparsity advantage largely persists after posterior distillation across four of five models and translates into improved retention of aggregate zero-shot accuracy. 
+
+1 INTRODUCTION 
+
+The strong performance of large language models (LLMs) has generally been attributed to parameter scaling, data volume, and increasing compute (Kaplan et al., 2020). However, as the costs of training and deploying large-scale systems rise rapidly, some inno-vations become accessible only to well-funded orga-nizations (Cottier et al., 2025). For small-scale sys-tems, inference faces increasingly stringent constraints on memory, bandwidth, and latency, particularly on edge devices (Qu et al., 2025). At the same time, we observe a growing availability of open pre-trained mod-els, including the Qwen series (Yang et al., 2025a), Kimi Moonshot-AI (2026), and DeepSeek DeepSeek-AI (2026). As a result, post-training compression be-comes more attractive as training a model from scratch becomes more restricted. The “train-large-then-compress” approach offers ben-efits beyond deployment convenience. Chang et al. (2021) shows that in high-dimensional settings, train-ing an overparameterized model and then pruning it can outperform training a smaller model from scratch, even when the relevant features are known. This sup-ports overparameterization and pre-trained LLMs as a basis for creating efficient subnetworks. Numerous techniques have been developed for post-training compression, including quantization (Micike-vicius et al., 2022), knowledge distillation (Xu et al., 2024b), low-rank approximation (Denton et al., 2014), and pruning (Cheng et al., 2024). Within the latter approach, unstructured pruning is a well-studied ap-proach that removes individual parameters without modifying the model architecture. Recent advancements in sparse representations and kernels have translated unstructured pruning into practical efficiency. Notably, the MACKO-SpMV ker-nel demonstrates that runtime and storage benefits im-prove as sparsity increases, reporting both memory re-duction and enhanced inference speed for a 50% sparse LLM (Macko and Boˇ za, 2026). Alongside broader de-velopments in GPU kernels (Spector et al., 2024), the findings suggest the real-life feasibility of aggressive unstructured pruning. Early influential approaches for LLMs, such as SparseGPT (Frantar and Alistarh, 2023) and Wanda (Sun et al., 2023), proposed effective methods for one-arXiv:2610.28773v1 [cs.LG] 20 Oct 2026 Building a Nested LADDER for LLM Unstructured Post-Training Pruning 1 2 3 4Dense model  Candidate generation  Parallel candidate evaluation  Commit best candidate        
+
+> Independent candidate evaluations (forward passes on
+> calibration data) All other masks remain unchanged
+> Nested Unstructured Masks
+> Adaptive non-uniform sparsity profile
+> One run, multiple deployment budgets
+> Non-uniform allocation emerges from repeated
+> minimum-damage decisions
+> Keep Prune
+> Importance
+> Metric
+> +
+> Defined
+> Step
+> Fraction
+> (e.g. 20%)
+> ⋮
+> Evaluate
+> One Candidate
+> Per GPU
+> GPU 0
+> GPU 1
+> GPU 3
+> Candidate Scores
+> ⋮
+> Cand. 1 Δ = 0.034
+> Cand. 2 Δ = 0.005
+> Cand. 3 Δ = 0.073
+> Cand. L-1 Δ = 0.001
+> Cand. L Δ = 0.083
+> GPU 2
+> ⋮
+> Pre-trained LLM
+> ⋮
+> Layer 1
+> Layer 2
+> Layer 3
+> Layer L-1
+> Layer L
+> ⋮
+> Cand. 1
+> Cand. 2
+> Cand. 3
+> Cand. L-1
+> Cand. L
+> Cand. 1
+> Cand. 2
+> Cand. 3
+> Cand. L-1
+> Cand. L
+> Repeat until reaching desired global sparsity
+> Per-layer sparsity (%)
+> Layer Id
+> Low Compression (20% Sparse)
+> Balanced (50% Sparse)
+> High Compression (80% Sparse)
+
+Figure 1: Overview of LADDER. At each iteration, each eligible layer proposes a candidate pruning update using a fixed pruning step and a chosen local pruning backend. Each candidate is evaluated on calibration data, and the candidate with the least degradation per removed parameter is committed, producing an exactly nested mask trajectory. In our main experiments, the local backend is SparseGPT. shot pruning via local decisions about which weights to remove within each layer, under a uniform layer-wise sparsity target. Nevertheless, recent research has shown that a non-uniform allocation of pruning across layers can lead to better performance, as redundancy varies with depth (Tang et al., 2026; Gao et al., 2025; Le et al., 2025). For instance, Sun et al. (2026) demonstrated that some deep layers can be com-pletely removed with minimal negative impact, a phe-nomenon they refer to as the Curse of Depth . Despite these advances, existing non-uniform methods deterio-rate sharply under aggressive sparsity, motivating the search for methods that can mitigate the detrimen-tal impact in the high-sparsity regime and push the Pareto frontier. We introduce LADDER, a post-training wrapper that controls non-uniform sparsity allocation by repeatedly selecting the layer whose next pruning step causes the least end-to-end degradation. This process preserves quality as sparsity increases and, as a structural conse-quence, produces nested mask supports across sparsity budgets. We provide an overview in Figure 1. Our main contributions are: (1) We introduce a conser-vative approach to non-uniform allocation that assigns sparsity incrementally according to the marginal end-to-end degradation measured from the current model state. (2) We instantiate this approach as LADDER, a greedy deterministic backend-agnostic protocol whose monotone pruning decisions additionally produce ex-actly nested mask supports across sparsity budgets. (3) Across five OPT, Llama, and Qwen models, we identify an operating-regime trade-off: LADDER becomes sub-stantially more robust under aggressive pruning, with this advantage largely surviving posterior distillation and translating into improved aggregate accuracy re-tention across seven zero-shot downstream tasks. 
+
+2 BACKGROUND 
+
+For each prunable layer ℓ ∈ { 1, . . . , L } in a pre-trained model, let Wℓ ∈ Rdout ,ℓ ×din ,ℓ denote the dense param-eter matrix, Xℓ ∈ Rdin ,ℓ ×n the matrix of calibration activations, Mℓ ∈ { 0, 1}dout ,ℓ ×din ,ℓ a binary pruning mask, and fWℓ the post-pruning parameters after any optional local compensation or reconstruction step. We define the layer-local degradation functional 
+
+Eℓ(Mℓ, fWℓ; Xℓ) = WℓXℓ − (Mℓ ⊙ fWℓ)Xℓ
+
+2F
+
+, (1) as a standardized notation. Although not every method optimizes Eℓ directly, it provides a common no-tation to compare pruning methods through the choice of mask selection ( Mℓ), weight reconstruction ( fWℓ), and sparsity allocation. We distinguish between global pruning, which dis-tributes a total sparsity budget across layers, and local 
+
+pruning, which focuses on pruning a specific layer after assigning it a sparsity level. 
+
+Global Pruning. This approach formulates pruning as a model-level optimization problem. Given a target sparsity, the goal is to identify the subset of parameters whose removal minimizes the expected degradation in model performance, regardless of the layers to which those parameters belong. A commonly used tractable surrogate approximates the end-to-end objective with the sum of layer-local reconstruction errors: min {Mℓ, fWℓ}Lℓ=1 
+
+LX
+
+ℓ=1 
+
+Eℓ(Mℓ, fWℓ; Xℓ)subject to 
+
+LX
+
+ℓ=1 
+
+∥Mℓ∥0 ≤ (1 − S)N, Cuadrado ´ Avila, Navarrete, Tak´ aˇ c, Horv´ ath 
+
+where nℓ = dout ,ℓ × din ,ℓ is the number of parameters in a given layer, N = PLℓ=1 nℓ the total parameters in a model, and S ∈ [0 , 1) the target global sparsity. The global problem becomes one of minimizing the degradation by choosing the optimal vector {sℓ}Lℓ=1 ,where sℓ is the realized local sparsity. 
+
+Local Pruning. On the other hand, this approach starts with a fixed layer-wise sparsity sℓ and asks how to achieve that local budget with minimal damage. We can express this problem as a constrained approxima-tion problem: min Mℓ, fWℓ Eℓ(Mℓ, fWℓ; Xℓ)subject to ∥Mℓ∥0 ≤ (1 − sℓ)nℓ.
+
+Because jointly optimizing the pruning mask and the surviving weight values is intractable, existing ap-proaches typically address only one of these variables. Score-based methods focus on finding the optimal mask M ⋆ℓ by solving arg min Mℓ: ∥Mℓ∥0≤(1 −sℓ)nℓ min fWℓ Eℓ(Mℓ, fWℓ; Xℓ),
+
+using a tractable saliency ranking, without caring about the surviving weight values. A good example are the inflentuial methods OBD (LeCun et al., 1989) and OBS (Hassibi et al., 1993) which use scalable second-order information, an idea that has carried into modern settings (Navarrete et al., 2026). In contrast, reconstruction-based methods focus on finding the op-timal surviving weight values fW ⋆ℓ conditional on a se-lected or progressively constructed mask: arg min fWℓ Eℓ(M ⋆ℓ , fWℓ; Xℓ)subject to supp( fWℓ) ⊆ supp( M ⋆ℓ ).
+
+Rather than focusing on mask quality, this approach aims to reconstruct the surviving parameters to better maintain the activation dynamics before pruning. 
+
+2.1 Pioneering Pruning Methods 
+
+Given a prescribed layer-wise sparsity profile, magni-tude pruning removes weights with the smallest abso-lute values (Hagiwara, 1994; Han et al., 2015), while Wanda incorporates input-activation norms into this ranking (Sun et al., 2023). Both are score-based meth-ods that leave surviving values unchanged. SparseGPT instead uses approximate second-order information to select removals while reconstructing surviving weights to preserve layer outputs (Frantar and Alistarh, 2023). Together, these methods serve as standard reference points for evaluating post-training unstructured prun-ing under prescribed layer-wise sparsity targets. 
+
+2.2 Layer-Wise Pruning Allocation Methods 
+
+Various studies emphasize that compression should be strategically allocated rather than uniformly across layers. OPQ determines layer-wise pruning ratios and quantization levels from pretrained parameter distri-butions (Hu et al., 2021). DPFPS progressively adapts pruning ratios based on layer sensitivity during CNN training (Ruan et al., 2021). For LLMs, OWL ap-plies non-uniform layer sparsities based on activation-outlier ratios (Yin et al., 2024), while DSA optimizes sparsity allocations based on layer statistics (Li et al., 2024). AlphaPruning leverages heavy-tailed spectral metrics (Lu et al., 2024), and Lua-LLM focuses on un-structured sparsity allocation (Lu et al., 2025). LSA employs minimal linear reconstruction error for spar-sity assignment (Yang et al., 2025b), whereas BESA learns blockwise allocations with a differentiable recon-struction objective (Xu et al., 2024a). EvoPress utilizes evolutionary search to optimize dynamic compression profiles, accounting for interdependencies among deci-sions (Sieberling et al., 2025). SparseLLM coordinates pruning to address error propagation across trans-former layers, albeit with homogeneous sparsity as-sumptions (Bai et al., 2024). Lastly, OATS combines sparse and low-rank approximations using a specified compression profile (Zhang and Papyan, 2024). 
+
+2.3 Elastic Model Families 
+
+A complementary line of work studies elastic neural networks, which construct nested subnetworks with shared parameters, enabling a single model to sup-port multiple deployment budgets. Slimmable Net-works introduced runtime-adjustable widths with in-dependent normalization layers (Yu et al., 2018), while Universally Slimmable Networks extended this idea to support arbitrary widths (Yu and Huang, 2019). More recently, these principles have been ap-plied to adaptive-width and depth language models (Hou et al., 2020), heterogeneous federated learning (Horv´ ath et al., 2021), and nested Transformers such as MatFormer (Devvrit et al., 2024) and Flextron (Cai et al., 2024). Moreover, FlexRank demonstrated that nested models can be extracted from pre-trained models using low-rank decompositions (Zaccone et al., 2026). 
+
+2.4 Sparse-Model Refinement and Knowledge Transfer 
+
+Knowledge distillation has become a standard ap-proach for recovering performance after pruning. CAP transfers knowledge from dense models and intermedi-ate pruning states, showing that progressively sparser models can provide effective supervision during itera-Building a Nested LADDER for LLM Unstructured Post-Training Pruning 
+
+Algorithm 1 LADDER single-target allocation 
+
+Require: committed masks {Mℓ} and weights {Wℓ}
+
+Require: calibration data 
+
+Require: target S, local backend, γ, zmin  
+
+> 1:
+
+Set round counter r ← 0 
+
+> 2:
+
+while global sparsity < S do  
+
+> 3:
+
+Evaluate the committed model to obtain m(r)base  
+
+> 4:
+
+for all prunable layers ℓ do  
+
+> 5:
+
+Compute z(r) 
+
+> ℓ
+> 6:
+
+if z(r) 
+
+> ℓ
+
+> 0 then  
+
+> 7:
+
+Build candidate ( gMℓ
+
+> (r)
+
+, fW (r) 
+
+> ℓ
+
+) 
+
+> 8:
+
+Evaluate the candidate and get q(r) 
+
+> ℓ
+> 9:
+
+end if  
+
+> 10:
+
+end for  
+
+> 11:
+
+Choose ℓ⋆ ← arg min ℓ:z(r)  
+
+> ℓ>0
+
+q(r) 
+
+> ℓ
+> 12:
+
+Commit ( Mℓ⋆ , Wℓ⋆ ) ← ( gMℓ⋆
+
+> (r)
+
+, fW (r) 
+
+> ℓ⋆
+
+) 
+
+> 13:
+
+Increment r ← r + 1  
+
+> 14:
+
+end while  
+
+> 15:
+
+return {Mℓ, Wℓ}Lℓ=1 
+
+tive pruning (Xu et al., 2022). AST similarly combines post-pruning retraining with dense-teacher supervision to improve the quality of semi-structured sparse LLMs under limited data and computation budgets (Huang et al., 2025). All of these methods apply distillation for a single sparse endpoint. 
+
+3 METHODOLOGY 
+
+3.1 Problem Setup 
+
+We consider the layer-wise sparsity profile as the vari-able to be optimized. Let 
+
+s = ( s1, . . . , s L) ∈ [0 , 1] L
+
+represent the vector of local sparsities, and S the de-sired global sparsity. We can formulate the allocation problem as follows: min s∈[0 ,1] L Φ( s) s.t. PLℓ=1 nℓsℓ = SN, (2) where Φ( s) is the end-to-end calibration degradation induced by a layer-wise sparsity profile. Here, N counts only the parameters in the prunable linear layers, so 
+
+S is global sparsity over that declared pruning scope rather than over every model parameter. Under a dif-ferentiable relaxation, any interior optimum, where 
+
+s⋆ℓ ∈ (0 , 1) for every layer, must satisfy the following first-order condition:  
+
+> 1
+> nℓ
+> ∂Φ( s⋆)
+> ∂s ℓ
+
+= μ for all prunable layers ℓ, 
+
+for some shared multiplier μ. Thus, the marginal end-to-end damage per additional removed parameter must be equal across eligible layers. Uniform sparsity satisfies this condition only when those per-parameter marginal damages happen to agree at the same local sparsity, which is generally not the case. In practice, the sparsity profile is realized through binary keep-or-remove decisions, and prun-ing effects can interact across layers rather than vary smoothly or independently. Consequently, the appro-priate non-uniform profile generally cannot be deter-mined from fixed, independently estimated layer costs. 
+
+3.2 Layer-Wise Allocation 
+
+We introduce LADDER, which approximates the state-dependent allocation through controlled discrete updates, re-evaluating the available layer candidates after each committed step. As shown in Figure 1, the process begins with the dense model and a per-layer score mask profile initialized to no pruning, repre-sented as {M (0)  
+
+> ℓ
+
+= 1}Lℓ=1 .At round r, every prunable layer proposes a candidate mask gMℓ
+
+> (r)
+
+that removes the z(r) 
+
+> ℓ
+
+least important pa-rameters that survived from the current committed mask M (r) 
+
+> ℓ
+
+. Layers for which z(r) 
+
+> ℓ
+
+= 0 will no longer generate candidates, allowing the candidate pool to diminish in subsequent rounds. The candidate set for round r is defined as follows: 
+
+C(r) =
+
+gMℓ
+
+> (r)
+
+| 1 ≤ ℓ ≤ L, z (r) 
+
+> ℓ
+
+> 0
+
+
+
+.
+
+We evaluate all candidates using the same committed model state and a degradation criterion. The commit-ted mask profile is updated only with the one that shows the least degradation during each round. This repeats until reaching the global target sparsity S.
+
+3.3 Damage-Driven Evaluation Importance Metric. Our method uses existing lo-cal pruning methods as a backend to generate candi-date masks. Magnitude pruning and Wanda provide parameter scores, while SparseGPT additionally re-constructs the retained weights. For state-dependent backends, the required statis-tics are refreshed from the current committed model: Wanda recomputes its activation-dependent scores, and SparseGPT updates its curvature information. The candidate for layer ℓ at round r is the pair (gMℓ
+
+> (r)
+
+, fW (r) 
+
+> ℓ
+
+). For score-only backends, fW (r) 
+
+> ℓ
+
+=
+
+W (r) 
+
+> ℓ
+
+⊙ gMℓ
+
+> (r)
+
+.The candidate’s support must always be a subset of the committed support. Reconstruction-based back-ends may alter surviving values, while masked coordi-nates stay zero. Only the selected candidate remains. Cuadrado ´ Avila, Navarrete, Tak´ aˇ c, Horv´ ath 10 20 30 40 50 60 70 80 90 020 40                      
+
+> OWL
+> 10 20 30 40 50 60 70 80 90
+> DSA
+> 10 20 30 40 50 60 70 80 90
+> LSA
+> Mean relative advantage (%) Sparsity (%)
+> OPT-125M OPT-350M OPT-1.3B Qwen3-0.6B Llama-3.2-1B Cross-model mean
+> 1
+
+Figure 2: Pre-distillation relative loss advantage of LADDER over each baseline. The bars are the arithmetic mean of the relative advantages on WikiText-2, PTB, and C4. Positive values favor LADDER. Defining the number of surviving parameters in layer ℓ
+
+at round r as K(r) 
+
+> ℓ
+
+= ∥M (r) 
+
+> ℓ
+
+∥0, the remaining pruning budget is 
+
+R(r) = ⌊SN ⌋ − PLℓ=1 
+
+
+
+nℓ − K(r)
+
+> ℓ
+
+
+
+,
+
+allowing us to define the candidate step for that layer: 
+
+z(r) 
+
+> ℓ
+
+= min 
+
+
+
+R(r), K (r) 
+
+> ℓ
+
+, max( zmin , ⌈γn ℓ⌉)
+
+
+
+.
+
+Here, γ sets the nominal step as a fraction of the layer size, while zmin prevents excessively small updates. 
+
+Degradation Criterion. We define ∆ (r) 
+
+> ℓ
+
+as the loss in model quality induced by a candidate: ∆(r) 
+
+> ℓ
+
+=
+
+(
+
+m(r,ℓ )cand − m(r)base , for lower-is-better metrics ,m(r)base − m(r,ℓ )cand , for higher-is-better metrics .
+
+Here, m(r)base is the primary metric of the committed model and m(r,ℓ )cand its value after temporarily activating the candidate for layer ℓ.Candidates are ranked by relative degradation per added zero, 
+
+q(r) 
+
+> ℓ
+
+= ∆(r)
+
+> ℓ
+> z(r)
+> ℓ
+
+.
+
+Ties are broken by raw degradation, then by the larger candidate step, and finally by stable layer order. For each round, the selected layer solves 
+
+ℓ⋆ = arg min ℓ: z(r)  
+
+> ℓ>0
+
+q(r) 
+
+> ℓ
+
+.
+
+Algorithm 1 provides a detailed overview of our method. The step fraction γ dictates a straightforward trade-off: smaller steps lead to more precise allocation decisions but require more rounds to conclude. Since candidates are assessed based on the current commit-ted state, each decision incorporates the interactions evaluated up to that point. However, the greedy tra-jectory may overlook options that could become more favorable after certain removals; thus, while exact nest-ing provides structural assurance, it does not guaran-tee optimality. 
+
+3.4 Refinement Nestedness. We process requested sparsities in in-creasing order, initializing each run from the preceding checkpoint and restricting candidates to its support. Consequently, for sa < s b, the resulting masks sat-isfy M (b) 
+
+> ℓ
+
+⊆ M (a) 
+
+> ℓ
+
+. Reconstruction-based backends may still change surviving weight values between check-points. We empirically verify zero support violations. The complete analysis is provided in Appendix A.6. 
+
+Posterior Distillation. Following prior work (Xu et al., 2022; Huang et al., 2025), we initialize one shared student from the pretrained dense model. For each batch, all fixed sparsity masks are evalu-ated against the same dense-teacher outputs, their temperature-scaled KL losses are averaged, and one optimizer step updates the shared parameters. We ap-ply the same procedure to every baseline. 
+
+4 EXPERIMENTS & RESULTS 
+
+Our experiments test whether continuously reassess-ing the least harmful pruning step is more benefi-cial as sparsification becomes more aggressive. We first identify when this approach outperforms state-of-the-art non-uniform methods. Then, we investigate if this advantage carries through the distillation pro-cess to downstream applications. Lastly, we verify that Building a Nested LADDER for LLM Unstructured Post-Training Pruning 50 70 90                      
+
+> C4
+> 2468
+> 50 70 90
+> WikiText-2
+> 50 70 90
+> C4
+> 50 70 90
+> WikiText-2
+> 50 70 90
+> C4
+> 1510
+> 50 70 90
+> WikiText-2
+> Test Loss PPL ( ×10 3)Sparsity (%) △exceeds displayed range
+> Qwen3-0.6B Llama-3.2-1B OPT-1.3B
+> LADDER OWL DSA LSA |Pruned Distilled Dense 1
+
+Figure 3: Language-modeling test loss before (solid) and after (dashed) posterior distillation on C4 and WikiText-2. Dataset panels are paired by model; the shared right axis gives the corresponding perplexity. LADDER produces nested masks and use ablations to study how our allocation interacts with different local pruning backends, and whether continuing from masks produced by other non-uniform methods can control their subsequent loss growth. 
+
+4.1 Experimental Setup Protocol. We evaluate OPT-125M, OPT-350M, OPT-1.3B (Zhang et al., 2022), Qwen3-0.6B, and Llama-3.2-1B. We use the standard language-modeling benchmarks WikiText-2, PTB, and C4 Frantar and Alistarh (2023); Sun et al. (2023), to allow direct com-parison with prior work. Furthermore, we evaluate seven downstream tasks to test diverse zero-shot capabilities. Following the prun-ing protocol from Frantar and Alistarh (2023), we prune all linear layers in the transformer blocks, ex-cluding biases. We evaluate requested global sparsi-ties from 10% to 90% and focus the main comparisons on 50–90%, where sparse kernels have shown practical gains (Macko and Boˇ za, 2026). 
+
+Methods. We compare LADDER against the non-uniform allocation methods OWL, DSA, and LSA. All methods use SparseGPT as a common local pruning backend, keeping local mask selection and weight re-construction fixed to isolate the effect of the global allocation strategy. All methods use the same 128 se-quences of 2,048 tokens sampled from C4 for calibra-tion; for LADDER, perplexity on this calibration sam-ple additionally serves as the candidate-selection crite-rion. Method-specific configurations and hyperparam-eters are provided in Appendix A.1. 
+
+Evaluation. We report corpus-level mean next-token cross-entropy and perplexity on WikiText-2, PTB, and C4, together with zero-shot accuracy on seven down-stream tasks. We additionally evaluate posterior dis-tillation of the resulting sparsity-specific masks using a shared student initialized from the pretrained dense weights. Complete language-modeling and distillation settings are provided in Appendix A.1, while down-stream evaluation details are given in Appendix A.2. 
+
+4.2 Language-Modeling Across Regimes 
+
+Figure 2 shows an operating-regime effect: the non-uniform baselines are often competitive at lower spar-sity, results are mixed around 50–60%, and LAD-DER separates most consistently from 70% onward before distillation. The bars preserve the magnitude of the model-level advantages across all five models, while Table 1 reports the corresponding 70–90% loss and perplexity values for the three models highlighted in the main figures. The complete five-model table is deferred to the Appendix A.4. Figure 3 presents the pre- and post-distillation trajectories on the same scale. The distillation process enhances all methods and significantly reduces their differences, particularly at moderate levels of sparsity, while still preserving the general trend observed at higher levels of spar-sity. However, the post-distillation ordering remains architecture-dependent: on Llama-3.2-1B, OWL and LSA are competitive in some high-sparsity settings. Overall, distillation narrows the differences without eliminating architecture-dependent behavior at high sparsity. 
+
+4.3 Downstream Transfer 
+
+Figure 4 presents the complete matched downstream comparison for Qwen3-0.6B, Llama-3.2-1B, and OPT-1.3B. The shaded regions show the task-level bootstrap standard errors reported by lm-eval .Cuadrado ´ Avila, Navarrete, Tak´ aˇ c, Horv´ ath 
+
+Table 1: Pre-distillation language-modeling quality. Each entry reports test loss followed by perplexity in paren-theses for each dataset. Lower is better, and bold indicates the best method for each model, dataset, and sparsity level. Model Method 70% 80% 90% WT2 PTB C4 WT2 PTB C4 WT2 PTB C4 Qwen3-0.6B LADDER 4.34 (76.4) 5.00 (147.7) 4.40 (81.8) 5.34 (208.7) 6.26 (524.5) 5.29 (197.6) 8.83 (6849.8) 10.26 (28430.2) 7.74 (2292.0)                                                                                                      
+
+> OWL 5.59 (267.0) 6.56 (707.6) 5.60 (271.5) 8.71 (6065.7) 9.66 (15680.2) 7.72 (2251.0) 11.60 (109443.9) 11.24 (75885.4) 12.43 (250240.0) DSA 5.15 (173.0) 5.64 (280.5) 5.17 (176.7) 8.41 (4500.9) 9.67 (15803.2) 7.08 (1185.7) 10.41 (33179.1) 10.79 (48424.5) 10.60 (40099.6) LSA 5.20 (180.6) 5.86 (349.8) 5.13 (169.6) 7.39 (1612.8) 8.64 (5627.5) 6.79 (887.2) 12.06 (173103.3) 12.27 (213937.1) 12.08 (176410.1) Dense: WT2=2.54 (12.7), PTB=3.09 (21.9), C4=2.99 (19.9) Llama-3.2-1B LADDER 4.33 (76.2) 4.86 (128.9) 4.37 (79.3) 5.94 (378.1) 6.76 (866.4) 5.63 (279.0) 8.23 (3740.4) 8.81 (6717.7) 7.52 (1844.5)
+> OWL 4.79 (119.8) 4.99 (146.4) 4.88 (131.6) 6.52 (680.5) 6.67 (789.4) 5.90 (363.3) 8.55 (5183.3) 8.59 (5397.8) 7.74 (2306.7) DSA 5.22 (185.0) 5.37 (214.4) 5.08 (161.2) 6.63 (758.1) 7.03 (1128.5) 6.24 (513.4) 9.50 (13359.7) 9.62 (15138.6) 8.60 (5420.0) LSA 4.80 (121.1) 5.09 (162.7) 4.95 (141.5) 6.13 (458.5) 6.36 (576.8) 6.06 (427.9) 8.95 (7698.7) 9.01 (8177.3) 8.33 (4129.9) Dense: WT2=2.28 (9.8), PTB=2.76 (15.8), C4=2.64 (14.0) OPT-1.3B LADDER 3.82 (45.6) 4.36 (78.3) 3.60 (36.5) 5.40 (221.8) 5.85 (348.3) 4.74 (114.0) 7.71 (2238.1) 7.74 (2290.5) 6.61 (743.8)
+> OWL 4.12 (61.7) 4.33 (75.8) 3.82 (45.7) 6.42 (614.5) 6.21 (495.7) 5.46 (234.5) 8.93 (7586.7) 8.95 (7687.1) 7.77 (2369.7) DSA 4.10 (60.6) 4.29 (72.9) 3.88 (48.3) 7.44 (1695.1) 7.44 (1703.7) 6.22 (500.4) 8.79 (6572.3) 8.67 (5799.0) 7.92 (2752.6) LSA 4.06 (58.2) 4.15 (63.6) 3.80 (44.6) 6.45 (629.9) 6.16 (473.1) 5.62 (275.1) 8.78 (6482.0) 8.42 (4519.0) 7.81 (2461.7) Dense: WT2=2.69 (14.7), PTB=2.80 (16.5), C4=2.78 (16.1)
+
+Across models and tasks, LADDER generally retains accuracy better as sparsity increases, although the strength and ordering of the methods vary across tasks. When accuracy is macro-averaged across the seven tasks, LADDER generally shows lower degra-dation from dense performance in the high-sparsity regime. Appendix A.2 reports the complete task-averaged comparison. Several curves converge near task-specific performance floors, so large language-modeling improvements do not always translate proportionally to downstream ac-curacy. We therefore interpret the results as evidence of more consistent downstream retention across the evaluated models and tasks, rather than dominance in every configuration. 
+
+4.4 Ablations 
+
+Figure 5 shows how LADDER enhances local prun-ing metrics through its allocation process and iden-tifies the most effective backend rule. With γ = 0 .20, LADDER lowers test loss in 41 of 45 backend–dataset– sparsity comparisons. It outperforms the correspond-ing standalone backend across all comparisons at 70%, 80%, and 90% sparsity. Notably, SparseGPT signifi-cantly outperforms other backends, being the reason it was selected for the main experiments. Figure 6 shows that LADDER enhances existing non-uniform allocation when loss sharply increases. Starting from the baselines’ 70% masks, our method achieves lower-loss checkpoints at 80% and 90% com-pared to baseline masks directly generated at those sparsities. This suggests that a cost-effective allocation can initiate moderate sparsity, with LADDER reserved for challenging high-sparsity adjustments. Among the tested allocations, OWL offers the strongest initializa-tion, closely aligning with the dense-to-sparse LAD-DER trajectory at 80% sparsity. However, the stan-dard dense-to-sparse LADDER outperforms at 90%, highlighting how initial allocation decisions can re-strict later performance recovery. We further evaluate the role of the proposed nested trajectory by initializing LADDER for each target sparsity level from the dense checkpoint instead of from the preceding support. We observed that the performance of both the independent and progressive variants is comparable at moderate sparsity. However, at the highest sparsity, the nested trajectory reduces perplexity by 10.6%, 8.6%, and 15.6% on WikiText-2, PTB, and C4, respectively. Importantly, the com-plete nested trajectory from 10% to 90% requires 333 search rounds, approximately the same as the 327 rounds required for a single independently optimized 90% mask, while simultaneously producing all inter-mediate sparsity checkpoints. These results indicate that nesting not only reduces costs relative to an in-dependent search but also provides a better starting point for a high-sparsity search. 
+
+4.5 Scalability and Deployment 
+
+LADDER is a one-time post-training procedure that uses a small calibration set without requiring retrain-ing. Evaluating a single candidate per round makes allocation decisions primarily influenced by depth and tensor granularity. A naive implementation makes the process costlier with wider layers. Nevertheless, effi-cient use of hardware allows parallel candidate evalua-tion. This post-training search is relatively small com-pared to pre-training and can be amortized across fu-ture deployments, although larger model evaluations are still necessary. We prioritize pruning quality over Building a Nested LADDER for LLM Unstructured Post-Training Pruning 0.40.6            
+
+> Qwen3-0.6B Llama-3.2-1B BoolQ OPT-1.3B
+> 0.40.6
+> ARC-E
+> 0.20.30.4
+> ARC-C
+> 0.50.60.7
+> PIQA
+> 0.40.6
+> HellaSwag
+> 0.30.4
+> OBQA
+> 50 70 90 0.50.650 70 90 50 70 90 WinoGrande
+> Accuracy Sparsity (%)
+> LADDER OWL DSA LSA Dense Random
+> 1
+
+Figure 4: Distilled zero-shot accuracy across seven downstream tasks. Rows share task accuracy limits across models. Shaded regions show the task standard errors reported by the evaluation harness. Horizontal references mark dense and random performance. direct measurement of inference throughput. At the moment, we rely on existing sparse-kernel results that translate unstructured pruning into accelerated per-formance (Macko and Boˇ za, 2026). 50 70 90 468
+
+WT2 
+
+50 70 90 
+
+PTB 
+
+12550 70 90 
+
+C4 
+
+Sparsity (%) Test Loss PPL ( ×10 3)Mag. Wanda SparseGPT Base LADDER 1
+
+Figure 5: Backend ablation on OPT-125M. For each local pruning rule, we compare the standalone method with LADDER allocation. OWL DSA LSA 80% sparsity 678125OWL DSA LSA 90% sparsity Mean Test Loss PPL ( ×10 3)Original Continued Standard LADDER 1
+
+Figure 6: Initializer ablation on OPT-125M, averaged over WikiText-2, PTB, and C4. “Continued” applies LADDER from each baseline’s 70% mask. Dashed lines denote standard LADDER. 
+
+5 CONCLUSION 
+
+We introduced LADDER, a post-training allocation process that repeatedly selects the least damaging pruning update as sparsity increases. This controlled trajectory complements different local pruning rules, with SparseGPT as the strongest backend, while pro-ducing nested mask supports across budgets. Across five models and three language-modeling datasets, our method limits quality degradation in the aggressive 70–90% sparsity regime compared with OWL, DSA, and LSA. Distillation narrows these differences, while downstream evaluation shows more consistent accu-racy retention across models and tasks. LADDER can also refine masks initialized by existing allocation methods, although its full dense-to-sparse trajectory remains strongest at 90%, suggesting the importance of earlier allocation decisions. These results position our method as a flexible strategy for constructing ro-bust high-sparsity model families. Cuadrado ´ Avila, Navarrete, Tak´ aˇ c, Horv´ ath 
+
+AI Use Statement 
+
+Generative AI tools were used to assist with software implementation and debugging, edit manuscript prose, and review the manuscript for clarity, internal consis-tency, and submission compliance. They were not used to generate experimental measurements or replace the authors’ scientific judgment. The authors reviewed and verified all AI-assisted code and text and take full re-sponsibility for the methods, experiments, claims, and conclusions. 
+
+REPRODUCIBILITY STATEMENT 
+
+To support reproducibility, an anonymized implemen-tation of LADDER, together with the scripts used to produce all reported results, is available at https:// anonymous.4open.science/r/ladder/. The repository includes the LADDER allocation procedure (Algo-rithm 1), the OWL, DSA, and LSA baselines, the posterior-distillation pipeline, and the evaluation code. 
+
+References 
+
+Guangji Bai, Yijiang Li, Chen Ling, Kibaek Kim, and Liang Zhao. SparseLLM: Towards Global Pruning of Pre-trained Language Models. Advances in Neural Information Processing Systems , 37:46203–46225, December 2024. doi: 10.52202/079017-1468. URL https://proceedings.neurips.cc/paper files/paper/ 2024/hash/522134ee1c52c7a2b929bc87cfe1781c-Abstract-Conference.html. Ruisi Cai, Saurav Muralidharan, Greg Heinrich, Hongxu Yin, Zhangyang Wang, Jan Kautz, and Pavlo Molchanov. FLEXTRON: many-in-one flex-ible large language model. In Proceedings of the 41st International Conference on Machine Learning ,volume 235 of ICML’24 , pages 5298–5311, Vienna, Austria, July 2024. JMLR.org. Xiangyu Chang, Yingcong Li, Samet Oymak, and Christos Thrampoulidis. Provable Benefits of Over-parameterization in Model Compression: From Dou-ble Descent to Pruning Neural Networks. Proceed-ings of the AAAI Conference on Artificial Intel-ligence , 35(8):6974–6983, May 2021. ISSN 2374-3468. doi: 10.1609/aaai.v35i8.16859. URL https:// ojs.aaai.org/index.php/AAAI/article/view/16859. Hongrong Cheng, Miao Zhang, and Javen Qinfeng Shi. A Survey on Deep Neural Network Pruning-Taxonomy, Comparison, Analysis, and Recommen-dations, August 2024. URL http://arxiv.org/abs/ 2308.06767. arXiv:2308.06767 [cs]. Ben Cottier, Robi Rahman, Loredana Fattorini, Nestor Maslej, Tamay Besiroglu, and David Owen. The rising costs of training frontier AI models, February 2025. URL http://arxiv.org/abs/2405. 21015. arXiv:2405.21015 [cs]. DeepSeek-AI. DeepSeek-V4: Towards Highly Ef-ficient Million-Token Context Intelligence, April 2026. URL http://arxiv.org/abs/2606.19348. arXiv:2606.19348 [cs.CL]. Emily Denton, Wojciech Zaremba, Joan Bruna, Yann LeCun, and Rob Fergus. Exploiting linear structure within convolutional networks for efficient evalua-tion. In Proceedings of the 28th International Con-ference on Neural Information Processing Systems -Volume 1 , volume 1 of NIPS’14 , pages 1269–1277, Cambridge, MA, USA, December 2014. MIT Press. Fnu Devvrit, Sneha Kudugunta, Aditya Kusupati, Tim Dettmers, Kaifeng Chen, Inderjit S. Dhillon, Yulia Tsvetkov, Hannaneh Hajishirzi, Sham M. Kakade, Ali Farhadi, and Prateek Jain. MatFormer: Nested Transformer for Elastic Inference. In The Thirty-eighth Annual Conference on Neural Infor-mation Processing Systems , November 2024. URL https://openreview.net/forum?id=fYa6ezMxD5. Elias Frantar and Dan Alistarh. SparseGPT: Mas-sive Language Models Can be Accurately Pruned in One-Shot. In Proceedings of the 40th Inter-national Conference on Machine Learning , pages 10323–10337. PMLR, July 2023. URL https:// proceedings.mlr.press/v202/frantar23a.html. Chang Gao, Jiaqi Wang, and Liping Jing. Maximum redundancy pruning for network compression. Com-puter Vision and Image Understanding , 259:104404, September 2025. ISSN 1077-3142. doi: 10.1016/j. cviu.2025.104404. URL https://www.sciencedirect. com/science/article/pii/S1077314225001274. Masafumi Hagiwara. A simple and effective method for removal of hidden units and weights. Neu-rocomputing , 6(2):207–218, April 1994. ISSN 0925-2312. doi: 10.1016/0925-2312(94)90055-8. URL https://www.sciencedirect.com/science/ article/pii/0925231294900558. Song Han, Jeff Pool, John Tran, and William J. Dally. Learning both weights and connections for efficient neural networks. In Proceedings of the 29th Interna-tional Conference on Neural Information Processing Systems - Volume 1 , volume 1 of NIPS’15 , pages 1135–1143, Cambridge, MA, USA, December 2015. MIT Press. B. Hassibi, D.G. Stork, and G.J. Wolff. Optimal Brain Surgeon and general network pruning. In 
+
+IEEE International Conference on Neural Networks ,pages 293–299 vol.1, March 1993. doi: 10.1109/ ICNN.1993.298572. URL https://ieeexplore.ieee. org/document/298572. Building a Nested LADDER for LLM Unstructured Post-Training Pruning 
+
+Samuel Horv´ ath, Stefanos Laskaridis, Mario Almeida, Ilias Leontiadis, Stylianos Venieris, and Nicholas Lane. FjORD: Fair and Accurate Federated Learning under heterogeneous targets with Ordered Dropout. In Advances in Neural Information Processing Systems , volume 34, pages 12876– 12889. Curran Associates, Inc., 2021. URL https://proceedings.neurips.cc/paper/2021/hash/ 6aed000af86a084f9cb0264161e29dd3-Abstract.html. Lu Hou, Zhiqi Huang, Lifeng Shang, Xin Jiang, Xiao Chen, and Qun Liu. DynaBERT: Dy-namic BERT with Adaptive Width and Depth. In Advances in Neural Information Processing Systems , volume 33, pages 9782– 9793. Curran Associates, Inc., 2020. URL https://proceedings.neurips.cc/paper/2020/hash/ 6f5216f8d89b086c18298e043bfe48ed-Abstract.html. Peng Hu, Xi Peng, Hongyuan Zhu, Mohamed M. Sabry Aly, and Jie Lin. OPQ: Compressing Deep Neu-ral Networks with One-shot Pruning-Quantization. 
+
+Proceedings of the AAAI Conference on Artificial Intelligence , 35(9):7780–7788, May 2021. ISSN 2374-3468. doi: 10.1609/aaai.v35i9.16950. URL https:// ojs.aaai.org/index.php/AAAI/article/view/16950. Weiyu Huang, Yuezhou Hu, Guohao Jian, Jun Zhu, and Jianfei Chen. Pruning Large Language Mod-els with Semi-Structural Adaptive Sparse Train-ing. Proceedings of the AAAI Conference on Artificial Intelligence , 39(23):24167–24175, April 2025. ISSN 2374-3468. doi: 10.1609/aaai.v39i23. 34592. URL https://ojs.aaai.org/index.php/AAAI/ article/view/34592. Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B. Brown, Benjamin Chess, Rewon Child, Scott Gray, Alec Radford, Jeffrey Wu, and Dario Amodei. Scaling Laws for Neural Language Models, Jan-uary 2020. URL http://arxiv.org/abs/2001.08361. arXiv:2001.08361 [cs.LG]. Khang Nguyen Le, Ryo Sato, Dai Nakashima, Takeshi Suzuki, and Minh Le Nguyen. OptiPrune: Effec-tive Pruning Approach for Every Target Sparsity. In Owen Rambow, Leo Wanner, Marianna Apidianaki, Hend Al-Khalifa, Barbara Di Eugenio, and Steven Schockaert, editors, Proceedings of the 31st Inter-national Conference on Computational Linguistics ,pages 3600–3612, Abu Dhabi, UAE, January 2025. Association for Computational Linguistics. URL https://aclanthology.org/2025.coling-main.243/. Yann LeCun, John Denker, and Sara Solla. Optimal Brain Damage. In Advances in Neural Information Processing Systems , volume 2. Morgan-Kaufmann, 1989. URL https://proceedings.neurips.cc/paper/ 1989/hash/6c9882bbac1c7093bd25041881277658-Abstract.html. Lujun Li, Peijie Dong, Zhenheng Tang, Xiang Liu, Qiang Wang, Wenhan Luo, Wei Xue, Qifeng Liu, Xiaowen Chu, and Yike Guo. Discover-ing Sparsity Allocation for Layer-wise Pruning of Large Language Models. In Advances in Neural Information Processing Systems , vol-ume 37, pages 141292–141317. Curran Associates, Inc., 2024. doi: 10.52202/079017-4487. URL https://proceedings.neurips.cc/paper files/paper/ 2024/hash/ff997469ac66cf893c4183efeb22212a-Abstract-Conference.html. Haiquan Lu, Yefan Zhou, Shiwei Liu, Zhangyang Wang, Michael W. Mahoney, and Yaoqing Yang. AlphaPruning: Using Heavy-Tailed Self Regular-ization Theory for Improved Layer-wise Pruning of Large Language Models. In Advances in Neural Information Processing Systems , vol-ume 37, pages 9117–9152. Curran Associates, Inc., 2024. doi: 10.52202/079017-0289. URL https://proceedings.neurips.cc/paper files/paper/ 2024/hash/10fc83943b4540a9524af6fc67a23fef-Abstract-Conference.html. Mingge Lu, Jingwei Sun, Junqing Lin, Zechun Zhou, and Guangzhong Sun. Lua-LLM: Learning Unstructured-Sparsity Allocation for Large Lan-guage Models. In Advances in Neural Information Processing Systems , volume 38, Main Confer-ence, pages 123455–123481. Curran Associates, Inc., 2025. doi: 10.52202/085713-4115. URL https://proceedings.neurips.cc/paper files/paper/ 2025/hash/b2c39fe6ce838440faf03a0f780e7a63-Abstract-Conference.html. Vladim´ ır Macko and Vladim´ ır Boˇ za. MACKO: Sparse matrix-vector multiplication for low sparsity. In Forty-third International Confer-ence on Machine Learning , June 2026. URL https://openreview.net/forum?id=ah9xkFXCV6& referrer=%5Bthe%20profile%20of%20Vladim% C3%ADr%20Macko%5D(%2Fprofile%3Fid% 3D ∼Vladim%C3%ADr Macko1). Paulius Micikevicius, Dusan Stosic, Neil Burgess, Mar-ius Cornea, Pradeep Dubey, Richard Grisenthwaite, Sangwon Ha, Alexander Heinecke, Patrick Judd, John Kamalu, Naveen Mellempudi, Stuart Ober-man, Mohammad Shoeybi, Michael Siu, and Hao Wu. FP8 Formats for Deep Learning, September 2022. URL https://arxiv.org/abs/2209.05433v2. Moonshot-AI. moonshotai/Kimi-K2.6 · Hugging Face, June 2026. URL https://huggingface.co/ moonshotai/Kimi-K2.6. Ivo Gollini Navarrete, Nicolas Mauricio Cuadrado, Martin Tak´ aˇ c, and Samuel Horv´ ath. What Scal-able Second-Order Information Knows for Prun-ing at Initialization. In The Third Conference Cuadrado ´ Avila, Navarrete, Tak´ aˇ c, Horv´ ath 
+
+on Parsimony and Learning (Proceedings Track) ,March 2026. URL https://openreview.net/forum? id=1EWyO9KJWq#discussion. Guanqiao Qu, Qiyuan Chen, Wei Wei, Zheng Lin, Xianhao Chen, and Kaibin Huang. Mobile Edge Intelligence for Large Language Models: A Con-temporary Survey. IEEE Communications Sur-veys & Tutorials , 27(6):3820–3860, December 2025. ISSN 1553-877X. doi: 10.1109/COMST.2025. 3527641. URL https://ieeexplore.ieee.org/abstract/ document/10835069. Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang, Michael Matena, Yanqi Zhou, Wei Li, and Peter J. Liu. Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer, September 2023. URL http://arxiv. org/abs/1910.10683. arXiv:1910.10683 [cs.LG]. Xiaofeng Ruan, Yufan Liu, Bing Li, Chunfeng Yuan, and Weiming Hu. DPFPS: Dynamic and Progres-sive Filter Pruning for Compressing Convolutional Neural Networks from Scratch. Proceedings of the AAAI Conference on Artificial Intelligence , 35(3): 2495–2503, May 2021. ISSN 2374-3468. doi: 10. 1609/aaai.v35i3.16351. URL https://ojs.aaai.org/ index.php/AAAI/article/view/16351. Oliver Sieberling, Denis Kuznedelev, Eldar Kur-tic, and Dan Alistarh. EvoPress: Accurate Dy-namic Model Compression via Evolutionary Search, July 2025. URL http://arxiv.org/abs/2410.14649. arXiv:2410.14649 [cs.LG]. Benjamin Frederick Spector, Simran Arora, Aaryan Singhal, Arjun Parthasarathy, Daniel Y. Fu, and Christopher Re. ThunderKittens: Simple, Fast, and Adorable Kernels. In The Thirteenth Inter-national Conference on Learning Representations ,October 2024. URL https://openreview.net/forum? id=0fJfVOSUra. Mingjie Sun, Zhuang Liu, Anna Bair, and J. Zico Kolter. A Simple and Effective Pruning Approach for Large Language Models. In The Twelfth Inter-national Conference on Learning Representations ,October 2023. URL https://openreview.net/forum? id=PxoFut3dWW. Wenfang Sun, Xinyuan Song, Pengxiang Li, Lu Yin, Yefeng Zheng, and Shiwei Liu. The Curse of Depth in Large Language Models, February 2026. URL http://arxiv.org/abs/2502.05795. arXiv:2502.05795 [cs]. Shengkun Tang, Oliver Sieberling, Eldar Kurtic, Zhiqiang Shen, and Dan Alistarh. DarwinLM: Evo-lutionary Structured Pruning of Large Language Models, July 2026. URL http://arxiv.org/abs/2502. 07780. arXiv:2502.07780 [cs.LG]. Peng Xu, Wenqi Shao, Mengzhao Chen, Shitao Tang, Kaipeng Zhang, Peng Gao, Fengwei An, Yu Qiao, and Ping Luo. BESA: Pruning Large Language Models with Blockwise Parameter-Efficient Sparsity Allocation, April 2024a. URL http://arxiv.org/abs/ 2402.16880. arXiv:2402.16880 [cs.LG]. Runxin Xu, Fuli Luo, Chengyu Wang, Baobao Chang, Jun Huang, Songfang Huang, and Fei Huang. From Dense to Sparse: Contrastive Pruning for Better Pre-trained Language Model Compression. Proceed-ings of the AAAI Conference on Artificial Intelli-gence , 36(10):11547–11555, June 2022. ISSN 2374-3468. doi: 10.1609/aaai.v36i10.21408. URL https:// ojs.aaai.org/index.php/AAAI/article/view/21408. Xiaohan Xu, Ming Li, Chongyang Tao, Tao Shen, Reynold Cheng, Jinyang Li, Can Xu, Dacheng Tao, and Tianyi Zhou. A Survey on Knowl-edge Distillation of Large Language Models, Octo-ber 2024b. URL http://arxiv.org/abs/2402.13116. arXiv:2402.13116 [cs]. An Yang, Anfeng Li, Baosong Yang, Chengen Huang, , et al. Qwen3 Technical Report, May 2025a. URL http://arxiv.org/abs/2505.09388. arXiv:2505.09388 [cs.CL]. Zhiguo Yang, Changjian Deng, Qinke Chen, Zijing Zhou, and Jian Cheng. LSA: Layer-wise Spar-sity Allocation for Large Language Model Prun-ing Based on Minimal Linear Reconstruction Er-ror. In The Fourteenth International Conference on Learning Representations . The Fourteenth Interna-tional Conference on Learning Representations, Oc-tober 2025b. URL https://openreview.net/forum? id=xq3lza5IjN. Lu Yin, You Wu, Zhenyu Zhang, Cheng-Yu Hsieh, Yaqing Wang, Yiling Jia, Gen Li, Ajay Jaiswal, Mykola Pechenizkiy, Yi Liang, Michael Bendersky, Zhangyang Wang, and Shiwei Liu. Outlier weighed layerwise sparsity (OWL): a missing secret sauce for pruning LLMs to high sparsity. In Proceedings of the 41st International Conference on Machine Learn-ing , volume 235 of ICML’24 , pages 57101–57115, Vienna, Austria, July 2024. JMLR.org. Jiahui Yu and Thomas Huang. Universally Slimmable Networks and Improved Training Techniques. In 
+
+2019 IEEE/CVF International Conference on Com-puter Vision (ICCV) , pages 1803–1811. IEEE Computer Society, October 2019. ISBN 978-1-7281-4803-8. doi: 10.1109/ICCV.2019.00189. URL https://www.computer.org/csdl/proceedings-article/iccv/2019/480300b803/1hVlpaqRL7q. Jiahui Yu, Linjie Yang, Ning Xu, Jianchao Yang, and Thomas Huang. Slimmable Neural Networks. In 
+
+International Conference on Learning Representa-Building a Nested LADDER for LLM Unstructured Post-Training Pruning 
+
+tions , September 2018. URL https://openreview. net/forum?id=H1gMCsAqY7. Riccardo Zaccone, Stefanos Laskaridis, Marco Ciccone, and Samuel Horv´ ath. FlexRank: Nested Low-Rank Knowledge Decomposition for Adaptive Model De-ployment. In Forty-third International Conference on Machine Learning , June 2026. URL https:// openreview.net/forum?id=DK0kvnNelx. Stephen Zhang and Vardan Papyan. OATS: Outlier-Aware Pruning Through Sparse and Low Rank Decomposition. In The Thirteenth International Conference on Learning Representations , Octo-ber 2024. URL https://openreview.net/forum?id= DLDuVbxORA. Susan Zhang, Stephen Roller, Naman Goyal, Mikel Artetxe, Moya Chen, Shuohui Chen, Christopher Dewan, Mona Diab, Xian Li, Xi Victoria Lin, Todor Mihaylov, Myle Ott, Sam Shleifer, Kurt Shus-ter, Daniel Simig, Punit Singh Koura, Anjali Srid-har, Tianlu Wang, and Luke Zettlemoyer. OPT: Open Pre-trained Transformer Language Models, June 2022. URL http://arxiv.org/abs/2205.01068. arXiv:2205.01068 [cs.CL]. Table 2: Pruning, evaluation, and ablation configurations.                                
+
+> Shared protocol
+> Models Pretrained OPT-125M, OPT-350M, OPT-1.3B, Qwen3-0.6B, and Llama-3.2-1B; no additional training before pruning. Pruning Unstructured transformer-block Linear weights; biases and output heads excluded; requested sparsity from 10% to 90% in 10-point increments. Calibration and local pruning 128 C4 training sequences of 2,048 tokens, batch size 1, seed 0; SparseGPT block size 128 and mean-diagonal Hessian damping 0.01. Evaluation WikiText-2 and PTB test splits and C4 validation, using contiguous 2,048-token windows; seven zero-shot lm-eval tasks with batch size 1. Posterior distillation Dense teacher; logit KL; T= 2; AdamW with learning rate 10 −4; gradient clipping 1; five epochs over the nine fixed masks.
+> Method LADDER OWL DSA LSA
+> Configuration γ= 0 .20 for OPT/Qwen and 0 .10 for Llama; zmin = 1.
+> M= 10 and λ= 0 .08. Expression transferred from the original search; λ= 0 .08. LSAC; λ= 0 .08; 50% probe sparsity; profile block size 128. Score and granular-ity Calibration perplexity for tensor-level pruning choices. Layer-wise outlier distribution. Transferred layer-wise analytic function. Projection-level reconstruction error. DSA expression: W:(ABSLOG)-(VAR)-(ATAN,ASIN)-(7) .
+> Reported ablations
+> Local pruning rule OPT-125M with γ= 0 .20; Magnitude, Wanda, and SparseGPT are compared alone and within LADDER. Initialization OPT-125M OWL, DSA, and LSA masks imported at 70% sparsity and continued with LADDER to 80% and 90%; standard dense-to-sparse LADDER is the reference.
+
+A SUPPLEMENTARY MATERIAL 
+
+This appendix provides the experimental settings and the results omitted from the main paper. It first describes pruning, evaluation, and distillation, then reports the complete language-modeling and downstream results, followed by the ablations and mask analyses. 
+
+A.1 Reproducibility and Exact Configurations Pruning and allocation configurations. Following Frantar and Alistarh (2023), we prune all linear layers within the transformer blocks while excluding biases. OWL, DSA, LSA, and LADDER use SparseGPT as the common local pruning backend, with 128-column blocks and mean-diagonal Hessian damping of 0 .01. Local mask selection and weight reconstruction are therefore fixed across these methods, isolating the effect of the global sparsity allocation. For LADDER, we set the minimum threshold to zmin = 1 and use a step fraction of γ = 0 .20 for OPT and Qwen3-0.6B and γ = 0 .10 for Llama-3.2-1B. For OWL, we set M = 10, such that its layer-wise outlier distribution counts scores exceeding ten times the corresponding block mean, and use an allocation spread of λ = 0 .08. For DSA, we use the allocation expression W:(ABSLOG)-(VAR)-(ATAN, ASIN)-(7) , obtained through the original evolutionary search and transferred unchanged to the evaluated models, with λ = 0 .08. For LSA, we use the LSAC variant with λ = 0 .08 and construct projection-level reconstruction-error profiles at 50% probe sparsity. Table 2 summarizes the settings shared across the main comparisons, the method-specific configurations, and the configurations used in the ablations. 
+
+Calibration dataset. All allocation methods use the same 128 sequences of 2,048 tokens sampled from the C4 training set (Raffel et al., 2023). These samples are used only to estimate the activation- or curvature-dependent quantities required by the pruning rules. For LADDER, corpus perplexity on this sample additionally serves as the candidate-selection criterion. The calibration samples are never used to compute the reported language-modeling loss. Magnitude and Wanda appear only in the local-pruning-rule ablation. Building a Nested LADDER for LLM Unstructured Post-Training Pruning 
+
+We pin the first English C4 training shard and load its first 2,048 nonempty documents. Each document is tokenized with the tokenizer of the evaluated model, followed by the configured space separator, to form candidate 2,048-token windows. Windows that cross document boundaries are ineligible for calibration. With seed 0, the sampler repeatedly selects an eligible document and then one of its eligible windows, both with replacement, until it collects 128 examples. We use batch size 1 and record the sampled document indices and window offsets. This reproduces the random-document, random-window structure of the reference Wanda and SparseGPT loaders while fixing the exact calibration sample. 
+
+Language-modeling evaluation. We evaluate corpus-level mean next-token cross-entropy L and the corre-sponding perplexity exp( L) on WikiText-2, PTB, and C4. Evaluation measures next-token loss on deterministic held-out token streams. For each split, raw documents are joined using the dataset-specific separator, tokenized once, and divided into consecutive, nonoverlapping 2,048-token windows; the incomplete tail is discarded. Thus, every pruning method is scored on the same target tokens: 
+
+• WikiText-2 (WT2): the Salesforce/wikitext dataset with configuration wikitext-2-raw-v1 ; we score the official test split. 
+
+• Penn Treebank (PTB): the public Zaremba text files; we score the official test split. 
+
+• C4: the English allenai/c4 corpus. We pin the first validation shard, join its first 1,100 documents, and retain the first 256 complete windows. Calibration uses the separate training shard described above. 
+
+Posterior-distillation objective. Posterior distillation fixes the nine masks corresponding to sparsities from 10% to 90% and jointly optimizes a single shared student state. The student is initialized from the pretrained dense weights; method-specific SparseGPT reconstructed weights are not used for initialization. Let S = {s1, . . . , s J } denote the participating sparsity budgets and let p(T ) 
+
+> t
+
+and p(T ) 
+
+> s
+
+be the dense-teacher and masked-student distributions at temperature T . The shared student minimizes 
+
+LKD = T 2
+
+> |S|
+
+P 
+
+> s∈S
+
+DKL 
+
+
+
+p(T ) 
+
+> t
+
+(· | x) ∥ p(T ) 
+
+> s
+
+(· | x)
+
+
+
+.
+
+Every participating mask is evaluated against the same teacher outputs, the mask-specific losses are averaged, and one optimizer step updates the shared parameters. We train for five epochs using AdamW with a learning rate of 10 −4 and temperature T = 2. 
+
+Implementation details. All pruning and distillation runs use seed 0 with deterministic algorithms, so each reported model–method pair represents one run rather than an average over independent runs. Distillation reuses the 128 calibration sequences; for each batch, equally weighted gradients are accumulated over the nine fixed masks before one AdamW update, giving 128 updates per epoch and 640 updates in total. We use gradient checkpointing. 
+
+Computing infrastructure. Experiments were run on compute nodes equipped with four NVIDIA A100-SXM4 GPUs with 40 GB of memory each, using NVIDIA driver 570.195.03 and CUDA 12.8. 
+
+A.2 Downstream Summary 
+
+We use lm-eval 0.4.12 with zero demonstrations and batch size 1 on seven tasks: 
+
+• ARC-Easy and ARC-Challenge: grade-school multiple-choice science questions in easier and reasoning-intensive subsets. 
+
+• BoolQ: binary reading comprehension that asks whether a passage supports a question. 
+
+• HellaSwag: commonsense completion by selecting the most plausible continuation. 
+
+• OpenBookQA: multiple-choice elementary science questions based on a small collection of core facts. 
+
+• PIQA: physical commonsense reasoning that selects the more plausible solution to a practical goal. Cuadrado ´ Avila, Navarrete, Tak´ aˇ c, Horv´ ath 50 60 70 80 90 0.40.5Macro accuracy              
+
+> Qwen3 0.6B
+> 50 60 70 80 90
+> Llama-3.2-1B
+> 50 60 70 80 90
+> OPT-1.3B
+> Sparsity (%) LADDER OWL DSA LSA Dense Random 1
+
+Figure 7: Mean post-distillation zero-shot accuracy over seven tasks for Qwen3-0.6B, Llama-3.2-1B, and OPT-1.3B. Curves compare methods from 50% to 90% sparsity; solid horizontal lines mark dense accuracy, while the dotted line marks the seven-task mean random accuracy (35.7%). Shading denotes propagated lm-eval 
+
+uncertainty. 
+
+• WinoGrande: commonsense coreference resolution in ambiguity-controlled sentence pairs. BoolQ uses task version 1; the other tasks use version 0. We report normalized accuracy for the multiple-choice tasks and ordinary accuracy for BoolQ and WinoGrande. For aggregate reporting, we take the unweighted mean of the seven task accuracies and combine their task-level bootstrap standard errors. Repeated evaluation seeds for the same model state produced identical accuracies. The uncertainty shown in the figures is therefore the task-level bootstrap standard error returned by lm-eval , not variation across independently pruned models. In Figure 7, LADDER has the highest mean accuracy in seven of the nine model–sparsity comparisons at 70–90%. OWL is highest for Llama-3.2-1B at 80%, and LSA is highest for that model at 90%. 
+
+A.3 Ablations Local pruning rule and external initialization. Table 3 compares each local pruning rule used alone and within LADDER. At 70–90% sparsity, LADDER lowers test loss in all 27 matched rule–dataset comparisons, and SparseGPT gives the lowest LADDER loss in all nine dataset–sparsity comparisons. Table 4 starts LADDER from the 70% masks produced by OWL, DSA, or LSA. Continuing with LADDER lowers loss relative to extending the original method in all 18 comparisons. OWL gives the strongest external starting point, while the dense-to-sparse LADDER trajectory gives the lowest loss on every dataset at 90%. 
+
+A.4 Complete Language-Modeling Results 
+
+Across the 180 model, dataset, method, and sparsity combinations at 70–90%, posterior distillation reduces test loss in 178 cases. The amount recovered varies substantially, and the two exceptions are both 90% sparse OPT-350M LADDER models. Table 5 reports the pre-distillation results for all five evaluated models. Table 6 reports the corresponding results after posterior distillation. 
+
+A.5 Task-Level Downstream Results 
+
+Figures 9–13 show the task-level degradation from each model’s dense checkpoint before and after distillation. Smaller values indicate better accuracy retention. These paired views preserve variation across tasks that is hidden by the macro average. The leading method Building a Nested LADDER for LLM Unstructured Post-Training Pruning 
+
+Table 3: Each local pruning rule used alone (Base) and within LADDER. Values are test loss; bold marks the better matched result.                                                                                                        
+
+> Sparsity Local rule Base LADDER WT2 PTB C4 WT2 PTB C4 50% Mag. 5.26 5.38 4.94 4.18 4.22 3.97
+> SparseGPT 3.65 3.89 3.53 3.59 3.87 3.50
+> Wanda 3.69 3.92 3.58 3.78 3.95 3.62 60% Mag. 6.82 6.74 6.38 4.87 4.86 4.50
+> SparseGPT 4.21 4.38 3.96 4.02 4.33 3.79
+> Wanda 4.36 4.45 4.14 4.31 4.51 4.07
+> 70% Mag. 8.26 7.84 7.75 5.85 5.77 5.56
+> SparseGPT 5.58 5.55 5.10 4.79 5.22 4.48
+> Wanda 5.93 5.78 5.56 5.22 5.45 4.79
+> 80% Mag. 8.47 7.95 8.07 6.95 7.07 6.43
+> SparseGPT 7.70 7.49 6.89 6.14 6.57 5.66
+> Wanda 7.55 7.46 6.96 6.68 7.12 6.18
+> 90% Mag. 8.79 8.45 8.40 8.05 7.81 7.58
+> SparseGPT 8.56 8.30 7.78 7.43 7.40 6.85
+> Wanda 8.40 8.06 8.02 7.97 7.81 7.44
+> Dense: WT2=3.32, PTB=3.41, C4=3.28.
+
+Table 4: Dataset-level test loss for direct baselines, LADDER continuation from their 70% masks, and the standard dense-to-sparse LADDER trajectory.                                                        
+
+> Configuration 80% 90% WT2 PTB C4 WT2 PTB C4 Standard LADDER 6.14 6.57 5.66 7.43 7.40 6.85
+> OWL (direct) 7.48 7.30 6.64 8.68 8.31 8.06 OWL →LADDER 6.33 6.41 5.65 7.57 7.52 6.91 DSA (direct) 7.70 7.49 6.89 8.56 8.30 7.78 DSA →LADDER 6.60 6.88 5.89 7.86 7.90 7.25 LSA (direct) 8.24 7.92 7.47 8.92 8.62 8.47 LSA →LADDER 6.53 6.75 5.74 7.91 7.87 7.23 Dense: WT2=3.32, PTB=3.41, C4=3.28.
+
+changes across tasks and sparsity levels, with ties and occasional reversals even when the language-modeling losses are clearly separated. The downstream evidence therefore supports a claim of stronger aggregate accuracy retention at high sparsity, rather than superiority on every task or configuration. 
+
+A.6 Allocation Patterns and Mask Nestedness Support nestedness. Let M (a) 
+
+> ℓ
+
+and M (b) 
+
+> ℓ
+
+denote the boolean keep masks for the same tensor at sparsity levels sa < s b. The higher-sparsity mask is nested inside the lower-sparsity mask when M (b) 
+
+> ℓ
+
+⊆ M (a) 
+
+> ℓ
+
+⇐⇒ 
+
+M (b) 
+
+> ℓ
+
+∧ ¬ M (a) 
+
+> ℓ
+
+= 0. The corresponding model-level violation count is V (a, b ) = PLℓ=1 M (b) 
+
+> ℓ
+
+∧ ¬ M (a) 
+
+> ℓ0
+
+, with perfect nestedness if and only if V (a, b ) = 0. Across the four measured transitions from 50% to 90%, LADDER reintroduces zero weights for every model in Figure 14. OWL, DSA, and LSA generate each target independently and reintroduce some weights in every measured transition. This comparison verifies mask nestedness; it does not isolate its effect on language-modeling performance. SparseGPT can still update the values of surviving weights after an accepted step, although a pruned weight is never restored. Figure 15 shows that the selected layer sparsities change with both the model and the global sparsity target. We therefore do not interpret the plots as a fixed ranking of transformer layers. Cuadrado ´ Avila, Navarrete, Tak´ aˇ c, Horv´ ath 
+
+Table 5: Complete pre-distillation language-modeling results at 70–90% sparsity. Entries report test loss followed by perplexity in parentheses; lower is better, and bold marks the best method for each configuration. Model Method 70% 80% 90% WT2 PTB C4 WT2 PTB C4 WT2 PTB C4 OPT-125M LADDER 4.79 (120.6) 5.22 (184.6) 4.48 (88.5) 6.14 (465.4) 6.57 (712.8) 5.66 (286.6) 7.43 (1693.2) 7.40 (1629.2) 6.85 (947.3) 
+
+OWL 5.54 (254.3) 5.49 (243.3) 4.98 (145.2) 7.48 (1772.1) 7.30 (1473.4) 6.64 (764.1) 8.68 (5862.5) 8.31 (4082.0) 8.06 (3179.8) DSA 5.58 (264.2) 5.55 (256.5) 5.10 (164.4) 7.70 (2205.9) 7.49 (1793.7) 6.89 (983.1) 8.56 (5236.4) 8.30 (4029.8) 7.78 (2403.5) LSA 6.37 (581.6) 6.58 (718.1) 5.58 (264.7) 8.24 (3798.7) 7.92 (2739.3) 7.47 (1760.6) 8.92 (7447.4) 8.62 (5535.1) 8.47 (4765.3) Dense: WT2=3.32 (27.7), PTB=3.41 (30.2), C4=3.28 (26.6) OPT-350M LADDER 4.61 (100.2) 4.51 (91.0) 4.27 (71.7) 5.63 (279.8) 5.27 (194.7) 5.21 (182.7) 7.20 (1340.0) 6.57 (716.8) 6.48 (651.7) 
+
+OWL 5.08 (161.4) 5.09 (162.2) 4.70 (109.9) 6.96 (1057.2) 6.79 (885.5) 6.08 (437.2) 8.58 (5330.8) 8.19 (3600.1) 7.63 (2062.6) DSA 5.00 (148.2) 4.99 (146.2) 4.68 (107.5) 7.07 (1181.0) 6.94 (1029.6) 6.12 (456.6) 8.91 (7384.5) 8.40 (4439.4) 8.01 (3023.1) LSA 5.11 (166.3) 4.97 (143.5) 4.79 (120.3) 7.16 (1289.6) 6.87 (961.3) 6.39 (593.4) 9.22 (10084.5) 8.57 (5257.5) 8.49 (4866.4) Dense: WT2=3.09 (22.0), PTB=3.20 (24.5), C4=3.12 (22.6) OPT-1.3B LADDER 3.82 (45.6) 4.36 (78.3) 3.60 (36.5) 5.40 (221.8) 5.85 (348.3) 4.74 (114.0) 7.71 (2238.1) 7.74 (2290.5) 6.61 (743.8) 
+
+OWL 4.12 (61.7) 4.33 (75.8) 3.82 (45.7) 6.42 (614.5) 6.21 (495.7) 5.46 (234.5) 8.93 (7586.7) 8.95 (7687.1) 7.77 (2369.7) DSA 4.10 (60.6) 4.29 (72.9) 3.88 (48.3) 7.44 (1695.1) 7.44 (1703.7) 6.22 (500.4) 8.79 (6572.3) 8.67 (5799.0) 7.92 (2752.6) LSA 4.06 (58.2) 4.15 (63.6) 3.80 (44.6) 6.45 (629.9) 6.16 (473.1) 5.62 (275.1) 8.78 (6482.0) 8.42 (4519.0) 7.81 (2461.7) Dense: WT2=2.69 (14.7), PTB=2.80 (16.5), C4=2.78 (16.1) Qwen3-0.6B LADDER 4.34 (76.4) 5.00 (147.7) 4.40 (81.8) 5.34 (208.7) 6.26 (524.5) 5.29 (197.6) 8.83 (6849.8) 10.26 (28430.2) 7.74 (2292.0) 
+
+OWL 5.59 (267.0) 6.56 (707.6) 5.60 (271.5) 8.71 (6065.7) 9.66 (15680.2) 7.72 (2251.0) 11.60 (109443.9) 11.24 (75885.4) 12.43 (250240.0) DSA 5.15 (173.0) 5.64 (280.5) 5.17 (176.7) 8.41 (4500.9) 9.67 (15803.2) 7.08 (1185.7) 10.41 (33179.1) 10.79 (48424.5) 10.60 (40099.6) LSA 5.20 (180.6) 5.86 (349.8) 5.13 (169.6) 7.39 (1612.8) 8.64 (5627.5) 6.79 (887.2) 12.06 (173103.3) 12.27 (213937.1) 12.08 (176410.1) Dense: WT2=2.54 (12.7), PTB=3.09 (21.9), C4=2.99 (19.9) Llama-3.2-1B LADDER 4.33 (76.2) 4.86 (128.9) 4.37 (79.3) 5.94 (378.1) 6.76 (866.4) 5.63 (279.0) 8.23 (3740.4) 8.81 (6717.7) 7.52 (1844.5) 
+
+OWL 4.79 (119.8) 4.99 (146.4) 4.88 (131.6) 6.52 (680.5) 6.67 (789.4) 5.90 (363.3) 8.55 (5183.3) 8.59 (5397.8) 7.74 (2306.7) DSA 5.22 (185.0) 5.37 (214.4) 5.08 (161.2) 6.63 (758.1) 7.03 (1128.5) 6.24 (513.4) 9.50 (13359.7) 9.62 (15138.6) 8.60 (5420.0) LSA 4.80 (121.1) 5.09 (162.7) 4.95 (141.5) 6.13 (458.5) 6.36 (576.8) 6.06 (427.9) 8.95 (7698.7) 9.01 (8177.3) 8.33 (4129.9) Dense: WT2=2.28 (9.8), PTB=2.76 (15.8), C4=2.64 (14.0) Table 6: Complete post-distillation language-modeling results at 70–90% sparsity. Entries report test loss followed by perplexity in parentheses; lower is better, and bold marks the best method for each configuration. Model Method 70% 80% 90% WT2 PTB C4 WT2 PTB C4 WT2 PTB C4 OPT-125M LADDER 4.52 (91.5) 4.60 (100.0) 4.13 (61.9) 5.52 (250.6) 5.62 (277.1) 4.84 (126.3) 7.00 (1099.1) 6.99 (1087.3) 5.96 (388.2) 
+
+OWL 4.74 (114.0) 4.74 (114.0) 4.23 (68.9) 6.23 (507.8) 6.06 (427.6) 5.30 (200.8) 7.94 (2798.5) 7.92 (2740.9) 6.85 (939.9) DSA 4.70 (109.5) 4.69 (108.7) 4.23 (68.6) 6.21 (496.3) 6.13 (461.1) 5.32 (204.8) 7.89 (2674.5) 7.81 (2457.7) 6.78 (882.0) LSA 5.38 (217.5) 5.36 (212.8) 4.53 (93.0) 6.64 (766.3) 6.74 (845.2) 5.64 (281.8) 7.82 (2491.2) 7.68 (2161.0) 6.82 (914.9) Dense: WT2=3.32 (27.7), PTB=3.41 (30.2), C4=3.28 (26.6) OPT-350M LADDER 4.38 (79.7) 4.33 (75.9) 4.07 (58.3) 5.30 (199.8) 4.97 (144.4) 4.87 (130.5) 7.22 (1362.7) 6.60 (735.5) 6.34 (564.5) 
+
+OWL 4.67 (106.3) 4.68 (107.7) 4.25 (70.4) 6.36 (575.4) 6.22 (500.5) 5.43 (228.9) 7.87 (2620.7) 7.67 (2153.0) 6.87 (961.3) DSA 4.67 (107.1) 4.60 (99.8) 4.26 (70.5) 6.37 (585.4) 6.14 (463.1) 5.50 (245.6) 7.95 (2845.1) 7.87 (2609.8) 6.90 (993.6) LSA 4.61 (100.0) 4.51 (91.2) 4.28 (72.6) 6.36 (575.4) 6.17 (478.6) 5.54 (253.8) 7.96 (2860.4) 7.52 (1850.6) 7.06 (1167.9) Dense: WT2=3.09 (22.0), PTB=3.20 (24.5), C4=3.12 (22.6) OPT-1.3B LADDER 3.36 (28.9) 3.55 (34.9) 3.29 (26.9) 4.08 (59.2) 4.23 (68.5) 3.79 (44.4) 5.74 (312.5) 5.77 (320.4) 4.96 (143.2) 
+
+OWL 3.51 (33.3) 3.61 (37.1) 3.37 (29.0) 4.53 (92.7) 4.40 (81.7) 4.03 (56.2) 6.86 (953.8) 6.60 (735.5) 5.66 (287.4) DSA 3.38 (29.3) 3.54 (34.4) 3.30 (27.1) 4.28 (72.1) 4.23 (68.9) 3.94 (51.6) 6.74 (844.6) 6.57 (716.8) 5.65 (285.2) LSA 3.41 (30.2) 3.54 (34.5) 3.30 (27.2) 4.28 (72.2) 4.23 (68.5) 3.94 (51.6) 6.80 (893.4) 6.64 (763.0) 5.64 (282.1) Dense: WT2=2.69 (14.7), PTB=2.80 (16.5), C4=2.78 (16.1) Qwen3-0.6B LADDER 3.88 (48.5) 4.41 (82.2) 3.98 (53.7) 4.51 (91.2) 5.14 (170.2) 4.53 (92.6) 6.32 (553.2) 7.17 (1298.1) 5.64 (281.3) 
+
+OWL 3.99 (54.3) 4.54 (94.0) 4.14 (63.1) 5.43 (227.9) 6.12 (455.4) 5.24 (188.1) 8.74 (6216.8) 9.11 (9075.0) 8.11 (3321.4) DSA 3.95 (51.9) 4.51 (91.4) 4.11 (60.7) 5.52 (249.9) 6.24 (512.6) 5.30 (200.1) 7.76 (2344.5) 8.69 (5943.8) 7.27 (1437.6) LSA 3.95 (52.1) 4.51 (90.9) 4.07 (58.4) 5.23 (187.5) 5.73 (307.5) 5.03 (153.0) 7.91 (2719.4) 8.62 (5554.7) 7.32 (1514.4) Dense: WT2=2.54 (12.7), PTB=3.09 (21.9), C4=2.99 (19.9) Llama-3.2-1B LADDER 3.93 (50.7) 4.36 (78.5) 3.97 (52.8) 4.86 (128.4) 5.23 (186.9) 4.74 (114.3) 7.24 (1389.5) 8.23 (3760.9) 6.33 (562.1) OWL 3.86 (47.6) 4.25 (70.4) 3.91 (50.1) 4.83 (125.4) 5.21 (183.1) 4.71 (111.1) 7.02 (1123.4) 7.45 (1720.8) 6.29 (539.1) DSA 3.86 (47.5) 4.33 (75.7) 3.94 (51.2) 4.96 (142.4) 5.19 (179.6) 4.76 (116.7) 7.61 (2015.0) 8.55 (5157.3) 6.78 (881.5) LSA 3.77 (43.3) 4.12 (61.6) 3.89 (49.1) 4.74 (114.5) 5.03 (152.9) 4.69 (108.3) 6.64 (767.5) 7.26 (1423.8) 6.17 (480.3) 
+
+Dense: WT2=2.28 (9.8), PTB=2.76 (15.8), C4=2.64 (14.0) Building a Nested LADDER for LLM Unstructured Post-Training Pruning 50 60 70 80 90 010 20 30 40 50 60 
+
+WT2     
+
+> 50 60 70 80 90
+
+PTB     
+
+> 50 60 70 80 90
+
+C4 
+
+Sparsity (%) Loss Gap Recovered (%)  LADDER OWL DSA LSA 
+
+(a) Qwen3-0.6B 50 60 70 80 90 −40 −20 020 40 
+
+WT2     
+
+> 50 60 70 80 90
+
+PTB     
+
+> 50 60 70 80 90
+
+C4 
+
+Sparsity (%) Loss Gap Recovered (%)  LADDER OWL DSA LSA (b) Llama-3.2-1B 50 60 70 80 90 −60 −40 −20 020 40 60 
+
+WT2     
+
+> 50 60 70 80 90
+
+PTB     
+
+> 50 60 70 80 90
+
+C4 
+
+Sparsity (%) Loss Gap Recovered (%)  LADDER OWL DSA LSA 
+
+(c) OPT-1.3B 50 60 70 80 90 −5 0510 15 20 25 30 
+
+WT2     
+
+> 50 60 70 80 90
+
+PTB     
+
+> 50 60 70 80 90
+
+C4 
+
+Sparsity (%) Loss Gap Recovered (%)  LADDER OWL DSA LSA (d) OPT-350M 50 60 70 80 90 10 20 30 40 50 WT2     
+
+> 50 60 70 80 90
+
+PTB     
+
+> 50 60 70 80 90
+
+C4 
+
+Sparsity (%) Loss Gap Recovered (%)  LADDER OWL DSA LSA 
+
+(e) OPT-125M Figure 8: Fraction of the pruning-induced test-loss gap removed by posterior distillation, 100( Lpre −Lpost )/(Lpre −
+
+Ldense ). Higher is better; zero indicates no recovery. Cuadrado ´ Avila, Navarrete, Tak´ aˇ c, Horv´ ath 50 60 70 80 90 ARC-C ARC-E BoolQ HellaSwag OBQA PIQA WinoGrande 
+
+9.5 15.413.014.211.5 5.2 20.931.131.032.5 4.7 9.0 28.030.031.2 10.519.225.328.227.9 0.2 6.0 7.6 5.8 6.4 4.5 10.818.918.617.8 2.4 7.1 9.9 8.5 8.2 
+
+OWL (avg. +15.17 pp) 
+
+50 60 70 80 90 
+
+8.1 14.811.713.311.3 5.6 26.930.232.432.0 5.4 7.2 14.728.625.3 9.9 17.824.427.527.3 -0.2 6.6 6.0 6.2 8.0 3.9 16.519.617.618.7 2.4 5.6 6.9 8.2 9.6 
+
+DSA (avg. +14.57 pp) 
+
+50 60 70 80 90 
+
+9.1 13.313.212.012.3 7.0 17.431.331.030.5 5.1 7.2 21.326.712.3 9.8 17.324.427.727.5 -2.2 7.2 8.4 6.0 7.2 4.2 8.9 18.217.119.1 0.8 5.4 7.3 8.1 9.4 
+
+LSA (avg. +13.76 pp) 
+
+50 60 70 80 90 
+
+9.6 12.114.815.413.0 8.9 15.623.627.832.7 7.0 7.6 8.0 16.830.9 10.616.122.725.828.3 3.8 5.0 8.4 8.4 5.8 4.4 7.6 12.216.218.3 3.2 4.6 7.0 9.9 9.2 
+
+LADDER (avg. +13.47 pp) 
+
+0510 15 20 25 30 
+
+> Degradation vs. Dense (pp) (↓ Is Better)
+
+Sparsity (%) Task 
+
+1
+
+(a) Before posterior distillation 50 60 70 80 90 ARC-C ARC-E BoolQ HellaSwag OBQA PIQA WinoGrande 
+
+7.3 12.715.614.511.8 3.7 11.326.926.931.9 9.3 7.6 22.931.332.0 10.316.223.226.227.9 0.6 7.0 8.8 7.6 8.0 4.6 8.3 14.916.818.8 4.0 8.4 8.5 7.7 8.8 
+
+OWL (avg. +14.35 pp) 
+
+50 60 70 80 90 
+
+7.5 11.915.416.012.3 4.9 11.429.028.529.9 5.6 6.8 8.7 31.932.0 9.9 15.922.726.127.7 0.8 4.0 7.6 8.0 9.8 4.5 8.7 16.617.017.2 3.2 4.1 7.3 6.6 9.3 
+
+DSA (avg. +13.68 pp) 
+
+50 60 70 80 90 
+
+8.1 12.616.614.614.3 5.5 10.523.930.230.5 4.7 7.2 7.7 31.332.0 9.8 15.522.525.827.6 1.0 3.0 7.0 8.4 7.8 4.1 8.2 13.017.518.4 2.6 6.5 9.2 8.1 8.4 
+
+LSA (avg. +13.54 pp) 
+
+50 60 70 80 90 
+
+8.6 11.415.216.716.0 7.6 10.920.227.128.9 14.4 7.1 7.9 16.432.0 11.216.422.825.327.7 3.4 4.6 7.2 7.4 8.0 3.2 6.9 10.614.116.4 2.1 5.4 6.6 8.1 8.4 
+
+LADDER (avg. +13.03 pp) 
+
+510 15 20 25 30 
+
+> Degradation vs. Dense (pp) (↓ Is Better)
+
+Sparsity (%) Task 
+
+1
+
+(b) After posterior distillation 
+
+Figure 9: Qwen3-0.6B zero-shot accuracy degradation before and after posterior distillation. Lower is better. Building a Nested LADDER for LLM Unstructured Post-Training Pruning 50 60 70 80 90 ARC-C ARC-E BoolQ HellaSwag OBQA PIQA WinoGrande 
+
+5.6 11.315.514.111.8 10.420.529.034.035.4 1.1 0.9 2.3 21.725.8 13.523.533.436.537.8 3.2 7.6 10.612.412.4 5.6 12.119.521.522.6 3.6 7.9 8.4 10.311.2 
+
+OWL (avg. +15.80 pp) 
+
+50 60 70 80 90 
+
+5.5 11.314.713.512.0 10.620.528.832.636.3 1.3 0.9 4.0 6.9 21.7 13.624.634.136.738.3 3.4 9.4 11.8 9.8 13.0 6.4 13.618.021.822.9 5.1 5.5 10.412.910.5 
+
+DSA (avg. +15.49 pp) 
+
+50 60 70 80 90 
+
+4.9 9.3 12.613.712.6 7.6 19.126.432.736.2 0.8 1.3 1.7 10.825.7 12.423.031.936.638.3 4.4 7.6 10.411.411.8 5.7 11.416.421.623.3 3.1 5.4 7.7 10.5 8.1 
+
+LSA (avg. +14.76 pp) 
+
+50 60 70 80 90 
+
+4.9 10.512.112.613.0 7.9 16.024.032.135.4 2.1 1.2 3.0 12.625.8 13.222.631.037.037.9 4.0 7.8 11.012.811.6 6.4 11.215.520.723.6 5.2 7.7 8.6 10.412.2 
+
+LADDER (avg. +14.96 pp) 
+
+510 15 20 25 30 35 
+
+> Degradation vs. Dense (pp) (↓ Is Better)
+
+Sparsity (%) Task 
+
+1
+
+(a) Before posterior distillation 50 60 70 80 90 ARC-C ARC-E BoolQ HellaSwag OBQA PIQA WinoGrande 
+
+6.5 8.6 11.914.213.1 8.4 15.322.731.033.8 1.7 6.9 7.1 3.6 25.8 15.322.331.336.137.8 3.0 5.6 10.610.010.0 4.6 8.9 15.217.521.3 6.5 6.4 8.5 9.6 10.4 
+
+OWL (avg. +14.32 pp) 
+
+50 60 70 80 90 
+
+7.1 8.4 12.215.414.2 8.7 13.524.730.934.6 0.2 1.9 6.3 3.4 25.8 14.922.531.436.337.8 5.4 6.4 9.6 11.412.8 5.7 9.1 13.818.421.2 5.8 7.1 9.2 9.3 11.4 
+
+DSA (avg. +14.48 pp) 
+
+50 60 70 80 90 
+
+5.5 7.2 12.514.814.0 7.5 14.621.730.534.4 -0.1 3.3 4.4 2.5 20.5 14.821.930.836.737.7 4.6 6.2 6.8 11.411.6 4.8 7.7 13.818.721.5 5.9 6.8 7.9 9.8 10.7 
+
+LSA (avg. +13.81 pp) 
+
+50 60 70 80 90 
+
+7.3 7.8 12.313.613.5 6.7 13.621.630.733.6 1.4 2.3 2.3 2.3 25.8 16.122.731.136.838.1 4.8 6.4 9.0 11.210.4 5.8 9.5 13.518.221.5 6.1 7.7 7.9 10.710.1 
+
+LADDER (avg. +14.06 pp) 
+
+0510 15 20 25 30 35 
+
+> Degradation vs. Dense (pp) (↓ Is Better)
+
+Sparsity (%) Task 
+
+1
+
+(b) After posterior distillation 
+
+Figure 10: Llama-3.2-1B zero-shot accuracy degradation before and after posterior distillation. Lower is better. Cuadrado ´ Avila, Navarrete, Tak´ aˇ c, Horv´ ath 50 60 70 80 90 ARC-C ARC-E BoolQ HellaSwag OBQA PIQA WinoGrande 
+
+1.0 1.6 4.5 6.9 2.9 5.6 9.514.520.024.4 -3.2-5.7-5.6-1.317.8 6.611.818.524.928.2 1.8 3.6 5.0 6.6 4.6 3.7 7.211.015.820.6 2.4 3.6 3.7 7.3 9.6 
+
+OWL (avg. +8.27 pp) 
+
+50 60 70 80 90 
+
+-0.3 2.5 5.4 6.3 3.7 5.2 8.814.321.424.8 -4.6-5.5-5.3 2.4 7.6 5.710.617.425.628.3 2.4 2.2 6.4 6.8 3.6 2.8 6.210.218.121.1 0.1 2.4 6.7 7.8 7.0 
+
+DSA (avg. +7.94 pp) 
+
+50 60 70 80 90 
+
+1.0 3.3 4.7 6.1 4.7 5.7 8.811.520.425.1 -4.4-5.4-5.6-3.8 5.5 5.610.317.425.528.5 2.0 3.2 7.0 7.0 4.8 2.7 6.1 9.417.020.3 1.3 3.9 6.3 7.2 8.8 
+
+LSA (avg. +7.77 pp) 
+
+50 60 70 80 90 
+
+0.2 1.4 2.7 5.4 6.1 2.2 4.8 9.918.121.7 -4.3-5.5-5.7-5.718.6 4.4 7.915.923.127.6 0.8 2.8 3.6 4.6 5.4 2.1 4.5 9.214.817.8 0.3 3.6 3.7 6.2 8.8 
+
+LADDER (avg. +6.77 pp) 
+
+−50510 15 20 25 
+
+> Degradation vs. Dense (pp) (↓ Is Better)
+
+Sparsity (%) Task 
+
+1
+
+(a) Before posterior distillation 50 60 70 80 90 ARC-C ARC-E BoolQ HellaSwag OBQA PIQA WinoGrande 
+
+2.3 2.9 4.1 5.5 7.1 3.6 5.410.216.221.9 -4.8-5.9-5.6-5.7-1.8 7.710.816.323.127.4 2.2 4.0 5.6 6.4 4.6 1.7 3.6 7.213.419.2 1.1 2.6 4.2 6.9 8.5 
+
+OWL (avg. +6.63 pp) 
+
+50 60 70 80 90 
+
+0.6 2.6 3.8 6.0 6.6 3.6 4.1 8.115.723.8 -5.2-4.6-4.8-5.7-4.4 7.4 9.914.922.927.5 1.6 3.6 4.2 6.2 4.0 2.3 4.8 6.214.019.3 2.1 2.2 6.0 6.2 8.8 
+
+DSA (avg. +6.41 pp) 
+
+50 60 70 80 90 
+
+0.9 3.2 4.0 6.5 6.0 3.6 5.1 9.016.823.9 -4.9-5.3-5.9-5.5-5.7 7.0 9.314.822.927.9 2.2 3.4 5.6 6.8 5.2 1.5 3.8 6.514.018.8 1.0 1.4 4.2 6.8 8.1 
+
+LSA (avg. +6.37 pp) 
+
+50 60 70 80 90 
+
+2.6 2.1 2.9 3.9 6.7 3.3 4.1 7.413.819.3 -4.4-5.8-4.7-5.7 0.3 6.2 8.513.821.125.7 2.8 2.4 3.2 6.0 7.0 2.3 3.3 6.011.515.7 0.6 3.8 3.6 7.0 7.2 
+
+LADDER (avg. +5.82 pp) 
+
+−50510 15 20 25 
+
+> Degradation vs. Dense (pp) (↓ Is Better)
+
+Sparsity (%) Task 
+
+1
+
+(b) After posterior distillation 
+
+Figure 11: OPT-1.3B zero-shot accuracy degradation before and after posterior distillation. Lower is better. Building a Nested LADDER for LLM Unstructured Post-Training Pruning 50 60 70 80 90 ARC-C ARC-E BoolQ HellaSwag OBQA PIQA WinoGrande 
+
+0.9 2.0 3.4 2.6 -2.1 2.5 4.6 8.4 11.113.8 -0.6-4.1 0.9 9.3 19.6 3.5 6.3 8.5 10.211.4 -0.2 3.6 4.6 3.6 1.2 1.5 4.4 7.5 11.813.7 1.3 0.8 0.3 2.2 2.2 
+
+OWL (avg. +4.88 pp) 
+
+50 60 70 80 90 
+
+0.9 1.9 3.6 1.7 -1.5 2.4 5.0 7.6 11.514.8 -2.0-4.2 5.0 15.819.6 3.3 5.8 9.1 10.711.5 1.0 2.4 4.0 1.4 2.2 2.0 4.9 8.5 11.414.4 1.6 2.4 1.7 2.1 4.7 
+
+DSA (avg. +5.35 pp) 
+
+50 60 70 80 90 
+
+0.5 0.9 2.0 0.9 -2.5 2.7 5.9 8.9 12.214.1 -1.5-3.8 2.6 2.2 19.6 3.2 5.8 9.1 10.310.8 1.6 3.0 4.4 0.8 2.0 2.6 4.6 7.9 12.213.3 0.2 -0.3 0.5 2.7 4.0 
+
+LSA (avg. +4.67 pp) 
+
+50 60 70 80 90 
+
+0.4 0.3 2.1 2.4 0.5 4.0 5.1 7.5 10.612.2 -3.9-4.0-0.3-1.019.6 3.7 6.1 8.1 9.3 10.1 1.8 2.4 2.2 3.6 3.0 2.6 4.2 5.9 10.712.4 0.3 0.8 0.9 2.8 2.8 
+
+LADDER (avg. +4.26 pp) 
+
+0510 15 
+
+> Degradation vs. Dense (pp) (↓ Is Better)
+
+Sparsity (%) Task 
+
+1
+
+(a) Before posterior distillation 50 60 70 80 90 ARC-C ARC-E BoolQ HellaSwag OBQA PIQA WinoGrande 
+
+0.7 0.9 2.6 2.6 -1.4 3.1 4.9 8.8 10.213.1 2.4 -3.2-1.9-3.019.6 3.9 6.2 8.8 9.9 11.5 0.4 1.8 5.2 3.4 1.0 2.0 4.4 6.3 9.6 11.3 0.2 3.0 1.2 1.7 2.2 
+
+OWL (avg. +4.38 pp) 
+
+50 60 70 80 90 
+
+0.8 2.1 3.4 1.7 -0.9 2.9 4.2 8.0 9.6 14.0 4.0 -2.2-2.0 8.5 19.6 3.4 5.8 8.6 10.511.1 0.4 2.0 3.6 2.6 2.2 2.0 4.9 5.9 9.9 11.0 1.5 1.1 0.2 1.8 3.2 
+
+DSA (avg. +4.72 pp) 
+
+50 60 70 80 90 
+
+1.5 1.3 1.1 1.5 -0.9 2.7 5.4 9.0 9.9 13.6 6.1 -3.0-2.616.219.6 4.0 6.2 8.8 10.111.4 0.6 2.0 4.6 1.0 2.2 2.5 4.6 6.6 10.213.3 1.9 -0.4-1.1 1.7 2.1 
+
+LSA (avg. +4.96 pp) 
+
+50 60 70 80 90 
+
+0.6 1.6 1.6 2.0 0.4 2.8 4.1 6.5 10.411.6 2.4 -2.5-3.8-4.719.4 3.5 6.2 8.4 9.3 10.6 -0.2 1.2 1.8 4.8 2.2 1.9 4.5 6.2 9.1 11.4 0.6 0.6 0.6 2.6 2.9 
+
+LADDER (avg. +4.02 pp) 
+
+0510 15 
+
+> Degradation vs. Dense (pp) (↓ Is Better)
+
+Sparsity (%) Task 
+
+1
+
+(b) After posterior distillation 
+
+Figure 12: OPT-350M zero-shot accuracy degradation before and after posterior distillation. Lower is better. Cuadrado ´ Avila, Navarrete, Tak´ aˇ c, Horv´ ath 50 60 70 80 90 ARC-C ARC-E BoolQ HellaSwag OBQA PIQA WinoGrande 
+
+-0.7-0.9 0.2 0.4 -2.8 2.9 3.9 7.210.213.6 -5.4-5.012.816.618.3 1.8 2.2 3.3 4.7 6.1 4.6 3.2 2.0 3.4 2.4 2.4 3.5 6.610.212.0 -0.2-1.2 1.2 -0.1 3.4 
+
+OWL (avg. +4.08 pp) 
+
+50 60 70 80 90 
+
+-1.1-0.6 0.8 -0.4-2.0 2.6 4.3 7.110.813.7 -5.6-5.2 9.618.318.3 1.9 2.4 3.4 5.0 5.8 2.2 3.4 2.6 3.2 2.8 1.5 3.6 6.9 9.910.5 0.2 -0.7 0.0 1.3 1.9 
+
+DSA (avg. +3.95 pp) 
+
+50 60 70 80 90 
+
+-1.1-1.4 1.8 -0.8-3.9 2.8 5.2 8.711.513.6 -5.4-5.5 6.417.918.3 2.0 2.6 3.9 5.4 5.2 3.4 2.6 2.8 1.4 2.4 1.3 3.3 7.710.611.8 1.3 -0.6 0.0 1.0 2.4 
+
+LSA (avg. +3.96 pp) 
+
+50 60 70 80 90 
+
+-1.2-1.3 0.1 0.4 -1.2 3.0 5.3 7.2 8.912.5 -5.1-5.4-1.917.318.3 1.8 2.3 3.0 4.0 6.1 3.2 2.0 3.6 0.8 2.8 0.9 2.7 5.9 8.5 9.9 0.9 0.3 1.5 2.7 2.3 
+
+LADDER (avg. +3.50 pp) 
+
+−50510 15 
+
+> Degradation vs. Dense (pp) (↓ Is Better)
+
+Sparsity (%) Task 
+
+1
+
+(a) Before posterior distillation 50 60 70 80 90 ARC-C ARC-E BoolQ HellaSwag OBQA PIQA WinoGrande 
+
+-0.2-0.6-0.2 0.8 -1.9 2.4 3.3 6.8 9.213.0 -5.7-5.8-5.118.318.3 2.1 2.8 3.7 4.9 6.0 4.2 2.8 3.2 4.8 4.2 1.5 2.5 4.8 7.0 9.8 -0.9-0.4 2.1 -0.3 1.7 
+
+OWL (avg. +3.40 pp) 
+
+50 60 70 80 90 
+
+0.6 0.5 0.7 0.2 -2.8 2.1 3.2 6.310.112.8 -5.4-5.7-3.917.718.3 1.9 2.5 3.4 4.8 6.2 1.6 2.8 4.0 2.8 2.8 1.1 2.2 4.8 7.7 9.5 0.8 1.4 0.9 1.1 2.8 
+
+DSA (avg. +3.42 pp) 
+
+50 60 70 80 90 
+
+-0.3-0.1 0.4 -0.2-1.4 2.6 5.0 6.810.712.1 -5.5-6.0-5.716.818.3 2.2 3.1 3.9 6.2 6.5 1.2 2.4 2.8 3.2 1.8 1.7 2.7 4.7 8.8 9.2 1.7 0.8 0.9 0.6 2.8 
+
+LSA (avg. +3.45 pp) 
+
+50 60 70 80 90 
+
+0.0 -0.6-0.1 1.2 -0.7 2.6 4.7 6.3 8.111.6 -5.0-6.0-5.817.818.3 1.6 2.4 3.2 4.4 5.8 1.2 3.6 4.0 3.6 4.4 0.7 2.6 5.3 6.7 8.4 0.8 -0.6 1.1 2.1 1.8 
+
+LADDER (avg. +3.30 pp) 
+
+−50510 15 
+
+> Degradation vs. Dense (pp) (↓ Is Better)
+
+Sparsity (%) Task 
+
+1
+
+(b) After posterior distillation 
+
+Figure 13: OPT-125M zero-shot accuracy degradation before and after posterior distillation. Lower is better. Building a Nested LADDER for LLM Unstructured Post-Training Pruning 0 50 100 50 →60% 60 →70% 70 →80% 80 →90% 0% 0% 0% 0% 
+
+LADDER 
+
+0 50 100 2.16% 5.10% 10.59% 15.53% 
+
+OWL 
+
+0 50 100 1.95% 4.65% 9.94% 15.57% 
+
+DSA 
+
+0 50 100 1.89% 4.54% 9.53% 15.47% 
+
+LSA 
+
+Higher-Sparsity Keep Set (%) Sparsity Transition Already Kept Reintroduced 1
+
+(a) Qwen3-0.6B 0 50 100 50 →60% 60 →70% 70 →80% 80 →90% 0% 0% 0% 0% 
+
+LADDER 
+
+0 50 100 2.00% 4.18% 7.11% 11.23% 
+
+OWL 
+
+0 50 100 2.13% 4.44% 7.83% 15.46% 
+
+DSA 
+
+0 50 100 1.99% 4.05% 7.30% 11.92% 
+
+LSA 
+
+Higher-Sparsity Keep Set (%) Sparsity Transition Already Kept Reintroduced 1 (b) Llama-3.2-1B 0 50 100 50 →60% 60 →70% 70 →80% 80 →90% 0% 0% 0% 0% 
+
+LADDER 
+
+0 50 100 1.22% 2.28% 4.93% 8.31% 
+
+OWL 
+
+0 50 100 1.22% 2.42% 6.34% 12.50% 
+
+DSA 
+
+0 50 100 1.21% 2.38% 6.27% 12.45% 
+
+LSA 
+
+Higher-Sparsity Keep Set (%) Sparsity Transition Already Kept Reintroduced 1
+
+(c) OPT-1.3B 0 50 100 50 →60% 60 →70% 70 →80% 80 →90% 0% 0% 0% 0% 
+
+LADDER 
+
+0 50 100 1.92% 3.79% 6.95% 10.98% 
+
+OWL 
+
+0 50 100 1.98% 3.98% 7.76% 12.70% 
+
+DSA 
+
+0 50 100 1.97% 3.91% 8.17% 12.54% 
+
+LSA 
+
+Higher-Sparsity Keep Set (%) Sparsity Transition Already Kept Reintroduced 1 (d) OPT-350M 0 50 100 50 →60% 60 →70% 70 →80% 80 →90% 0% 0% 0% 0% 
+
+LADDER 
+
+0 50 100 0.94% 2.04% 4.10% 5.69% 
+
+OWL 
+
+0 50 100 0.95% 2.32% 5.27% 6.67% 
+
+DSA 
+
+0 50 100 0.89% 2.27% 5.27% 7.47% 
+
+LSA 
+
+Higher-Sparsity Keep Set (%) Sparsity Transition Already Kept Reintroduced 1
+
+(e) OPT-125M Figure 14: Support across adjacent sparsity levels for the five evaluated models. Each bar partitions the weights kept at the higher sparsity into those retained from the next lower sparsity and those reintroduced after having been pruned. Cuadrado ´ Avila, Navarrete, Tak´ aˇ c, Horv´ ath 0 2 5 7 10 12 15 17 20 22 25 27 Transformer Block 020 40 60 80 100 Local Sparsity (%) Global Sparsity 50% 60% 70% 80% 90% 1
+
+(a) Qwen3-0.6B 0 1 3 4 5 7 8 10 11 12 14 15 Transformer Block 020 40 60 80 100 Local Sparsity (%) Global Sparsity 50% 60% 70% 80% 90% 1 (b) Llama-3.2-1B 0 2 4 6 8 10 13 15 17 19 21 23 Transformer Block 020 40 60 80 100 Local Sparsity (%) Global Sparsity 50% 60% 70% 80% 90% 1
+
+(c) OPT-1.3B 0 2 4 6 8 10 13 15 17 19 21 23 Transformer Block 020 40 60 80 100 Local Sparsity (%) Global Sparsity 50% 60% 70% 80% 90% 1 (d) OPT-350M 0 1 2 3 4 5 6 7 8 9 10 11 Transformer Block 020 40 60 80 100 Local Sparsity (%) Global Sparsity 50% 60% 70% 80% 90% 1
+
+(e) OPT-125M Figure 15: Layer allocations selected by LADDER with SparseGPT. Each bar gives the percentage of prunable weights removed from a transformer block; overlaid bars show the allocations from 50% to 90% global sparsity.

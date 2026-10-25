@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-24</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-25</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 8 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 1 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>0</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>8</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>1</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-24 22:13:13 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-25 21:20:47 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日速读 8 篇论文，聚焦长视频理解、量化模型推理恢复与多模态推理效率。最值得看的是《Write Once, Query Many》提出的可复用长视频记忆机制，以及《Right On Q》通过自生成轨迹恢复量化后推理能力。普通读者可优先从这两篇入手，关注方法与实验设置，再按需扩展阅读。</p>
+<p>今天速读 1 篇，聚焦大模型非结构化后训练剪枝：用嵌套 LADDER 方法以 6.0 分入选。值得关注的是，它试图在训练后剪枝阶段更精细地保留模型能力；普通读者可先看摘要与实验对比，判断是否适合自己的模型压缩场景。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -84,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">8 篇</strong>
+    <strong class="dpr-home-dashboard-count">1 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Write Once, Query Many: Evolving Compact Reusable Memory for Long Videos">Write Once, Query Many: Evolving Compact Reusable Memory for Long Videos</span></li><li><span class="dpr-home-dashboard-paper-title" title="Right On Q: Recovering Reasoning under Quantization via Self-Generated Trajectories">Right On Q: Recovering Reasoning under Quantization via Self-Generated Trajectories</span></li><li><span class="dpr-home-dashboard-paper-title" title="Visual Cache Reuse for Efficient Multimodal Inference">Visual Cache Reuse for Efficient Multimodal Inference</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Building a Nested LADDER for LLM Unstructured Post-Training Pruning">Building a Nested LADDER for LLM Unstructured Post-Training Pruning</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>8</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>1</strong></span></div>
 </section>
 </div>
 
