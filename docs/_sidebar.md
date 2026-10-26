@@ -1,6 +1,9 @@
 * <a class="dpr-sidebar-root-link" href="#/">首页</a>
 * <a class="dpr-sidebar-root-link dpr-sidebar-noactive-link" href="javascript:void(0)" data-dpr-hash="#/tutorial/README">使用教程</a>
 * Daily Papers
+  * 2026-10-16 <!--dpr-date:20261016-->
+    * 速读区
+      * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202610/16/2610.23796v1-futransformer-fp8-prefill-and-int4-decode-for-llama-style-inference-on-hopper" data-sidebar-item="{&quot;title&quot;: &quot;FuTransformer: FP8 prefill and INT4 decode for Llama-style inference on Hopper&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2610.23796v1-futransformer-fp8-prefill-and-int4-decode-for-llama-style-inference-on-hopper&quot;, &quot;score&quot;: &quot;6.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;el&quot;}], &quot;evidence&quot;: &quot;对Llama类Transformer采用INT4权重量化与FP8推理&quot;}">FuTransformer: FP8 prefill and INT4 decode for Llama-style inference on Hopper</a>
   * 2026-10-14 <!--dpr-date:20261014-->
     * 速读区
       * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202610/14/2610.20826v1-task-phase-conditioned-expert-routing-is-not-a-reliable-proxy-for-quantization-sensitivity-in-moe-ffn-tensors" data-sidebar-item="{&quot;title&quot;: &quot;Task-Phase-Conditioned Expert Routing Is Not a Reliable Proxy for Quantization Sensitivity in MoE FFN Tensors&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2610.20826v1-task-phase-conditioned-expert-routing-is-not-a-reliable-proxy-for-quantization-sensitivity-in-moe-ffn-tensors&quot;, &quot;score&quot;: &quot;6.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;el&quot;}], &quot;evidence&quot;: &quot;基于路由敏感度的MoE FFN张量逐层混合精度量化&quot;}">Task-Phase-Conditioned Expert Routing Is Not a Reliable Proxy for Quantization Sensitivity in MoE FFN Tensors</a>
