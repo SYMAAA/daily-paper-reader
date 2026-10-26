@@ -1,6 +1,9 @@
 * <a class="dpr-sidebar-root-link" href="#/">首页</a>
 * <a class="dpr-sidebar-root-link dpr-sidebar-noactive-link" href="javascript:void(0)" data-dpr-hash="#/tutorial/README">使用教程</a>
 * Daily Papers
+  * 2026-10-18 <!--dpr-date:20261018-->
+    * 精读区
+      * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202610/18/2610.25048v1-pact-nvfp4-data-flow-lora-fine-tuning-on-consumer-gpus" data-sidebar-item="{&quot;title&quot;: &quot;PACT: NVFP4 Data-Flow LoRA Fine-Tuning on Consumer GPUs&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2610.25048v1-pact-nvfp4-data-flow-lora-fine-tuning-on-consumer-gpus&quot;, &quot;score&quot;: &quot;8.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;el&quot;}], &quot;evidence&quot;: &quot;联合NVFP4量化与LoRA微调，并用GPTQ校准权重&quot;}">PACT: NVFP4 Data-Flow LoRA Fine-Tuning on Consumer GPUs</a>
   * 2026-10-16 <!--dpr-date:20261016-->
     * 速读区
       * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202610/16/2610.23796v1-futransformer-fp8-prefill-and-int4-decode-for-llama-style-inference-on-hopper" data-sidebar-item="{&quot;title&quot;: &quot;FuTransformer: FP8 prefill and INT4 decode for Llama-style inference on Hopper&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2610.23796v1-futransformer-fp8-prefill-and-int4-decode-for-llama-style-inference-on-hopper&quot;, &quot;score&quot;: &quot;6.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;el&quot;}], &quot;evidence&quot;: &quot;对Llama类Transformer采用INT4权重量化与FP8推理&quot;}">FuTransformer: FP8 prefill and INT4 decode for Llama-style inference on Hopper</a>
