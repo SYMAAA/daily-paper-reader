@@ -1,0 +1,2059 @@
+Visual Tokens on Demand: Visual Budgeting for Scalable and Efficient
+Multi-Image Reasoning in Multimodal LLMs
+Aimon Rahman, Joymallya Chakraborty, Vidit Bansal, Abhishek Dan
+Amazon
+{aimonrah, joymally, bansalv, abhidan}@amazon.com
+Abstract
+Multimodal large language models (MLLMs)
+have advanced rapidly, but most remain opti-
+mized for single-image inputs. Multi-image
+reasoning is costly because each image adds
+many visual tokens, increasing encoding and
+attention demands. Existing techniques that ad-
+dress the above issue, including visual token
+pruning, token merging, visual token compres-
+sion, learned resampling, hierarchical compres-
+sion, retrieval-augmented visual reasoning, and
+memory-based architectures, have largely been
+designed for single-image scenarios, where re-
+dundancy is primarily spatial and local. Multi-
+image reasoning introduces additional chal-
+lenges: redundancy may occur across images,
+task-relevant evidence may be sparse or dis-
+tributed, and aggressive per-image compres-
+sion can remove details needed for comparison,
+counting, temporal reasoning, retrieval, or ev-
+idence grounding. Moreover, existing token-
+reduction methods are often either (i) training-
+free but inference-inefficient, typically relying
+on accessing attention matrices to get token-
+importance that may be impractical to access
+with memory-efficient attention implementa-
+tions such as FlashAttention, or (ii) training-
+dependent, requiring the base MLLM to be re-
+trained or adapted to a new compressed-token
+paradigm.
+In this work, we study scalable
+multi-image reasoning and understanding with-
+out retraining the base model and without ac-
+cessing attention matrices at inference time.
+To this end, we propose mmVB (multi-modal
+Visual Budgeter), a lightweight plug-and-play
+module that assigns query-conditioned per-
+image token budgets via cross-image context,
+adding only 1.6M trainable parameters while
+reducing visual input tokens by 9×. This re-
+duction yields 5× faster time-to-first-token and
+7× fewer prefill FLOPs, while maintaining
+94.4% of full-resolution accuracy across eight
+multi-image reasoning benchmarks (geometric
+mean of per-benchmark ratios). These results
+show that input-aware visual scaling can sub-
+stantially improve efficiency while preserving
+multi-image reasoning performance.
+1
+Introduction
+Although current multimodal large language mod-
+els (MLLMs) can accept multiple images as input,
+the problem of scaling them efficiently to many-
+image settings remains underexplored.
+Multi-
+image understanding and reasoning is inherently
+challenging: the model must identify relevant vi-
+sual evidence, compare information across images,
+and aggregate details that may be distributed over
+the input set. Scaling this capability further in-
+creases the difficulty, as every additional image con-
+tributes visual tokens and raises memory, latency,
+and compute costs. This limitation is especially
+important in real-world applications. For instance,
+a catalog-oriented LLM may need to process mul-
+tiple product images to understand item attributes,
+compare variants, and answer user queries, while
+operating within a constrained inference budget.
+Visual token redundancy has been widely stud-
+ied, with many works showing that multimodal lan-
+guage models can operate effectively, and in some
+cases even better, with fewer visual tokens. Ex-
+isting approaches typically reduce tokens through
+pruning, merging, or learned compression, either
+in a training-free manner or by training additional
+modules. However, applying these methods to
+scalable multi-image reasoning presents three key
+challenges: i) Limited systems scalability. Many
+training-free methods rely on accessing attention
+matrices, often across multiple layers, to estimate
+token importance. This can be memory-intensive
+and difficult to integrate with optimized inference
+kernels such as FlashAttention, which avoid ma-
+terializing dense attention maps. Production sys-
+tems often depend on such kernels for speed and
+memory efficiency, meaning that methods requir-
+ing explicit access to dense attention matrices may
+be impractical at scale. Token merging can also dis-
+1
+arXiv:2610.18858v1  [cs.CV]  13 Oct 2026
+
+
+ A. Tower
+What is the clock on?
+What is the di0erence 
+between image 1 and 
+image 2?
+Token Prune
+Token Prune
+❌ What to prune? Model cannot 
+meaningfully isolate tokens without 
+doing the full reasoning
+(a) Token pruning methods target single-image and fail 
+to generalize to multi-image settings.
+  C. Third Edition
+What is the edition 
+of cyberclaw?
+❌ Accessing attention matrix 
+is memory intensive and not 
+scalable to multiple images.
+❌ Doesn’t work with Flash 
+Attention
+(b) Query-aware methods rely on accessing attention matrices at 
+inference to estimate token importance.
+(c) Token merging methods are query-agnostic and produce tokens 
+with ambiguous spatial positions.
+❌ Breaks multi-dimensional positional encoding schemes (e.g. M-RoPE)
+❌ Faulty recalculation of Positional Encodings
+ A. Eating Hotdog
+What is the man in the video 
+doing?
+What is the relationship 
+of image 1 with I
+mage 2?
+Merge based on frame similarity
+❌ Video methods fail on multiple 
+images because the assumption of 
+inter-frame similarity doesn’t hold True
+(d) Video compression methods assume inter-frame similarity,  which 
+does not hold true for multiple-image inputs.
+No frame similarity !!
+ LLM
+💰
+(e) Post-encoding processing methods oBer no reduction in vision 
+encoder compute which is expensive
+Vision 
+Encoder
+ Answer
+❌ The complete Vision Encoder FLOPs is consumed which is expensive
+(f) Some compression techniques learn new token representations, 
+requiring retraining the LLM to interpret.
+Projector
+Vision 
+Encoder
+   LLM
+🔥
+Weights changed
+ Answer
+❌ Learned token compressors require re-training the base MLLM: lossy and expensive
+🔥
+LLM
+Memory
+TTFT
+Tokens
+(g) Ours: 1⃣ Scalable, 2⃣ Requires no LLM retraining, 3⃣ No expensive inference-time operations, 4⃣ Works with API models
+mmVB
+🔥
+Answer
+✅ Scalable ✅ No attention read out ✅ Frozen LLM ✅ Query-aware ✅ Works for single and Multi-image
+Figure 1: Introduction and Motivation. Existing multi-image methods scale poorly: dense attention breaks
+FlashAttention and excludes API-only models, token merging disrupts positional encodings and cross-image
+reasoning, and video-style compression assumes frame similarity. Our pre-encoding predictor instead assigns
+query-conditioned token budgets using only pixels, enabling compatibility with any MLLM, including closed
+models.
+rupt positional structure, and correcting the result-
+ing positional encoding mismatch often requires
+additional architectural changes. ii) Insufficient
+study of multi-image reasoning.
+Most token-
+reduction methods are designed for single-image in-
+puts, where task-relevant regions are often spatially
+localized. For example, when answering “What
+is the species of the animal in this image?”, atten-
+tion may concentrate on the animal region, mak-
+ing pruning or merging relatively effective, often
+even from early layers. In the multi-image rea-
+soning case, questions such as “What is the differ-
+ence between image 1 and image 2?” may require
+preserving fine-grained details across both images
+until later stages of reasoning. In such cases, ag-
+gressive early pruning can remove evidence that
+only becomes important after cross-image compar-
+ison. iii) Training dependence and distribution
+shift. Some approaches require training adapters,
+compressed tokens, or modified visual-language
+interfaces, which can change the input distribution
+seen by the language model or require adapting
+its weights. This is problematic when the goal is
+to scale existing MLLMs without retraining the
+base model, not overfitting to a particular dataset,
+or altering the model’s original reasoning behav-
+ior. Moreover, recent evidence shows that simple
+image downsampling consistently outperforms so-
+phisticated post-encoding compression methods at
+matched token budgets (Liao et al., 2026), ques-
+tioning the fundamental value of operating after
+the vision encoder. Together, these limitations sug-
+gest the need for a token-reduction strategy that is
+scalable, compatible with efficient inference, appli-
+cable to multi-image inputs, and usable with frozen
+multimodal language models.
+A natural solution is to reduce the number of
+visual tokens before language-model processing,
+and ideally even before the visual encoder incurs
+the full cost of processing all image content. Un-
+der a constrained-budget setting, we formulate the
+problem as estimating the minimum relative visual
+scale needed for the downstream language model
+to answer a visual question correctly. The scale
+2
+
+
+MLP
+EfficientNet-B0
+MLP
+Text Encoder
+Query: What is 
+written in the red 
+object?
+Dropout + LayerNorm
+Multi-head Self Attn.
+Linear + GeLU
+Dropout + LayerNorm
+Transformer Block x2
+Linear + ReLU
+Linear 
+Ordinal 
+Logits
+P(lᵢ≥ k)
+Images
+I₁,...,Iₙ
+Query Q
+Multi-modal LLM
+16 tokens
+8 tokens
+16 tokens
+4 tokens
+Figure 2: mmVB architecture. Frozen EfficientNet-
+B0 encodes N images, while frozen LLM embeddings
+encode the query through mean pooling and a 64-
+dimensional bottleneck. A two-layer, four-head Trans-
+former processes all N+1 tokens, after which a shared
+MLP maps each image token to four ordinal logits.
+estimator must itself be lightweight and avoid intro-
+ducing additional memory overhead, since the goal
+is to enable efficient reasoning at scale. To this end,
+we propose mmVB, a lightweight plug-and-play
+module that assigns input-dependent visual bud-
+gets across images conditioned on both the image
+set and the question. Rather than applying a fixed
+resolution or token budget to every image, Visual
+Budgeter estimates how much visual detail each
+image requires for the downstream reasoning task.
+The motivation of this work is illustrated in Figure
+1. Our main contributions are:
+- We formulate scalable multi-image reasoning
+as a visual budget allocation problem, where
+the goal is to estimate the minimum image
+scale needed for accurate downstream reason-
+ing under a constrained compute budget. We
+propose mmVB, a scalable, lightweight plug-
+and-play module with only 1.6M trainable
+parameters that assigns question-conditioned
+visual budgets across images without retrain-
+ing the base MLLM.
+- This Visual Budgeter reduces visual input to-
+kens by 9×, yielding 5× faster time-to-first-
+token and 7× fewer prefill FLOPs.
+- We evaluate Visual Budgeter across eight
+multi-image reasoning benchmarks and show
+that it preserves 94.4% of full-resolution ac-
+curacy, demonstrating that input-aware visual
+scaling can substantially improve efficiency
+while maintaining strong multi-image reason-
+ing performance.
+2
+Proposed mmVB Method
+2.1
+Architecture
+Given N images {I1, . . . , IN} of arbitrary reso-
+lutions and a text query Q, the Visual Budgeter
+assigns each image a token-allocation level ℓi ∈
+{0, 1, 2, 3, 4} that approximates the minimum num-
+ber of visual tokens the MLLM needs to answer
+correctly. In doing so, the budgeter also learns each
+image’s relative relevance to the query. The full
+architecture is shown in Fig. 2.
+Encoding and Context Fusion.
+Each image is
+encoded by a frozen EfficientNet-B0 (Tan and Le,
+2019) and linearly projected to d = 256. The query
+is embedded with the frozen MLLM embedding
+layer, mean-pooled, and mapped to the same space
+through a 64-dimensional bottleneck. The query
+token and N image tokens are then processed by a
+two-layer, four-head Transformer encoder, which
+performs query-conditioned, cross-image reason-
+ing about each image’s required detail and relative
+importance.
+Resolution Head and Inference.
+A shared MLP
+(256 →64 →4) maps each image representation
+to four ordinal logits with P(ℓi ≥k) = σ(zi,k)
+for k ∈{1, 2, 3, 4}, and the predicted level is
+ˆℓi = P4
+k=1 I[σ(zi,k) > 0.5]. Each image is then
+resized to its predicted level (never upscaled) be-
+fore being passed to the MLLM. The budgeter has
+about 1.6M trainable parameters and adds roughly
+2 ms of overhead. Layer specifications, parameter
+counts, design choices, and an architecture ablation
+are given in Appendix A.
+2.2
+Training
+Loss Function.
+We train the model using ordinal
+binary cross-entropy. For a ground-truth level ℓ∗
+i ∈
+0, 1, 2, 3, 4, the cumulative targets are
+yi,k = 1 [ℓ∗
+i ≥k] ,
+k ∈1, 2, 3, 4.
+(1)
+Given predicted logits zi,k, the threshold probabili-
+ties are
+pi,k = σ (zi,k) ,
+(2)
+where pi,k estimates P(ℓi ≥k). The loss for image
+i is
+Lord
+i
+= −
+4
+X
+k=1
+[yi,k log (pi,k) + (1 −yi,k) log (1 −pi,k)] .
+(3)
+3
+
+
+This formulation preserves the ordering of the lev-
+els: predictions closer to ℓ∗
+i violate fewer thresholds
+and incur a smaller loss. For example, when ℓ∗
+i = 3,
+predicting 2 violates one threshold, while predict-
+ing 0 violates three. Full training details (optimizer,
+learning rate, schedule, and batch configuration)
+are provided in the supplementary material.
+2.3
+Training-data Generation
+We address image interactions using a three-round
+procedure: independent ascending search, joint ver-
+ification, and iterative relaxation (Algorithm 1).
+For each image, we sweep Levels 0–4 and select
+the first level that yields a correct MLLM response,
+without assuming monotonic accuracy across reso-
+lutions. Single-image samples require at most five
+forward passes plus a pre-check, while multi-image
+samples cost O(5N +KN) in the worst case. With
+K = 5, joint verification succeeds without relax-
+ation for most samples, so the average cost remains
+close to independent search. Label generation is
+performed once offline, and the resulting labels
+are reused across training runs and hyperparam-
+eter sweeps. A text-only ablation assigns nearly
+uniform levels, showing that meaningful allocation
+requires modeling the query×image-content inter-
+action through multi-resolution MLLM evaluation.
+Label Interpretation.
+The labels produced by
+Algorithm 1 are sufficient feasible allocations, not
+provably minimal ones. The ascending sweep finds
+the first working level per image without assuming
+that correctness is monotonic in resolution; even if
+a higher level were to fail due to MLLM stochas-
+ticity, the returned level is verified correct. Note
+that the pre-check (line 1) guarantees that full reso-
+lution produces the correct answer; consequently,
+both the Round 1 sweep (which tests each image at
+level 4 while others remain at full resolution) and
+the line 29 fallback to (4, . . . , 4) are guaranteed to
+be valid. No sample that fails at full resolution en-
+ters the label generation pipeline. For multi-image
+samples, the greedy relaxation in Round 3 searches
+single-image increments and then uniform incre-
+ments, which may not discover the cheapest subset
+combination (e.g., two images needing simultane-
+ous promotion). This means the returned allocation
+can over-allocate relative to the true joint minimum.
+Crucially, this bias is conservative: labels may as-
+sign more tokens than strictly necessary but never
+fewer, since every returned vector is verified to pro-
+duce the correct answer. For training, conservative
+Algorithm 1 Training Label Generation
+Require: Sample (Q, {I1, . . . , IN}, A), MLLM M
+Ensure: Resolution levels ℓ1, . . . , ℓN
+1: Pre-check: If M(Q, I1, . . . , IN)̸ = A, discard sample
+2: Round 1: Independent Ascending Search
+3: for i = 1 to N do
+4:
+for ℓ= 0 to 4 do
+5:
+if M(Q, I1, . . . , Rℓ(Ii), . . . , IN) = A then
+6:
+ℓi ←ℓ; break
+▷First sufficient level
+7:
+end if
+8:
+end for
+9: end for
+10: Round 2: Joint Verification
+11: if M(Q, Rℓ1(I1), . . . , RℓN (IN)) = A then
+12:
+return ℓ1, . . . , ℓN
+13: end if
+14: Round 3: Iterative Relaxation
+15: for k = 1 to K do
+16:
+for i = 1 to N do
+17:
+if ℓi < 4 then
+18:
+ℓ′
+i ←ℓi + 1
+19:
+if M(Q, . . . , Rℓ′
+i(Ii), . . .) = A then
+20:
+return ℓ1, . . . , ℓ′
+i, . . . , ℓN
+21:
+end if
+22:
+end if
+23:
+end for
+24:
+ℓi ←min(ℓi + 1, 4) for all i
+▷Bump all
+25:
+if M(Q, Rℓ1(I1), . . . , RℓN (IN)) = A then
+26:
+return ℓ1, . . . , ℓN
+27:
+end if
+28: end for
+29: return (4, . . . , 4)
+▷Safe: pre-check verified full res.
+labels are preferable to aggressive ones they train
+the predictor toward accuracy preservation rather
+than over-compression. The ordinal loss further
+tolerates label noise: a label of Level 3 when the
+true minimum is Level 2 incurs only one incorrect
+threshold, producing a mild penalty rather than a
+catastrophic gradient signal.
+Dataset.
+The single-image training set contains
+484k samples from 30k images drawn from
+VQAv2, TextVQA, and GQA. Pairing each image
+with multiple queries provides a contrastive signal,
+as its optimal token level may vary by question,
+encouraging the predictor to model query×image
+interactions rather than memorize image-specific
+levels. We also generate 50k multi-image samples
+from Mantis-Instruct (Jiang et al., 2024) and train
+with a curriculum that introduces multi-image data
+after single-image training. Mantis-Eval is a sepa-
+rate 217-sample benchmark released by the same
+authors.
+3
+Experiments
+Benchmarks and Settings.
+We evaluate on
+eight multi-image reasoning benchmarks span-
+ning diverse task types and image counts: Muir-
+4
+
+
+Method
+Muir
+MIB
+Mantis
+NLVR2
+VHay
+MMIU
+MIRB
+ReMI
+Samples
+2,600
+5,000
+217
+6,967
+20,100
+93,584
+1,124
+2,600
+Accuracy (%) ↑
+Full Res.
+63.6
+78.1
+69.9
+86.5
+69.5
+50.9
+67.2
+24.7
+VisionZip (CVPR’25)
+63.6
+72.8
+69.6
+59.3
+69.6
+48.3
+48.7
+13.8
+ToFu (arXiv)
+42.6
+71.2
+56.7
+60.7
+14.6
+11.2
+42.1
+18.6
+VisionTrim (ICLR’26)
+63.6
+80.4
+67.7
+80.6
+64.2
+52.5
+59.6
+19.3
+ZooPrune (CVPR’26)
+57.0
+69.9
+65.4
+78.3
+63.4
+49.6
+49.5
+16.8
+mmVB (Ours)
+62.9
+77.9
+68.2
+82.8
+69.6
+53.2
+56.5
+19.2
+Visual tokens/sample ↓
+Full Res.
+3,236
+1,237
+2,119
+1,649
+2,187
+2,980
+1,756
+2,573
+VisionZip (CVPR’25)
+2,265
+462
+2,024
+199
+1,836
+712
+891
+286
+ToFu (arXiv)
+1,731
+1,122
+2,050
+1,171
+1,557
+522
+1,391
+2,177
+VisionTrim (ICLR’26)
+3,531
+370
+634
+494
+1,165
+1,532
+865
+770
+ZooPrune (CVPR’26)
+356
+136
+182
+95
+239
+300
+159
+99
+mmVB (Ours)
+389
+248
+118
+89
+594
+453
+193
+155
+Prefill computation (TFLOP) ↓
+Full Res.
+22,300
+18,507
+1,170
+48,969
+10,828
+138,050
+6,049
+44,360
+VisionZip (CVPR’25)
+20,835
+12,329
+1,282
+14,997
+9,523
+79,901
+4,898
+8,118
+ToFu (arXiv)
+9,189
+13,623
+1,129
+24,054
+1,687
+4,358
+3,339
+33,084
+VisionTrim (ICLR’26)
+83,339
+16,720
+1,052
+27,379
+5,600
+120,409
+13,686
+15,273
+ZooPrune (CVPR’26)
+9,148
+6,441
+422
+9,097
+42,408
+40,554
+7,039
+3,534
+mmVB (Ours)
+2,830
+4,698
+129
+3,146
+2,761
+11,429
+2,265
+3,042
+Time to first token (TTFT, seconds) ↓
+Full Res.
+3.5
+1.6
+2.2
+2.8
+11.8
+7.9
+2.5
+22.2
+VisionZip (CVPR’25)
+1.1
+1.3
+2.6
+1.6
+0.8
+1.1
+2.3
+17.9
+ToFu (arXiv)
+7.3
+5.5
+9.9
+6.5
+27.3
+15.5
+6.8
+22.5
+VisionTrim (ICLR’26)
+1.2
+0.6
+0.7
+0.6
+1.2
+1.2
+1.0
+11.4
+ZooPrune (CVPR’26)
+0.5
+0.7
+0.5
+0.5
+0.6
+0.8
+0.7
+11.6
+mmVB (Ours)
+0.5
+0.7
+0.6
+0.6
+0.6
+0.6
+1.3
+15.2
+Harmonic mean (HM) ↑
+VisionZip (CVPR’25)
+0.46
+0.75
+0.09
+0.77
+0.28
+0.84
+0.59
+0.69
+ToFu (arXiv)
+0.55
+0.17
+0.06
+0.41
+0.24
+0.35
+0.31
+0.26
+VisionTrim (ICLR’26)
+0.00
+0.83
+0.81
+0.80
+0.62
+0.66
+0.65
+0.74
+ZooPrune (CVPR’26)
+0.89
+0.89
+0.92
+0.92
+0.90
+0.94
+0.81
+0.80
+mmVB (Ours)
+0.93
+0.89
+0.96
+0.95
+0.82
+0.94
+0.86
+0.85
+Notes. Muir = MuirBench; MIB = MIBench; Mantis = Mantis-Eval; VHay = Visual Haystacks. VisionTrim uses DVTS +
+TGVC post-encoding token selection with approximately 30% token retention. mmVB uses combined single- and
+multi-image training. HM is the harmonic mean of accuracy retention, acc/accfull, and token compression, 1 −tok/tokfull.
+Full Res. has an HM of 0.00 because its token compression is zero. Best and second-best results, excluding Full Res., are
+indicated by boldface and underlining, respectively.
+Table 1: Comparison of predictive performance, visual-token efficiency, and computational efficiency across eight
+multi-image benchmarks.
+Bench (Wang et al., 2025) (2.6k, 2–7 imgs),
+MIBench (Liu et al., 2024) (5k, 2–14 imgs),
+Mantis-Eval (Jiang et al., 2024) (217, 2–5 imgs),
+NLVR2 (Suhr et al., 2019) (7k, 2 imgs), Visual
+Haystacks (Wu et al., 2025) (20k, up to 10 imgs),
+MMIU (Meng et al., 2025) (93k, 1–62 imgs),
+MIRB (Zhao et al., 2024) (1.1k, 2–6 imgs), and
+ReMI (Kazemi et al., 2024) (2.6k, 2–6 imgs). We
+use Qwen3.5-4B as the base MLLM with greedy
+decoding and thinking mode disabled. Full dataset
+descriptions and training details are provided in the
+supplementary material.
+Baselines and Ablations. We compare against
+four post-encoding token-reduction baselines: Vi-
+sionZip (Yang et al., 2026) (attention-based, 65%
+dominant + 5% contextual tokens), ToFu (Pippi
+et al., 2025) (dynamic token fusion via similar-
+ity merging), VisionTrim (Yu et al., 2026) (domi-
+nant selection + text-guided complement, retaining
+∼30%), and ZooPrune (Kim et al., 2026) (zeroth-
+order gradient token pruning with keep ratio 0.11).
+All operate after the full ViT forward pass and
+cannot reduce encoder compute. We also report
+Full Res. (upper bound), Uniform (all images at
+512×512), Lower Bound (all images at 32×32),
+Random (levels sampled from GT distribution),
+and mmVBSI (our predictor trained on single-image
+VQA only, to quantify the benefit of multi-image
+5
+
+
+training data).
+Main Results. Table 1 compares mmVB against
+post-encoding baselines. mmVB achieves the high-
+est harmonic mean on six of eight benchmarks
+(average HM of 0.90), retaining 94.4% of full-
+resolution accuracy while reducing visual tokens
+by 9.2× and prefill FLOPs by 7.3× (geomet-
+ric mean across benchmarks). ZooPrune attains
+the best HM on MIBench and Visual Haystacks,
+where its aggressive token pruning (keep ratio
+0.11) yields strong accuracy–compression trade-
+offs; however, it still requires a full ViT forward
+pass and cannot reduce encoder compute.
+Vi-
+sionTrim is the strongest post-encoding baseline
+in accuracy, matching or exceeding mmVB on
+MIBench and MIRB, but it consumes 1.5–9.1×
+more tokens per sample than mmVB to achieve
+comparable accuracy. Even on benchmarks where
+mmVB trails VisionTrim by 1–4 points in accu-
+racy, mmVB uses 4–9× fewer tokens and 4–7×
+fewer prefill FLOPs, yielding substantially higher
+HM. VisionZip achieves strong compression on
+few-image benchmarks (e.g., 8.3× on NLVR2) but
+retains most tokens on multi-image inputs (1.2×
+on Visual Haystacks), yielding inconsistent effi-
+ciency. ToFu collapses on benchmarks requiring
+cross-image reasoning (Visual Haystacks, MMIU)
+where query-unaware merging discards discrimi-
+native content. Critically, all post-encoding meth-
+ods pay full ViT cost regardless of predicted im-
+portance; mmVB’s pre-encoding resolution selec-
+tion saves both encoder and LLM compute, align-
+ing with findings that resolution reduction outper-
+forms post-encoding compression at matched bud-
+gets (Liao et al., 2026).
+Ablation Study. Table 3 isolates each component’s
+contribution. The Random baseline samples levels
+from the ground-truth distribution but assigns them
+without regard to image content or query; it uses
+fewer tokens than mmVB on every benchmark be-
+cause it randomly under-allocates to query-relevant
+images, but this results in substantially lower accu-
+racy (e.g., 58.3% vs. 62.9% on MuirBench, 70.0%
+vs. 82.8% on NLVR2). The accuracy gap confirms
+that mmVB’s higher token usage reflects meaning-
+ful allocation to images that need it, not inefficiency.
+For a controlled comparison at matched budgets,
+see Figure 3. Adding multi-image training data (MI
+vs. SI) improves accuracy on all benchmarks except
+ReMI, with the largest gains on Visual Haystacks
+(+5.7pp) and NLVR2 (+3.6pp), where cross-image
+reasoning is critical.
+Figure 3: Budget-constrained visual-token allocation.
+Accuracy retention (mean across all eight benchmarks)
+as a function of average visual tokens per image. At
+matched budgets, query-conditioned greedy allocation
+consistently outperforms uniform allocation.
+mmVB for Budget-Constrained Token Alloca-
+tion. The default mmVB pipeline predicts the min-
+imum token level for each image independently. In
+deployment, however, the total visual-token bud-
+get may be fixed by latency, memory, throughput,
+or cost constraints. We therefore extend mmVB
+to distribute an arbitrary total budget across all
+input images using its ordinal predictions. Let
+bi ∈b0, b1, b2, b3, b4 denote the token allocation
+for image Ii, where each bk corresponds to one of
+five resolution levels. Given a total budget B, the
+allocation must satisfy
+N
+X
+i=1
+bi ≤B.
+(4)
+Each promotion of image Ii from level k−1 to
+level k has utility ui,k = σ(zi,k) and token cost
+∆bk = bk −bk−1, where σ(zi,k) is the ordinal
+probability from the resolution head. Starting from
+the lowest level for all images, we greedily select
+the promotion with the highest ui,k/∆bk and repeat
+until the budget is exhausted. This training-free pro-
+cedure approximates a multiple-choice knapsack
+solution, prioritizing query-relevant images while
+leaving less relevant images at lower resolutions.
+As shown in Figure 3, this query-conditioned allo-
+cation consistently outperforms uniform allocation
+under the same total budget and can recover full
+accuracy with substantially fewer tokens. These
+results show that visual-token efficiency depends
+not only on how many tokens are retained, but also
+on how they are distributed across images.
+Black-box transfer.
+To test whether mmVB’s
+learned resolution decisions reflect task-relevant vi-
+6
+
+
+Qwen3.5-27B
+Claude Opus 4.6
+Pixtral Large
+Benchmark
+Acc (%)
+Tok/S
+Acc (%)
+Tok/S
+Acc (%)
+Tok/S
+Full
+mmVB
+Full
+mmVB
+Full
+mmVB
+Full
+mmVB
+Full
+mmVB
+Full
+mmVB
+MuirBench
+72.7
+68.3
+3,048
+256
+69.6
+64.5
+3,074
+519
+45.0
+42.3
+3,891
+905
+MIBench
+80.8
+78.7
+1,611
+211
+77.1
+70.5
+1,617
+547
+67.5
+58.2
+2,048
+846
+Mantis-Eval
+82.0
+82.0
+2,119
+270
+86.1
+78.7
+2,581
+298
+81.0
+79.2
+2,488
+374
+NLVR2
+93.8
+88.8
+1,649
+70
+91.2
+86.1
+1,368
+250
+83.7
+78.6
+2,048
+281
+Vis. Haystacks
+77.6
+68.8
+2,187
+358
+71.6
+69.3
+3,586
+1,908
+78.9
+77.4
+7,987
+2,392
+MMIU
+66.9
+61.7
+2,950
+360
+63.9
+64.8
+3,787
+1,314
+53.2
+49.3
+4,096
+944
+MIRB
+70.7
+70.5
+1,794
+690
+76.2
+62.8
+2,584
+951
+66.5
+64.1
+4,966
+668
+ReMI
+23.0
+18.0
+2,561
+118
+32.2
+23.0
+1,472
+356
+27.7
+18.1
+2,417
+474
+Table 2: Black-box transfer: mmVB predictions (trained
+on Qwen3.5-4B) applied to unseen models without re-
+training.
+sual information needs rather than model-specific
+artifacts, we evaluate with three black-box mod-
+els that mmVB has never seen during training:
+Qwen3.5-27B, Claude Opus 4.6, and Pixtral Large.
+Images are resized according to mmVB’s predicted
+levels (trained solely on Qwen3.5-4B), then passed
+directly to each model’s API with no adaptation
+or fine-tuning. Qwen3.5-27B preserves 92.9% ac-
+curacy with 9.1× visual token reduction; Claude
+Opus 4.6 preserves 89.8% with 3.9× input token re-
+duction; Pixtral Large preserves 89.9% with 4.8×
+input token reduction (geometric means across
+benchmarks). This demonstrates that the resolu-
+tion decisions generalize across architectures and
+scales, suggesting mmVB captures intrinsic image–
+query complexity rather than overfitting to the
+training model’s visual encoder.
+We note that
+these results represent a lower bound on achiev-
+able performance: training a model-specific pre-
+dictor (e.g., distilling from Qwen3.5-27B’s own
+responses) would likely yield tighter accuracy re-
+tention, as the predictor could learn that model’s
+particular sensitivity to resolution changes.
+Does the mmVB learn per-image relevance?
+Yes. By assigning the lowest token budget to im-
+ages irrelevant to the query, the predictor implicitly
+learns a relevance signal. On Visual Haystacks, a
+needle-in-haystack benchmark where only 1 of up
+to 10 images contains the answer mmVB assigns
+Level 0 to 87% of images and reserves higher lev-
+els for the target. This emergent behavior arises
+without explicit relevance supervision: the GT gen-
+eration procedure finds that irrelevant images can
+be maximally compressed without affecting cor-
+rectness, so the predictor learns to map “irrelevant
+to query” directly onto minimal resolution. Exam-
+ples are illustrated in Figure 4.
+4
+Related Work
+Our work relates to visual token compression, vi-
+sual resampling, multi-image reasoning, and effi-
+✅A. The hydrant in the first image has been transformed into a robot in the second image.
+What changed between these two images?
+Options:
+A) The hydrant in the first image has been 
+transformed into a robot in the second image.
+B) The robot in the second image has been given 
+wheels, compared to the first image.
+C) Some bushes have been added in the second 
+image compared to the first one.
+D) Nothing has changed.
+MIBench
+(Subtle Difference)
+✅C.  Image 1 is China, Image 2 is Mexico, Image 3 is Japan
+Which country can be identified in the clothing 
+styles in each image?
+Options:
+A) Image 1 is France, Image 2 is Brazil, Image 3 is 
+Italy
+B) Image 1 is India, Image 2 is Spain, Image 3 is 
+Australia
+C) Image 1 is China, Image 2 is Mexico, Image 3 is 
+Japan
+Mantis-Eval
+(Cultural Influence)
+✅B. The information-theoretic value of unlabeled data in semi-supervised learning
+Based on the content of the slides, make an 
+educated guess about the title of the paper being 
+presented.
+Options:
+A) Learning to Route in Similarity Graphs
+B) The information-theoretic value of unlabeled data 
+in semi-supervised learning
+C) None of the choices provided
+D) Inference of Joint Distributions from Marginals
+MuirBench
+(Image-Text Matching / Slides)
+L0 (1 token)
+L1 (4 tokens)
+L2 (16 tokens)
+L3 (64 tokens)
+L4 (256 tokens)
+Figure 4: Qualitative Examples from the benchmark.
+cient attention. Prior methods reduce visual-token
+cost through pruning, merging, or compact repre-
+sentations (Rao et al., 2021; Bolya et al., 2023;
+Chen et al., 2024; Yang et al., 2026; Zhang et al.,
+2025; Shang et al., 2026; Li et al., 2024c,b; Cai
+et al., 2024; Xing et al., 2025; Hu et al., 2026;
+Shen et al., 2024; Han et al., 2025; Renggli et al.,
+2022). However, recent work suggests that simple
+input downsampling can outperform several post-
+encoding compression methods at matched com-
+pression ratios (Liao et al., 2026). Most approaches
+also process each image independently, rather than
+allocating a shared, question-conditioned token
+budget across multiple images.
+Latent resam-
+pling methods such as BLIP-2, Perceiver IO, and
+Flamingo map visual inputs into compact token
+sets (Li et al., 2023; Jaegle et al., 2022; Alayrac
+et al., 2022), but typically use a fixed budget
+per image. Multi-image models, including Man-
+tis, LLaVA-NeXT-Interleave, LLaVA-OneVision,
+LongVA, and MuRAG, improve reasoning over
+multiple images or long multimodal contexts (Jiang
+et al., 2024; Li et al., 2024a; Zhang et al., 2024a;
+Chen et al., 2022), but do not explicitly adapt to-
+ken allocation to question relevance. AVAM (Zeng
+et al., 2025) introduces query-conditioned visual
+anchoring for multi-image QA, but targets accu-
+racy improvement rather than efficiency: its col-
+laborative decoding mechanism runs both global
+and compressed visual branches, increasing infer-
+ence cost. In contrast, mmVB operates before en-
+coding and reduces both vision-encoder and LLM
+compute in a single forward pass. MIRAGE (Wu
+et al., 2025) uses visual retrieval to select which
+7
+
+
+Accuracy (%) ↑
+Vis Tok/Samp ↓
+TTFT (s) ↓
+Benchmark
+N
+Full
+Uni
+Low
+Rand
+SI
+MI
+Full
+Uni
+Low
+Rand
+SI
+MI
+Full
+Uni
+Low
+Rand
+SI
+MI
+Muir
+2,600
+63.6
+63.8
+52.7
+58.3
+61.7
+62.9
+3,236
+1,109
+5
+370
+388
+389
+3.5
+0.6
+0.6
+0.7
+0.8
+0.5
+MIB
+5,000
+78.1
+77.4
+64.7
+72.6
+74.6
+77.9
+1,237
+1,178
+5
+125
+231
+248
+1.6
+1.0
+0.5
+0.5
+0.7
+0.7
+Mantis
+217
+69.9
+69.1
+49.3
+59.9
+65.4
+68.2
+2,119
+637
+3
+73
+103
+118
+2.2
+0.9
+0.5
+0.6
+0.6
+0.6
+NLVR2
+6,967
+86.5
+86.9
+56.8
+70.0
+79.2
+82.8
+1,649
+512
+2
+63
+75
+89
+2.8
+0.6
+0.5
+0.5
+0.5
+0.6
+VHay
+20,100
+69.5
+69.5
+51.7
+58.5
+63.9
+69.6
+2,187
+2,090
+8
+271
+571
+594
+11.8
+0.7
+1.2
+4.0
+6.0
+0.6
+MMIU
+93,584
+50.9
+58.7
+37.3
+46.4
+50.1
+53.2
+2,980
+1,735
+7
+203
+217
+453
+7.9
+0.7
+2.1
+0.6
+0.6
+0.6
+MIRB
+1,124
+67.2
+63.0
+40.2
+45.7
+53.3
+56.5
+1,756
+791
+3
+123
+182
+193
+2.5
+1.5
+1.1
+1.1
+1.2
+1.3
+ReMI
+2,600
+24.7
+25.7
+17.1
+18.4
+20.0
+19.2
+2,573
+638
+3
+87
+143
+155
+22.2
+16.4
+15.7
+14.2
+14.2
+15.2
+Table 3: Ablation: accuracy and efficiency across eight multi-image benchmarks. Full = native resolution (reference).
+Uni = all images at 512×512. Low = all images at 32×32 (lower bound). Rand = random level (distribution-
+matched). SI = mmVB single-image training. MI = mmVB single+multi-image training. Bold = best (excl.
+Full/Low).
+images to process, scaling to thousands of images
+by discarding irrelevant ones entirely; mmVB in-
+stead retains all images but allocates different token
+budgets, which is necessary for tasks where every
+image may contribute (e.g., comparison, counting).
+Efficient attention methods such as FlashAttention
+and FlashAttention-2 reduce long-context memory
+and computation (Dao et al., 2022; Dao, 2023),
+although they make attention-map-based pruning
+less practical. Overall, existing methods often use
+fixed budgets, operate on images independently,
+require attention-score access, or train new visual-
+language interfaces (Lee et al., 2026; Kim et al.,
+2026; Alvar et al., 2025; Kimhi et al., 2025; Zhang
+et al., 2024b; Ye et al., 2025; Lee et al., 2024;
+Choudhury et al., 2024; Wei et al., 2023; Zhou
+et al., 2026; Xie et al., 2026; Rubab et al., 2026;
+Ding et al., 2023; Chen et al., 2023; Ryoo et al.,
+2021; Lei et al., 2025; Eliopoulos et al., 2025). In
+contrast, we introduce lightweight, plug-and-play
+visual budgeting for multi-image reasoning that is
+question-conditioned, requires no base-model re-
+training, and avoids dense attention-map access at
+inference time.
+5
+Conclusion
+We presented mmVB, a plug-and-play module that
+assigns query-aware token budgets before visual en-
+coding. It achieves 9× token reduction, 7× fewer
+prefill FLOPs, and 5× faster TTFT while retaining
+94.4% accuracy, with negligible latency and strong
+cross-model transfer.
+6
+Limitations
+The scale predictor is trained exclusively on natural-
+image QA datasets (VQAv2, TextVQA, GQA).
+Domains with fundamentally different resolution
+requirements, such as medical imaging where di-
+agnostically relevant features may occupy only a
+❌B. No
+For all images with a car, do all of them contain a 
+dog?
+Options:
+A) Yes.
+B) No.
+Visual Haystack
+❌B
+(No Queries)
+Options:
+1) A 
+2) B 
+3) C
+4) D
+REMI
+L0 (1 token)
+L1 (4 tokens)
+L2 (16 tokens)
+L3 (64 tokens)
+L4 (256 tokens)
+Even though mmVB made correct relative 
+prediction, predicted scale still weren’t 
+sufficient enough for correct answer. 
+Scale predictor failed to preserve fine pattern
+in hexagon.
+Figure 5: Limitations. Scale predictor may underesti-
+mate tokens needed to answer questions. May also fail
+when there’s no text query.
+few pixels within a high-resolution scan, are not
+represented in the training distribution. In such
+domains, the predictor may under-allocate tokens
+because it has not learned that subtle fine-grained
+features (e.g., lesion boundaries, microcalcifica-
+tions) require full resolution regardless of query
+type. See Figure 5 for examples.
+References
+Jean-Baptiste Alayrac, Jeff Donahue, Pauline Luc, An-
+toine Miech, Iain Barr, Yana Hasson, Karel Lenc,
+Arthur Mensch, Katie Millican, Malcolm Reynolds,
+Roman Ring, Eliza Rutherford, Serkan Cabi, Tengda
+Han, Zhitao Gong, Sina Samangooei, Marianne Mon-
+teiro, Jacob Menick, Sebastian Borgeaud, and 8 oth-
+ers. 2022. Flamingo: a visual language model for
+few-shot learning. Preprint, arXiv:2204.14198.
+Saeed Ranjbar Alvar, Gursimran Singh, Mohammad
+Akbari, and Yong Zhang. 2025. Divprune: Diversity-
+based visual token pruning for large multimodal mod-
+els. In Proceedings of the Computer Vision and Pat-
+tern Recognition Conference, pages 9392–9401.
+Daniel Bolya, Cheng-Yang Fu, Xiaoliang Dai, Peizhao
+Zhang, Christoph Feichtenhofer, and Judy Hoffman.
+8
+
+
+2023. Token merging: Your vit but faster. Preprint,
+arXiv:2210.09461.
+Mu Cai, Jianwei Yang, Jianfeng Gao, and Yong Jae Lee.
+2024. Matryoshka multimodal models. Preprint,
+arXiv:2405.17430.
+Lei Chen, Zhan Tong, Yibing Song, Gangshan Wu, and
+Limin Wang. 2023. Efficient video action detection
+with token dropout and context refinement. In Pro-
+ceedings of the IEEE/CVF International Conference
+on Computer Vision, pages 10388–10399.
+Liang Chen, Haozhe Zhao, Tianyu Liu, Shuai Bai, Jun-
+yang Lin, Chang Zhou, and Baobao Chang. 2024.
+An image is worth 1/2 tokens after layer 2: Plug-and-
+play inference acceleration for large vision-language
+models. Preprint, arXiv:2403.06764.
+Wenhu Chen, Hexiang Hu, Xi Chen, Pat Verga, and
+William W. Cohen. 2022.
+MuRAG: Multimodal
+retrieval-augmented generator for open question an-
+swering over images and text.
+Rohan Choudhury, Guanglei Zhu, Sihan Liu, Koichiro
+Niinuma, Kris M Kitani, and Laszlo Attila Jeni. 2024.
+Don’t look twice: Faster video transformers with run-
+length tokenization. In The Thirty-eighth Annual
+Conference on Neural Information Processing Sys-
+tems.
+Tri Dao. 2023. Flashattention-2: Faster attention with
+better parallelism and work partitioning. Preprint,
+arXiv:2307.08691.
+Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra,
+and Christopher Ré. 2022. Flashattention: Fast and
+memory-efficient exact attention with io-awareness.
+Preprint, arXiv:2205.14135.
+Shuangrui Ding, Peisen Zhao, Xiaopeng Zhang, Rui
+Qian, Hongkai Xiong, and Qi Tian. 2023. Prune
+spatio-temporal tokens by semantic-aware temporal
+accumulation. In Proceedings of the IEEE/CVF In-
+ternational Conference on Computer Vision, pages
+16945–16956.
+Nicholas John Eliopoulos, Purvish Jajal, James C Davis,
+Gaowen Liu, George K Thiravathukal, and Yung-
+Hsiang Lu. 2025. Pruning one more token is enough:
+Leveraging latency-workload non-linearities for vi-
+sion transformers on the edge. In 2025 IEEE/CVF
+Winter Conference on Applications of Computer Vi-
+sion (WACV), pages 7153–7162. IEEE.
+Yuhang Han, Xuyang Liu, Zihan Zhang, Pengxiang
+Ding, Junjie Chen, Donglin Wang, Honggang Chen,
+Qingsen Yan, and Siteng Huang. 2025. Filter, cor-
+relate, compress: Training-free token reduction for
+mllm acceleration. Preprint, arXiv:2411.17686.
+Lianyu Hu, Liqing Gao, Fanhua Shang, Liang Wan,
+and Wei Feng. 2026. iLLaVA: An image is worth
+fewer than 1/3 input tokens in large multimodal mod-
+els. In The Fourteenth International Conference on
+Learning Representations.
+Andrew Jaegle, Sebastian Borgeaud, Jean-Baptiste
+Alayrac, Carl Doersch, Catalin Ionescu, David Ding,
+Skanda Koppula, Daniel Zoran, Andrew Brock, Evan
+Shelhamer, Olivier Hénaff, Matthew M. Botvinick,
+Andrew Zisserman, Oriol Vinyals, and Jo¯ao Car-
+reira. 2022.
+Perceiver io:
+A general architec-
+ture for structured inputs and outputs.
+Preprint,
+arXiv:2107.14795.
+Dongfu Jiang, Xuan He, Huaye Zeng, Cong Wei, Max
+Ku, Qian Liu, and Wenhu Chen. 2024. Mantis: Inter-
+leaved multi-image instruction tuning. arXiv preprint
+arXiv:2405.01483.
+Mehran Kazemi, Nishanth Dikkala, Ankit Anand, Petar
+Devic, Ishita Dasgupta, Fangyu Liu, Bahare Fatemi,
+Pranjal Awasthi, Dee Guo, Sreenivas Gollapudi, et al.
+2024. Remi: A dataset for reasoning with multiple
+images. Advances in Neural Information Processing
+Systems, 37:60088–60109.
+Youngeun Kim, Youjia Zhang, Huiling Liu, Aecheon
+Jung, Sunwoo Lee, and Sungeun Hong. 2026. Zoo-
+prune: Training-free token pruning via zeroth-order
+gradient estimation in vision-language models. In
+Proceedings of the IEEE/CVF Conference on Com-
+puter Vision and Pattern Recognition, pages 39572–
+39582.
+Moshe Kimhi, Nimrod Shabtay, Raja Giryes, Chaim
+Baskin, and Eli Schwartz. 2025. Cares: Context-
+aware resolution selector for vlms. arXiv preprint
+arXiv:2510.19496.
+DongJae Lee, Jiwan Hur, Jaehyun Choi, Jaemyung Yu,
+and Junmo Kim. 2026. Frequency-aware token re-
+duction for efficient vision transformer. Advances in
+Neural Information Processing Systems, 38:34058–
+34083.
+Seon-Ho Lee, Jue Wang, Zhikang Zhang, David Fan,
+and Xinyu Li. 2024.
+Video token merging for
+long-form video understanding.
+arXiv preprint
+arXiv:2410.23782.
+Cheng Lei, Ao Li, Hu Yao, Ce Zhu, and Le Zhang. 2025.
+Rethinking token reduction with parameter-efficient
+fine-tuning in vit for pixel-level tasks. In Proceedings
+of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 14954–14964.
+Feng Li, Renrui Zhang, Hao Zhang, Yuanhan Zhang,
+Bo Li, Wei Li, Zejun Ma, and Chunyuan Li. 2024a.
+Llava-next-interleave: Tackling multi-image, video,
+and 3d in large multimodal models.
+Preprint,
+arXiv:2407.07895.
+Junnan Li, Dongxu Li, Silvio Savarese, and Steven Hoi.
+2023. Blip-2: Bootstrapping language-image pre-
+training with frozen image encoders and large lan-
+guage models. Preprint, arXiv:2301.12597.
+Wentong Li, Yuqian Yuan, Jian Liu, Dongqi Tang, Song
+Wang, Jie Qin, Jianke Zhu, and Lei Zhang. 2024b.
+Tokenpacker: Efficient visual projector for multi-
+modal llm. Preprint, arXiv:2407.02392.
+9
+
+
+Yanwei Li, Yuechen Zhang, Chengyao Wang, Zhisheng
+Zhong, Yixin Chen, Ruihang Chu, Shaoteng Liu, and
+Jiaya Jia. 2024c. Mini-gemini: Mining the potential
+of multi-modality vision language models. Preprint,
+arXiv:2403.18814.
+Chenfei Liao, Wensong Wang, Zichen Wen, Xu Zheng,
+Yiyu Wang, Haocong He, Yuanhuiyi Lyu, Lutao
+Jiang, Xin Zou, Yuqian Fu, et al. 2026. Are we using
+the right benchmark: An evaluation framework for
+visual token compression methods. In Proceedings
+of the 64th Annual Meeting of the Association for
+Computational Linguistics (Volume 1: Long Papers),
+pages 4236–4253.
+Haowei Liu, Xi Zhang, Haiyang Xu, Yaya Shi, Chaoya
+Jiang, Ming Yan, Ji Zhang, Fei Huang, Chunfeng
+Yuan, Bing Li, et al. 2024. Mibench: Evaluating mul-
+timodal large language models over multiple images.
+In Proceedings of the 2024 Conference on Empiri-
+cal Methods in Natural Language Processing, pages
+22417–22428.
+Fanqing Meng, Jin Wang, Chuanhao Li, Quanfeng
+Lu, Hao Tian, Tianshuo Yang, Jiaqi Liao, Xizhou
+Zhu, Jifeng Dai, Yu Qiao, et al. 2025. Mmiu: Mul-
+timodal multi-image understanding for evaluating
+large vision-language models. In International Con-
+ference on Learning Representations, volume 2025,
+pages 38405–38453.
+Vittorio Pippi, Matthieu Guillaumin, Silvia Cascianelli,
+Rita Cucchiara, Maximilian Jaritz, and Loris Bazzani.
+2025. Tofu: Visual tokens reduction via fusion for
+multi-modal, multi-patch, multi-image task. arXiv
+preprint arXiv:2503.04444.
+Yongming Rao, Wenliang Zhao, Benlin Liu, Jiwen Lu,
+Jie Zhou, and Cho-Jui Hsieh. 2021. Dynamicvit: Ef-
+ficient vision transformers with dynamic token spar-
+sification. Preprint, arXiv:2106.02034.
+Cedric Renggli, André Susano Pinto, Neil Houlsby,
+Basil Mustafa, Joan Puigcerver, and Carlos Riquelme.
+2022. Learning to merge tokens in vision transform-
+ers. arXiv preprint arXiv:2202.12015.
+Syeda Fiza Rubab, Arslan Abdul Ghaffar, Malik Ju-
+naid Jami Gul, Sheriff Murtala, Ingyu Lee, and
+Gyu Sang Choi. 2026. Dyna-vit: Parameter-free
+pre-encoder token pruning for efficient vision trans-
+formers. In Proceedings of the IEEE/CVF Confer-
+ence on Computer Vision and Pattern Recognition,
+pages 2844–2851.
+Michael Ryoo, AJ Piergiovanni, Anurag Arnab, Mostafa
+Dehghani, and Anelia Angelova. 2021. Tokenlearner:
+Adaptive space-time tokenization for videos. Ad-
+vances in neural information processing systems,
+34:12786–12797.
+Yuzhang Shang, Mu Cai, Bingxin Xu, Yong Jae Lee,
+and Yan Yan. 2026. Llava-prumerge: Adaptive to-
+ken reduction for efficient large multimodal models.
+Preprint, arXiv:2403.15388.
+Xiaoqian Shen, Yunyang Xiong, Changsheng Zhao,
+Lemeng Wu, Jun Chen, Chenchen Zhu, Zechun Liu,
+Fanyi Xiao, Balakrishnan Varadarajan, Florian Bor-
+des, Zhuang Liu, Hu Xu, Hyunwoo J. Kim, Bilge
+Soran, Raghuraman Krishnamoorthi, Mohamed Elho-
+seiny, and Vikas Chandra. 2024. Longvu: Spatiotem-
+poral adaptive compression for long video-language
+understanding. Preprint, arXiv:2410.17434.
+Alane Suhr, Stephanie Zhou, Ally Zhang, Iris Zhang,
+Huajun Bai, and Yoav Artzi. 2019. A corpus for
+reasoning about natural language grounded in pho-
+tographs. In Proceedings of the 57th annual meet-
+ing of the association for computational linguistics,
+pages 6418–6428.
+Mingxing Tan and Quoc Le. 2019. Efficientnet: Re-
+thinking model scaling for convolutional neural net-
+works. In International conference on machine learn-
+ing, pages 6105–6114. PMLR.
+Fei Wang, Xingyu Fu, James Y Huang, Zekun Li,
+Qin Liu, Xiaogeng Liu, Mingyu Derek Ma, Nan
+Xu, Wenxuan Zhou, Kai Zhang, et al. 2025. Muir-
+bench: A comprehensive benchmark for robust multi-
+image understanding. In International Conference
+on Learning Representations, volume 2025, pages
+62624–62650.
+Siyuan Wei, Tianzhu Ye, Shen Zhang, Yao Tang, and
+Jiajun Liang. 2023. Joint token pruning and squeez-
+ing towards more aggressive compression of vision
+transformers. In Proceedings of the IEEE/CVF con-
+ference on computer vision and pattern recognition,
+pages 2092–2101.
+Tsung-Han Wu, Giscard Biamby, Jerome Quenum,
+Ritwik Gupta, Joseph E Gonzalez, David Chan, et al.
+2025. Visual haystacks: A vision-centric needle-in-
+a-haystack benchmark. In International Conference
+on Learning Representations, volume 2025, pages
+64592–64615.
+Weiying Xie, Xiaoyu Chen, Xin Zhang, Chenhe Hao,
+Jitao Ma, Yunsong Li, and Leyuan Fang. 2026.
+Saliency-driven token merging for vision transform-
+ers. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages
+32184–32193.
+Long Xing, Qidong Huang, Xiaoyi Dong, Jiajie Lu,
+Pan Zhang, Yuhang Zang, Yuhang Cao, Conghui He,
+Jiaqi Wang, Feng Wu, and Dahua Lin. 2025. Pyra-
+middrop: Accelerating your large vision-language
+models via pyramid visual redundancy reduction.
+Preprint, arXiv:2410.17247.
+Senqiao Yang, Yukang Chen, Zhuotao Tian, Chengyao
+Wang, Jingyao Li, Bei Yu, and Jiaya Jia. 2026. Vi-
+sionzip: Longer is better but not necessary in vision
+language models. Preprint, arXiv:2412.04467.
+Haotian Ye, Qiyuan He, Jiaqi Han, Puheng Li, Jiaojiao
+Fan, Zekun Hao, Fitsum Reda, Yogesh Balaji, Huayu
+Chen, Sheng Liu, et al. 2025. Infotok: Adaptive dis-
+crete video tokenizer via information-theoretic com-
+pression. arXiv preprint arXiv:2512.16975.
+10
+
+
+Hanxun Yu, Wentong Li, Xuan Qu, Song Wang, Junbo
+Chen, and Jianke Zhu. 2026. Visiontrim: Unified
+vision token compression for training-free mllm ac-
+celeration. arXiv preprint arXiv:2601.22674.
+Weihao Yu, Zhengyuan Yang, Linjie Li, Jianfeng Wang,
+Kevin Lin, Zicheng Liu, Xinchao Wang, and Li-
+juan Wang. 2023. Mm-vet: Evaluating large mul-
+timodal models for integrated capabilities. Preprint,
+arXiv:2308.02490.
+Kang Zeng, Guojin Zhong, Jintao Cheng, Jin Yuan, and
+Zhiyong Li. 2025. Avam: a universal training-free
+adaptive visual anchoring embedded into multimodal
+large language model for multi-image question an-
+swering. In 2025 IEEE/CVF International Confer-
+ence on Computer Vision (ICCV), pages 2292–2302.
+IEEE.
+Peiyuan Zhang, Kaichen Zhang, Bo Li, Guangtao Zeng,
+Jingkang Yang, Yuanhan Zhang, Ziyue Wang, Hao-
+ran Tan, Chunyuan Li, and Ziwei Liu. 2024a. Long
+context transfer from language to vision. Preprint,
+arXiv:2406.16852.
+Yuan Zhang, Chun-Kai Fan, Junpeng Ma, Wenzhao
+Zheng, Tao Huang, Kuan Cheng, Denis Gudovskiy,
+Tomoyuki Okuno, Yohei Nakata, Kurt Keutzer, and
+Shanghang Zhang. 2025. Sparsevlm: Visual token
+sparsification for efficient vision-language model in-
+ference. Preprint, arXiv:2410.04417.
+Yuyao Zhang, Lan Wei, and Nikolaos Freris. 2024b.
+Synergistic patch pruning for vision transformer: Uni-
+fying intra- and inter-layer patch importance. In The
+Twelfth International Conference on Learning Repre-
+sentations.
+Bingchen Zhao, Yongshuo Zong, Letian Zhang, and
+Timothy Hospedales. 2024. Benchmarking multi-
+image understanding in vision and language models:
+Perception, knowledge, reasoning, and multi-hop rea-
+soning. arXiv preprint arXiv:2406.12742.
+Qing Zhou, Hongyuan Zhang, Tao Yang, Junyu Gao,
+and Qi Wang. 2026. Statistically calibrated scaling
+for token merging in transformers. In Forty-third
+International Conference on Machine Learning.
+A
+Architecture Details
+Image Encoding.
+Each image is encoded by a
+frozen ImageNet-pretrained EfficientNet-B0 back-
+bone (Tan and Le, 2019). Its 1280-dimensional fea-
+ture is projected to the shared dimension d = 256
+using a linear layer and dropout. Processing low-
+resolution thumbnails with EfficientNet-B0 is sub-
+stantially cheaper than applying the MLLM vision
+encoder to every image.
+Text Encoding.
+The query Q is tokenized and
+passed through the frozen MLLM embedding layer.
+The resulting dLLM-dimensional token representa-
+tions are mean-pooled and projected to the shared
+space by Linear(dLLM, 64), ReLU, Dropout(0.3),
+Linear(64, 256), and LayerNorm. The narrow bot-
+tleneck limits memorization and encourages the
+retention of task-relevant query information.
+Context Fusion.
+The query embedding and N
+image embeddings form a sequence of N+1 tokens
+with dimension 256. A two-layer Transformer en-
+coder with four attention heads and a feed-forward
+dimension of 512 performs query-conditioned and
+cross-image reasoning, allowing each image to es-
+timate both its required visual detail and its relative
+importance.
+Resolution Head.
+Each image representation is
+passed through an MLP with dimensions 256 →
+64 →4.
+The four outputs define cumulative
+ordinal-regression thresholds
+P(ℓi ≥k) = σ(zi,k),
+k ∈{1, 2, 3, 4},
+and the predicted level is
+ˆℓi =
+4
+X
+k=1
+I [σ(zi,k) > 0.5] .
+The four thresholds are trained independently with-
+out an explicit monotonicity constraint. While in-
+dependent sigmoids can produce non-monotone
+probabilities, the thresholding rule above always
+yields a valid level; in practice, violations are infre-
+quent because the ordinal loss encourages consis-
+tent threshold ordering.
+Inference and Parameter Count.
+Each image is
+resized according to its predicted token level, with
+the target resolution capped at the original dimen-
+sions to avoid upscaling. The budgeter processes
+only N + 1 tokens through two Transformer layers,
+adding approximately 2ms of overhead. It contains
+about 1.6 million trainable parameters: 328k in the
+image projection, 181k in the text encoder, 1,054k
+in the Transformer, and 17k in the resolution head.
+The frozen EfficientNet-B0 adds 5.3 million pa-
+rameters. The MLLM embedding layer must also
+remain in memory, but introduces no additional
+cost when co-deployed with the target MLLM.
+Design Choices.
+We select EfficientNet-B0 as
+the frozen image encoder because it offers the best
+11
+
+
+accuracy among models at the ∼5M parameter
+scale (77.1% ImageNet top-1), outperforming Mo-
+bileNetV2 (72.0%), MobileNetV3-Large (75.2%),
+and DeiT-Tiny (72.2%).
+TinyViT-5M achieves
+higher accuracy (79.1%) but requires 3.3× more
+compute; since the encoder processes N thumb-
+nails per sample, this overhead compounds. Be-
+cause the backbone is frozen, parameter count is
+immaterial; only representation quality matters for
+downstream level prediction. The remaining hy-
+perparameters were selected via validation perfor-
+mance on the token-based training set (Table 4).
+Two Transformer layers provide sufficient capacity
+for cross-image reasoning without overfitting; a
+single layer under-performs on multi-image bench-
+marks where relative importance must be inferred.
+Five ordinal levels match the natural 4× token gaps
+in vision encoders, providing meaningful resolu-
+tion distinctions at each step. The 64-dim text bot-
+tleneck restricts information flow from the 2560-
+dim LLM embeddings; wider bottlenecks memo-
+rize per-sample query identity while narrower ones
+discard task-type signal.
+Component
+Variant
+bal_acc
+±1 acc
+Levels
+3 levels
+65
+79
+5 levels (ours)
+71
+86
+7 levels
+70
+86
+Text bottleneck
+None
+(direct
+2560→256)
+55
+71
+64-dim (ours)
+71
+86
+16-dim
+50
+71
+Cross-image
+Text-only (no Trans-
+former)
+51
+55
+2-layer
+Transformer
+(ours)
+71
+86
+Table 4: Architecture ablation on the validation set.
+bal_acc = balanced accuracy across levels; ±1 = fraction
+of predictions within one level of ground truth.
+B
+Additional Results
+B.1
+Per-task performance breakdown
+Figure 6 shows that mmVB closely follows Full-res
+across most tasks for every benchmarks. Uniform
+downsampling causes uneven degradation, with
+the largest drops on detail-sensitive tasks such as
+Charts, 3D Pose, Person ReID, and visual chain rea-
+soning. Coarser tasks remain relatively stable even
+at lower resolutions. Post-encoding baselines show
+greater task-level variation and occasional failures,
+while ReMI remains challenging for all methods,
+especially on numerical reasoning tasks. Overall,
+Method
+Score (%)
+Vis tok/samp
+Full Res.
+59.8
+1,146
+mmVB
+53.3
+63
+Table 5: MM-Vet results (Qwen3.5-4B, Claude judge)
+mmVB preserves most of the Full-res performance
+while using substantially fewer visual tokens.
+B.2
+mmVB performance on Single Image
+In this section, we evaluate mmVB on single-image
+tasks. Since many standard benchmarks, such as
+VQAv2 and TextVQA, focus on general visual
+question answering, we select MM-Vet and POPE
+to assess transferability to single-image settings.
+MM-Vet evaluates the integration of core vision-
+language capabilities, including recognition, OCR,
+knowledge, language generation, spatial reasoning,
+and mathematics. Table 5 reports results on MM-
+Vet (Yu et al., 2023), a single-image open-ended
+VQA benchmark (218 samples) scored by an LLM
+judge.
+C
+Dataset Details
+C.1
+Benchmark details
+We evaluate multi-image reasoning on eight com-
+plementary benchmarks spanning diverse tasks, im-
+age counts, and reasoning demands. Table 6 sum-
+marizes the eight benchmarks.
+C.2
+MuirBench
+MuirBench (Wang et al., 2025) contains 11,264
+images and 2,600 multiple-choice questions across
+12 tasks. Each question requires joint reasoning
+over 2–7 images and covers relations such as narra-
+tive, temporal, complementary, cropped or zoomed,
+and multi-view scenes. Tasks include geographic
+and diagram understanding, retrieval, counting, dif-
+ference spotting, and action understanding. The
+benchmark tests whether models reason across im-
+ages rather than rely on single-image shortcuts.
+C.3
+MIBench
+MIBench (Liu et al., 2024) contains 5,000 multiple-
+choice questions across five categories: compari-
+son, subtle difference detection, temporal reason-
+ing, logical reasoning, and visual referring. Sam-
+ples use text-rich documents, natural photographs,
+and synthetic scenes. The benchmark evaluates
+12
+
+
+Figure 6: Per-task accuracy across eight benchmarks. Each subplot represents one benchmark. Solid lines show
+Full-res and mmVB; dashed lines show uniform resolutions; dash-dot lines show post-encoding baselines; and
+dotted lines show the distribution-matched random baseline. mmVB closely tracks Full-res while using 9.2× fewer
+visual tokens (geometric mean across benchmarks).
+MuirBench
+MIBench
+Mantis
+NLVR2
+VHs
+MMIU
+MIRB
+ReMI
+Samples
+2,600
+5,000
+217
+6,967
+20,100
+93,584
+1,124
+2,600
+Images/sample
+2–7
+2–14
+2–5
+2
+1–10
+1–62
+2–6
+2–6
+Tasks
+12
+5
+6+
+1
+1
+52
+14
+13
+Format
+MC
+MC
+MC+SA
+T/F
+Y/N
+MC
+Mixed
+Free-form
+Table 6: Overview of the evaluation benchmarks. MC = multiple-choice, SA = short-answer, T/F = true/false, and
+Y/N = yes/no. Mixed includes multiple-choice, yes/no, counting, and free-form answers. VHs denotes Visual
+Haystacks.
+whether multi-image models can follow varied in-
+structions over image sets.
+C.4
+Mantis-Eval
+Mantis-Eval (Jiang et al., 2024) contains 217
+human-annotated problems in multiple-choice and
+short-answer formats. Each sample includes 2–5
+images and covers common-sense, complex, log-
+ical, and fine-grained visual reasoning. Despite
+its small size, the benchmark is difficult: GPT-4V
+achieves 62.67%.
+C.5
+NLVR2
+NLVR2 (Suhr et al., 2019) evaluates reasoning
+over image pairs. Each sample presents two pho-
+tographs and a natural-language statement that
+must be classified as True or False. The statements
+require reasoning about object properties, spatial
+relations, comparison, counting, and set-level quan-
+tification. The test set contains 6,967 samples, in-
+cluding 3,558 true and 3,409 false instances.
+C.6
+Visual Haystacks
+Visual Haystacks (Wu et al., 2025) is a vision-
+centric Needle-In-A-Haystack benchmark for large
+multimodal models. Each sample mixes a small
+set of “needle” images with distractors and asks
+whether all or any needle images also contain a tar-
+get object. The full dataset contains 20,100 samples
+with 1 to more than 10,000 images. We cap each
+haystack at 10 images by retaining all positives and
+randomly sampling negatives. The benchmark tests
+retrieval and reasoning over large image sets.
+13
+
+
+C.7
+MMIU
+MMIU (Meng et al., 2025) contains 93,584 sam-
+ples, 77,659 images, and about 52 tasks spanning
+semantic, temporal, and spatial relations. Tasks
+include forensic detection, correspondence, tem-
+poral ordering, action assessment, jigsaw solving,
+3D pose estimation, and Raven’s matrices. Each
+sample contains 1–62 images and a multiple-choice
+question with up to 10 options. The random base-
+line is 27.4%, and the best reported model, GPT-4o,
+achieves 55.7%.
+C.8
+MIRB
+MIRB (Zhao et al., 2024) contains 1,124 samples
+across 14 tasks covering perception, knowledge,
+reasoning, and multi-hop reasoning. Tasks include
+visual analogy, cross-image counting, multi-view
+3D understanding, code and paper comprehension,
+ingredient analysis, jigsaw puzzles, plot interpre-
+tation, landmark recognition, and visual chain rea-
+soning. Answer formats include multiple-choice,
+yes/no, counting, and free-form extraction.
+C.9
+ReMI
+ReMI (Kazemi et al., 2024) contains 2,600 samples
+across 13 mathematical, spatial, temporal, and log-
+ical reasoning tasks. These include Charts, Clocks,
+CodeEdit, Collisions, EmojiAlgebra, FuncRead,
+GeomCost, GeomShape, IQ, Isomorphism, Maps,
+RefCoco, and Schedule. Each sample contains 2–
+6 images and requires a short free-form answer.
+ReMI emphasizes quantitative and structured rea-
+soning rather than visual matching alone.
+C.10
+mmVB Training Data Composition
+We generate resolution labels over a diverse train-
+ing set combining single-image and multi-image
+sources:
+Single-image (484k samples): VQAv2, TextVQA,
+GQA covering natural scenes, text-heavy images,
+and compositional reasoning respectively.
+Multi-image (50k samples from Mantis-Instruct):
+17 subsets including NLVR2, LLaVA-multi, spot-
+the-diff, visual storytelling, coinstruct, and others,
+covering 2–10+ images per sample with diverse
+multi-image reasoning tasks.
+Samples where the MLLM answers incorrectly
+at full resolution are discarded, as they provide no
+valid signal for minimum-resolution search. Gener-
+ation is parallelized across 8 GPUs with manifest
+sharding for throughput.
+14

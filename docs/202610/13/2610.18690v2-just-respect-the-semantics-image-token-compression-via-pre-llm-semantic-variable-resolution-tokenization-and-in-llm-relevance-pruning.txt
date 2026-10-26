@@ -1,0 +1,6927 @@
+arXiv:2610.18690v2  [cs.CV]  21 Oct 2026
+Just Respect the Semantics: Image-Token Compression via Pre-LLM Semantic
+Variable-Resolution Tokenization and In-LLM Relevance Pruning
+Tianhao Fu †, 1, 2, *
+Austin Wang †, 3
+Charles Chen †, 1, 4
+Roby Aldave-Garza 5
+Victor Xie 3
+Xiyue Jiao 1
+Yucheng Chen 1
+Martin Tin 1
+† Equal contributions.
+1 University of Toronto
+2 Vector Institute
+3 McGill University
+4 University Health Network
+5 University of Waterloo
+Abstract
+Image-token compression must reduce computation with-
+out hurting the semantics. We introduce Varest, maximiz-
+ing semantic fungibility: tokens within a coherent seman-
+tic region can be summarized coarsely, while object bound-
+aries and literal text require finer distinctions. Object and
+text localizers guide variable-resolution merging, preserv-
+ing spatial coverage and finer detail at boundaries and text.
+Learned [REL] registers then prune visual tokens after
+early decoder processing. Training across budgets enables
+one checkpoint per backbone. Across three backbones and
+13 benchmarks, Varest outperforms 15 baselines in mean
+performance retention at every evaluated budget, retaining
+86.10–92.33% of full-token performance with only 5.56%
+of the original layer-averaged image-token count.
+1. Introduction
+Image-token compression reduces the substantial language-
+model decoder compute imposed by the hundreds or thou-
+sands of image tokens in vision-language models (VLMs).
+An image token may describe a small part of an object, a
+boundary between objects, or a few characters in a sign.
+Compressing these tokens requires different decisions.
+Prior work has explored merging and pruning using var-
+ious signals, including feature geometry [1, 5, 8, 13, 24],
+attention scores [7, 33, 36, 39–41, 44], learned retention
+utility [34], and object membership [18]. These are nat-
+ural ways to approach compression, yet they do not re-
+spect the semantics. Pruning poses a complementary prob-
+lem: removing a token hurts semantic coverage, so selection
+without sufficient reasoning ability through enough decoder
+*Project lead with correspondence at tianhao.fu@mail.utoronto.ca.
+Project website: https://varest.github.io.
+Source code, model weights, and evaluation results are available at
+https://github.com/Varest/varest.
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+
+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+LLaVA-1.5-7B
+LLaVA-1.5-13B
+LLaVA-NeXT-8B
+Varest (Ours)
+Full-token reference
+Budget 38.89%
+Budget 22.22%
+Budget 11.11%
+Budget 5.56%
+6×
+4×
+Figure 1. Per-benchmark performance of Varest across back-
+bones and token budgets. General VQA benchmarks stay near or
+above full-token under compression, while text-dense benchmarks
+benefit most from larger budgets.
+processing often discards principal information. Merging
+across two neighbour objects creates an arbitrary token that
+loses the semantics of each. Effective compression thus re-
+quires deciding both where aggregation can preserve mean-
+ingful distinctions and when further access to image tokens
+can be reduced.
+We frame this requirement through a property of a set
+of tokens, semantic fungibility: the set of tokens that form
+a person is semantically interchangeable with another per-
+son’s set from another image because we can summarize
+them into the abstract concept of a person. We may increase
+the granularity, if the token budget allows, by splitting the
+1
+
+
+Text tokens
+[REL]
+Km image tokens
+Boundary Field
+Textness
+Partition
+Relevance
+Adaptive Halting
+Early LLM
+Decoder
+Decoder
+Text tokens
+Text tokens
+Kp image tokens
+"There are two trains."
+Figure 2. Overview of Varest. Object boundaries and textness are passed through the Varest tokenizer with post-projector visual tokens,
+which are then partitioned into Km semantic regions and each region is merged into one image token. At layer L/2, 4 learned [REL]
+registers (the figure is not to scale) produce a score for each image token and keep the Kp image tokens that are most relevant to LLM
+reading. Optional adaptive halting removes all remaining image tokens once the stability and confidence criteria are met.
+person into head, body, arms, and legs. Each component
+still has high fungibility. In contrast, a set of tokens that
+mixes a person and a snowboard lacks a linked concept and
+therefore has low fungibility. Text has low fungibility for
+literal reading, since neighbour characters can contribute
+different meanings. In Appendix B, we further demonstrate
+that fungible sets allow heavy merging while text and se-
+mantic transitions require finer distinctions. The principle
+is simple: wisely partition the image such that the total fun-
+gibility of each grouped region’s token set is maximized.
+Varest implements this principle by combining pre-LLM
+semantic-preserved variable-resolution tokenization and in-
+LLM relevance pruning (Figure 2). Lightweight object and
+text localizers guide the merging and ensure full coverage
+through adjusting the semantic granularity. After early de-
+coder layers process these tokens, learned [REL] registers
+retain a subset for subsequent visual access. End-to-end
+training across budgets enables one checkpoint per back-
+bone; optional adaptive halting further reduces visual-token
+propagation.
+Our key contributions are as follows:
+• We introduce Varest, a semantics-preserving variable-
+resolution tokenizer guided by object boundaries and
+textness. It allocates finer detail to low-fungibility regions
+while maintaining full spatial coverage by controlling se-
+mantic granularity according to the token budget.
+• We combine this tokenizer with learned decoder-stage se-
+lection, preserving broader visual access during early pro-
+cessing and retaining fewer tokens in subsequent layers.
+Optional adaptive halting can save further compute by
+dropping all image tokens after the estimated information
+horizon.
+• Across three VLM backbones (LLaVA-1.5-7B [21],
+LLaVA-1.5-13B [21], and LLaVA-NeXT-8B [19]) and
+13 benchmarks, Varest achieves the highest mean perfor-
+mance retention among 15 baselines at every evaluated
+budget with a similar or lower computational cost.
+2. Method
+Varest allocates visual resolution across the image and vi-
+sual access across LLM decoder depth, as shown in Figure
+2. In Section 2.1, given an image and user prompt, we first
+partition the image-token grid into regions guided by the ob-
+ject boundaries and textness. Merging within these regions
+produces Km image tokens that have different resolutions
+but preserve full spatial coverage. Early decoder layers pro-
+cess this representation together with the prompt and four
+[REL] tokens/registers discussed in Section 2.2. At the de-
+coder midpoint, the registers select Kp image tokens for the
+rest of the LLM. The budget splitting over depth follows
+Km+Kp
+2
+= K and Km = 4Kp. Optional adaptive halt-
+ing in Section 2.3, if triggered, can subsequently remove
+all image tokens at any point after layer 8, even before the
+midpoint, in which case [REL] pruning will be skipped.
+Appendix A.1 provides more details of the method.
+2.1. Semantic Variable-Resolution Tokenization
+To maximize semantic fungibility, we prefer merging within
+semantic regions and preserve finer distinctions at tran-
+sitions.
+Algorithm 1 provides a schematic.
+We use a
+lightweight object localizer to determine the semantic tran-
+sitions. The semantic granularity that decides whether we
+further divide a car into fine-grained components like doors
+is bounded by the token budget. Because the literal reading
+of text is sensitive to any compression, we use a separate
+text localizer to pin all text cells at native resolution, if bud-
+get allows. The resulting partition ensures every raw token
+contributes to a region.
+Semantic localization.
+Let xi denote the projected image
+token of grid cell i. The object localizer predicts a boundary
+strength Bij between neighbour cells, and the text localizer
+predicts a textness probability Ti ∈[0, 1] for each cell. They
+are distilled from the cosine distance form of DINOv3 [31]
+2
+
+
+Algorithm 1 VARiable-RESolution Tokenization (Varest)
+Require: Image I, projected features X, token budget Km
+1: Predict object-boundary and textness fields from I
+2: Split cells into text and non-text groups with threshold τ(rm)
+3: Allocate quotas k + t = Km, prioritizing text detail while
+reserving non-text capacity
+4: for g ∈{text, nontext} do
+5:
+Initialize one region per cell in group g
+6:
+while the number of regions exceeds the group’s quota do
+7:
+Select the region pair with the lowest mean shared-
+boundary strength
+8:
+Merge the pair into one region
+9:
+Update its boundary costs with neighbour regions
+10:
+end while
+11: end for
+12: Order all regions by their first cell
+13: return Mean-pooled region features with position tags
+features and EasyOCR [15] bounding boxes, respectively.
+They are trained separately and remain frozen during VLM
+adaptation and inference.
+Since their outputs are continuous fields rather than
+masks, the same evidence can support different granular-
+ities. We augment object boundaries with text-border evi-
+dence through B∗
+ij = max{Bij, λ|Ti−Tj|}, with λ = 0.25.
+This discourages merging across text transitions even within
+an otherwise uniform object.
+Allocating the token budget.
+We divide cells into text
+and non-text regions using a textness threshold τ(rm) =
+1 −1
+2clip(rm, 0, 1), where rm is the merging-stage token
+retention ratio. From B∗, we estimate the minimum num-
+ber of non-text regions kmin. Cells with Ti > τ(rm) re-
+main uncompressed if the number of qualified text tokens t
+is smaller than Km −kmin; otherwise, we merge them into
+text regions too to ensure the remaining tokens can then be
+partitioned into k = Km −t ≥kmin regions using con-
+strained mean-boundary-linkage agglomeration [3]. Larger
+budgets therefore preserve more local distinctions, whereas
+smaller budgets summarize broader regions.
+Partitioning.
+Within each region, we start from individ-
+ual cells and repeatedly merge the neighbour regions with
+the weakest mean shared boundary. For regions R and S,
+the merge cost is
+d(R, S) =
+1
+|E(R, S)|
+X
+(i,j)∈E(R,S)
+B∗
+i,j,
+(1)
+where E(R, S) contains the grid edges joining the two re-
+gions. Averaging over their shared boundary reduces sen-
+sitivity to isolated weak edges. Agglomeration stops when
+each group reaches its allocated region count. This pro-
+cedure favours coarse representations within weakly sepa-
+rated content while retaining finer partitions around strong
+boundaries.
+Region representation.
+Each region becomes one image
+token by
+zR =
+1
+|R|
+X
+i∈R
+xi + MLP
+ 
+cx(R), cy(R),
+r
+|R|
+N
+!
+,
+(2)
+where N is the number of cells in the grid and (cx, cy) is the
+normalized region centroid. The learned position tag sup-
+plies the location and extent of the pooled content. Regions
+are emitted in raster order of their first cell.
+For LLaVA-NeXT, we partition the base view and the
+stitched, unpadded high-resolution view separately, allocat-
+ing tokens in proportion to their cell counts. The region rep-
+resentation uses coordinates and extent normalized within
+each view.
+2.2. [REL] Relevance Pruning
+Inspired by PyramidDrop [39], we expose more tokens to
+the early decoder layers by pruning at the midpoint, keep-
+ing the layer-averaged token budget the same. A region may
+have already contributed information to contextual states
+even if its token is later removed.
+[REL] tokens learn which tokens are still relevant to the
+LLM reading and prune the others. We place four learned
+[REL] registers after the user prompt and before the assis-
+tant turn. Their causal attention can access both the image
+and the prompt without accessing the target answer. After
+the first L/2 layers of an L-layer LLM, let hrel
+a denote reg-
+ister a’s hidden state and hj the state of image token j. A
+bilinear head computes
+q = Wq
+ 
+1
+4
+4
+X
+a=1
+LN(hrel
+a )
+!
+, sj = q⊤Wk LN(hj)
+√drel
+,
+(3)
+where LN is non-affine LayerNorm, Wq and Wk are learned
+projections, and drel = 256.
+For inference, we retain the Kp highest-scoring image
+tokens using hard top-k and remove the rest together with
+the [REL] registers. The pruning operation is implemented
+as binary attention masking with a straight-through sigmoid
+surrogate [4] during training, allowing gradients to flow
+through and train the selector. It learns to be prompt-blind
+(see Section 4.1) even though the end-to-end architecture
+allows prompt-conditioned scoring.
+2.3. Optional Adaptive Halting
+Wang et al. [35] show that VLMs have an information hori-
+zon: a layer beyond which image tokens contribute little to
+3
+
+
+What does it say on the shirt of
+the man in the white?
+VisionZip++
+CORE
+HiDrop
+stage 1: layer 9
+⋮
+stage 5: layer 18
+LearnPruner
+stage 1: pre-LLM
+stage 2: layer 12
+Varest (ours)
+tokenization: pre-LLM
+[REL] pruning: L/2 layers
+Qatar
+foundation
+Hilton
+foundation
+Barclays
+premier league
+Qatar
+Bwin
+Figure 3. Visualized comparison of the baselines and Varest
+on LLaVA-1.5-7B. HiDrop and LearnPruner retain text but lose
+contextual information, while CORE’s coarse regions lose text.
+Varest keeps text cells at native resolution and separates the two
+people with object boundaries.
+the output. HiDrop [36] exploits this horizon by remov-
+ing all image tokens at a fixed layer, which is layer 25 for
+LLaVA-1.5-7B. Yet the horizon varies across tasks. Ap-
+pendix D.1 shows that OCR has the latest horizon among
+benchmarks, later than layer 25; therefore, a fixed cutoff
+can retain unnecessary image tokens for some inputs while
+removing critical evidence too early for others.
+We thus introduce adaptive halting, an optional, training-
+free mechanism that decides when to drop all remaining im-
+age tokens for each input. During prefill, after each decoder
+layer ℓ, we apply a logit lens [28] to the hidden state h(ℓ)
+T at
+the last prompt position T:
+pℓ= softmax
+ WU Norm(h(ℓ)
+T )
+
+,
+ˆyℓ= arg max
+v
+pℓ(v),
+Hℓ= −
+X
+v
+pℓ(v) log pℓ(v), (4)
+where Norm is the LLM’s final normalization, and WU is
+its frozen base vocabulary head, with any LoRA update by-
+passed. The distribution pℓestimates the first answer token
+from the intermediate hidden state. We use prediction sta-
+bility and confidence as a heuristic. Halting occurs at the
+first layer satisfying all three conditions:
+1. Warm-up: ℓ≥8, excluding shallow readouts from trig-
+gering premature withdrawal.
+2. Stability: ˆyℓ−2 = ˆyℓ−1 = ˆyℓ, so the top-1 prediction
+agrees across three consecutive layers.
+3. Confidence: Hℓ≤1 nat.
+Once triggered, we remove all remaining image tokens and
+[REL] registers before the next decoder layer.
+2.4. Training and Budget Control
+Joint adaptation.
+We optimize the [REL] registers,
+scoring head, multimodal projector, position tags, and
+LoRA [12] adapters in the vision and language stacks and
+vocabulary head using teacher-forced answer cross-entropy
+on the VLM’s own tuning dataset, so the VLM sees no ad-
+ditional data. The localizers remain frozen, and no token-
+relevance labels are required. A straight-through sigmoid
+surrogate supplies gradients to the selector [4]. We vary
+the merging budget during training and sample the pruning
+count from zero through the realized merging count. See
+Appendix A.2 for more details.
+Budget accounting.
+We measure the image-token budget
+by the mean number of image tokens entering a decoder
+layer: K =
+1
+L
+PL
+ℓ=1 Kℓ=
+Km+Kp
+2
+, where the second
+equality holds for midpoint pruning without adaptive halt-
+ing. This count excludes text tokens and the four regis-
+ters. For LLaVA-1.5, the retained ratio is r = K/576. For
+LLaVA-NeXT, we apply the requested ratio to each image’s
+native sequence length, so realized integer counts vary with
+image resolution.
+3. Related Work
+Compression signals.
+We categorize visual-token com-
+pression signals into semantic [18], saliency [1, 5, 8, 24, 40,
+41], and query cues [7, 13, 33, 34, 36, 39, 44]. Saliency cues
+estimate importance or redundancy from the image alone.
+ToMe [5] merges similar features, while VisionZip [40] re-
+tains attention-ranked tokens and aggregates the remain-
+ing context.
+These image-only criteria permit compres-
+sion before the prompt is processed, but do not explicitly
+account for object boundaries or the finer detail needed
+to read text. Query cues use language context to priori-
+tize content needed for a particular question, as in Spar-
+seVLM [44]. This directs the budget toward task-relevant
+evidence.
+When derived from decoder attention, how-
+ever, these cues depend on decoder processing, and atten-
+tion reliability can vary across layers [34]. Semantic cues
+add explicit content structure to constrain grouping, help-
+ing specify which features can be summarized together.
+Varest combines semantic-guided token allocation within
+an image with depth-wise budget allocation, using variable-
+resolution tokenization and learned decoder-stage selection.
+Allocating the token budget according to semantics.
+Within an image, semantic priors guide how a token bud-
+get is distributed nonuniformly across regions. CORE [18]
+guides pooling with object masks and orders the resulting
+tokens by their centroids, preserving object membership
+and spatial layout. A limitation of CORE’s object-based
+4
+
+
+K=32
+K=64
+K=128
+K=224
+Tokenization
+[REL]
+Tokenization
+[REL]
+Tokenization
+[REL]
+Tokenization
+[REL]
+Q: Which country is less than the rest of the world?
+GT: Canada
+✗ India
+✓ Canada
+✓ Canada
+✗ India
+Q: What is the number on the jersey?
+GT: 13
+✓ 13
+✓ 13
+✓ 13
+✓ 13
+Q: Is the convocation hall with a green dome on the top or at the bottom of the blue building?
+GT: bottom
+✓ Bottom
+✓ Bottom
+✓ Bottom
+✓ Bottom
+Figure 4. Visualization of tokenization and [REL] pruning across budgets on LLaVA-1.5-7B. For each K, the left panel shows the
+tokenization and the right panel shows the tokens kept by [REL]. Text remains identifiable at every budget, while semantic granularity
+becomes finer as K increases.
+pooling is that it does not explicitly allocate finer resolu-
+tion to text within an object. Varest’s variable-resolution
+tokenizer addresses this through maximizing semantic fun-
+gibility, using boundary and textness cues to allocate reso-
+lution. It separates detected text from its surrounding ob-
+ject, allowing coarse object summaries alongside finer text
+representations. Detected text remains at native patch-grid
+resolution when the budget permits.
+Allocating the token budget across decoder depth.
+Across decoder depth, the complementary question is how
+long visual tokens remain available.
+Multi-stage meth-
+ods [33, 34, 39] use larger budgets early and fewer to-
+kens later, allowing contextual processing before pruning.
+DUET-VLM [33] and LearnPruner [34] combine this with
+pre-LLM reduction. Varest follows this depth-wise alloca-
+tion but differs in selection. LearnPruner learns early patch
+selection but uses text-to-image attention to prune visual to-
+kens in a middle decoder layer. However, attention does
+not necessarily reflect a token’s influence on the predic-
+tion. In NLP models, Jain and Wallace [16] find that atten-
+tion weights can correlate poorly with gradient-based im-
+portance and that different attention distributions can yield
+similar predictions. Rather than using attention weights as
+an importance proxy, Varest learns a relevance score for
+each semantic region through [REL] registers and a scor-
+ing head. This adapts the retention criterion to contextual-
+ized, variable-resolution semantic region representations.
+4. Experiments
+We first visually inspect the tokenization and pruning
+behaviours in Section 4.1.
+Across three backbones,
+Section 4.2 evaluates Varest against 15 baselines on
+MMBench [22], AI2D [17], MMStar [6], POPE [20] (three
+metrics),
+GQA [14],
+ChartQA [26],
+DocVQA [27],
+TextVQA
+[32],
+RefCOCO/RefCOCO+
+[43],
+Ref-
+COCOg [25], CountBench [29], and V* [37].
+Adaptive
+halting is disabled except in Section 4.3, where we test
+its performance. Section 4.4 analyzes the efficiency, and
+Section 4.5 isolates the contributions of each component.
+4.1. Qualitative Analysis
+As shown in Figures 3 and 4, Varest clearly identifies text
+cells during tokenization. Combined with the context from
+merged object tokens, this allows LLaVA-1.5-7B to reach
+the correct answer at very small budgets (K = 32). Other
+methods such as HiDrop [36] and LearnPruner [34] are
+prompt-sensitive and correctly identify the needed text, but
+at low budgets they lack the object localization to provide
+the surrounding context.
+In our analysis, we find that Varest allocates resolution
+as needed across token budgets while preserving identifi-
+able semantic information.
+As shown in Figure 4, even
+low-resolution tokenizations remain interpretable, with dis-
+tinct boundaries between objects and other regions. Fur-
+thermore, Varest identifies text at every budget and con-
+sistently retains the information needed for OCR and other
+text-based tasks. Notably, Varest answers the bottom ques-
+5
+
+
+32
+64
+128
+224
+Image-token budget
+30
+40
+50
+60
+70
+80
+90
+100
+Benchmark-averaged retention (%)
+LLaVA-1.5-7B
+92.33%
+97.08%
+100.37%
+101.89%
+32
+64
+128
+224
+Image-token budget
+LLaVA-1.5-13B
+91.31%
+95.82%
+100.03%
+102.37%
+160
+320
+640
+1120
+Image-token budget
+LLaVA-NeXT-8B
+86.10%
+91.85%
+96.04%
+98.18%
+ToMe
+VisionZip
+VisionZip++
+DivPrune
+VFlowOpt
+OTPrune
+ApET
+FastV
+SparseVLM
+PyramidDrop
+Nüwa
+DUET-VLM
+LearnPruner
+HiDrop
+CORE
+Varest (Ours)
+Figure 5. Benchmark-averaged performance retention versus layer-averaged image-token budget. 100% denotes uncompressed-
+backbone performance. Varest achieves the highest retention at every evaluated budget across all three backbones, preserving over 85%
+performance at r = 5.56% on all three VLMs.
+Input image
+Q: On which side is
+the soccer ball?
+Q: Which color are the trees
+next to the cars?
+A: Left
+A: Green
+K=32
+Figure 6. [REL] pruning behaviour under different prompts
+on LLaVA-1.5-7B. Varest keeps nearly the same tokens for two
+unrelated questions, yet answers both correctly, even when the
+named object is discarded.
+tion correctly even though the named tokens are not kept
+by [REL]. Figure 6 confirms that this learned relevance
+reflects LLM reading, not prompt sensitivity. This implies
+their information has already been absorbed in the early lay-
+ers, before pruning, and prompt sensitivity is not necessary.
+4.2. Quantitative Analysis
+We report mean performance retention by normalizing each
+metric against the corresponding uncompressed backbone
+and averaging over 15 metrics, with the three POPE vari-
+ants counted separately. Comparisons use layer-averaged
+image-token budgets; 100% retention means matching the
+uncompressed model. Figure 5 and Table 1 show that Varest
+achieves the highest mean retention at every evaluated bud-
+get across all three backbones. At the smallest token ratio
+of 5.56%, it retains 86.10–92.33% of uncompressed perfor-
+mance. More importantly, at an 11.11% token ratio, Varest
+outperforms every baseline evaluated at 22.22% on all three
+backbones.
+For example, on LLaVA-1.5-7B, it achieves
+97.08% retention at K = 64, exceeding the strongest base-
+line’s 94.50% at K = 128. At K = 128, both LLaVA-1.5
+models reach approximately 100% retention, matching un-
+compressed performance with 22.22% of the tokens.
+Figure 1 and Appendix C show that the required bud-
+get varies across tasks. General VQA performance remains
+relatively stable as the budget decreases, whereas docu-
+ment reading, chart understanding, and referring-expression
+grounding benefit more from larger budgets.
+4.3. Adaptive Halting
+We enable adaptive halting using the same checkpoints and
+budgets, without additional training or backbone-specific
+tuning. Table 2 reports the mean score changes, halting
+rates, and image-token savings across 13 benchmarks and
+four budgets.
+We observe an additional 8.6–12.9% re-
+duction in visual-token propagation, measured by image-
+token counts summed across decoder layers. Mean score
+losses are 0.10–0.21 points on the benchmarks’ native 0–
+100 scales, averaged equally over 15 metrics and four bud-
+gets. Appendix D expands the aggregated results.
+Halting predominantly follows [REL] pruning on
+LLaVA-1.5-7B and LLaVA-NeXT-8B, withdrawing the re-
+tained tokens from later layers. On LLaVA-1.5-13B, 28.8%
+of inputs halt before selection runs, including halts at the
+selection boundary. This earlier withdrawal contributes to
+its larger savings.
+4.4. Efficiency Analysis
+Figure 7 compares performance retention and measured
+computation, each averaged over four budgets. Across the
+three backbones, Varest improves retention over HiDrop,
+the strongest baseline, by 3.79–6.39 percentage points while
+using 1.0–4.7% fewer FLOPs. Its accuracy advantage there-
+fore persists when accounting for measured computation.
+6
+
+
+ToMe
+VisionZip
+VisionZip++*
+DivPrune
+VFlowOpt
+OTPrune
+ApET
+FastV
+SparseVLM
+PyramidDrop
+N¨uwa
+DUET-VLM*
+LearnPruner*
+HiDrop*
+CORE*
+Varest
+K
+[5][ICLR2023]
+[40][CVPR2025]
+[40][CVPR2025]
+[1][CVPR2025]
+[41][ICCV2025]
+[8][CVPR2026]
+[24][CVPR2026]
+[7][ECCV2024]
+[44][ICML2025]
+[39][CVPR2025]
+[13][ICLR2026]
+[33][CVPR2026]
+[34][ICLR2026]
+[36][ICLR2026]
+[18][CVPR2026]
+(Ours)
+LLaVA-1.5-7B (up to 576 image tokens)
+224
+78.50%
+80.36%
+89.86%
+80.19%
+81.60%
+81.17%
+83.05%
+86.19%
+79.99%
+85.90%
+96.58%
+100.74%
+88.51%
+95.36%
+68.58%
+101.89%
+128
+75.34%
+76.49%
+83.44%
+76.93%
+76.80%
+77.65%
+76.72%
+73.12%
+77.42%
+70.99%
+92.04%
+94.50%
+79.31%
+93.18%
+66.27%
+100.37%
+64
+72.03%
+71.41%
+76.49%
+74.42%
+71.16%
+73.95%
+73.14%
+42.39%
+69.25%
+65.76%
+84.11%
+87.44%
+75.91%
+92.49%
+62.35%
+97.08%
+32
+67.40%
+64.40%
+69.87%
+69.53%
+63.64%
+68.49%
+67.63%
+39.67%
+58.11%
+48.74%
+71.41%
+82.72%
+72.98%
+85.10%
+57.22%
+92.33%
+LLaVA-1.5-13B (up to 576 image tokens)
+224
+75.59%
+77.79%
+88.83%
+77.88%
+79.10%
+78.80%
+78.36%
+89.65%
+78.57%
+92.94%
+98.70%
+98.53%
+81.72%
+96.88%
+67.69%
+102.37%
+128
+73.75%
+75.72%
+85.70%
+75.93%
+73.19%
+76.90%
+75.32%
+73.90%
+77.31%
+75.67%
+94.19%
+94.06%
+77.68%
+94.96%
+65.72%
+100.03%
+64
+70.93%
+70.09%
+79.86%
+73.49%
+65.21%
+72.75%
+71.96%
+34.39%
+69.36%
+63.72%
+86.28%
+88.50%
+75.66%
+92.35%
+61.24%
+95.82%
+32
+64.90%
+63.03%
+72.89%
+67.24%
+64.11%
+68.27%
+67.57%
+37.29%
+65.05%
+58.57%
+66.70%
+83.16%
+71.90%
+90.19%
+56.29%
+91.31%
+LLaVA-NeXT-8B (up to 2880 image tokens)
+1120
+76.75%
+76.13%
+84.16%
+78.44%
+84.69%
+78.06%
+83.68%
+91.50%
+81.16%
+80.50%
+67.24%
+91.67%
+87.10%
+95.62%
+63.12%
+98.18%
+640
+70.08%
+72.00%
+78.98%
+74.13%
+75.37%
+75.13%
+74.40%
+76.53%
+72.87%
+42.24%
+64.47%
+85.86%
+79.24%
+91.07%
+60.59%
+96.04%
+320
+63.87%
+66.43%
+73.36%
+69.71%
+67.56%
+69.08%
+65.70%
+48.34%
+55.30%
+49.56%
+64.69%
+80.36%
+70.38%
+85.27%
+58.20%
+91.85%
+160
+57.66%
+59.46%
+67.92%
+65.82%
+58.35%
+63.41%
+59.64%
+33.65%
+58.45%
+49.78%
+60.18%
+74.39%
+64.53%
+77.63%
+55.19%
+86.10%
+Table 1. Benchmark-averaged retention rates. We evaluate the average retention rate with respect to the uncompressed model of each
+method on 13 benchmarks and 15 metrics across VQA, OCR, and grounding [6, 14, 17, 20, 22, 25–27, 29, 32, 37, 43]. Varest outperforms
+all 15 baselines, of which the ones with * are also trained, at every budget across all three backbones.
+2.5
+3.0
+3.5
+4.0
+4.5
+Mean measured complexity (TFLOPs)
+50
+60
+70
+80
+90
+100
+Mean performance retention (%)
+Varest
+Varest + AH
+LLaVA-1.5-7B
+5.0
+5.5
+6.0
+6.5
+7.0
+7.5
+Mean measured complexity (TFLOPs)
+Varest
+Varest + AH
+LLaVA-1.5-13B
+6
+7
+8
+9
+Mean measured complexity (TFLOPs)
+Varest
+Varest + AH
+LLaVA-NeXT-8B
+ToMe
+VisionZip
+VisionZip++
+DivPrune
+VFlowOpt
+OTPrune
+ApET
+FastV
+SparseVLM
+PyramidDrop
+Nüwa
+DUET-VLM
+LearnPruner
+HiDrop
+CORE
+Varest
+Varest + AH
+Figure 7. Performance retention versus measured time complexity. Each point averages both axes independently over four budgets;
+higher and further left is better. Varest achieves higher retention with slightly less computation than HiDrop, the strongest baseline by mean
+retention. Adaptive halting (AH) further reduces computation with a small retention loss.
+Backbone
+∆Score
+Trigger Rate
+Skips [REL]
+Tokens Saved
+LLaVA-1.5-7B
+−0.10
+73.0%
+2.3%
+9.6%
+LLaVA-1.5-13B
+−0.21
+84.6%
+28.8%
+12.9%
+LLaVA-NeXT-8B
+−0.21
+86.9%
+9.2%
+8.6%
+Table 2. Optional halting on three backbones. The score costs
+are relatively small compared to the additional savings.
+Latency heavily depends on the code implementation and is
+therefore not a reliable metric and not reported.
+Adaptive halting further reduces FLOPs by 3.0–5.1%,
+with retention losses of 0.30–0.48 percentage points.
+It
+provides an additional tradeoff between compute and accu-
+racy. Both settings use the same checkpoint, so this tradeoff
+can be adjusted at inference without additional training or
+model storage.
+4.5. Ablation Studies
+Table 4 compares variants at matched layer-averaged token
+budgets. −[REL] is a separately trained arm with the tok-
+enizer only, where Km = K and rm = r. Random and Or-
+acle Selections replace [REL] with random selection and
+gold-answer attention, respectively, during inference, pre-
+serving the joint model’s pruning layer and token counts.
+−Object Localizer reorders the original boundary strengths
+according to adjacent CLIP-feature [30] distances; −Text
+Localizer sets all textness values to zero; and No Localizer
+combines both interventions.
+Semantic guidance.
+At the smallest budgets, −Object
+Localizer falls 5.76–11.99 percentage points below the full-
+model reference, and No Localizer falls 5.99–14.28 points
+below it. These gaps narrow at larger budgets, supporting
+the importance of semantic boundaries when compression
+7
+
+
+LLaVA-1.5-7B (up to 576 image tokens)
+LLaVA-1.5-13B (up to 576 image tokens)
+LLaVA-NeXT-8B (up to 2880 image tokens)
+K
+TextVQA
+DocVQA
+ChartQA
+CountBench
+K
+TextVQA
+DocVQA
+ChartQA
+CountBench
+K
+TextVQA
+DocVQA
+ChartQA
+CountBench
+224
+−0.02
+−0.23
+−0.08
++0.20
+224
++0.02
+−0.18
++0.28
++0.00
+1120
+−0.26
+−0.11
+−0.76
+−0.21
+128
+−0.66
+−0.78
++0.04
+−1.22
+128
+−0.17
+−0.41
+−0.04
+−0.61
+640
+−1.07
++0.08
++0.96
+−0.61
+64
+−1.28
+−0.72
+−0.04
+−2.03
+64
+−1.25
+−0.99
++0.04
++1.43
+320
+−1.38
++0.21
++0.04
+−0.61
+32
+−1.39
+−0.67
+−0.04
+−0.40
+32
+−1.21
+−0.69
++0.56
++0.00
+160
+−2.24
++0.81
++1.60
++0.41
+Table 3. Effect of removing the text localizer on selected benchmarks. Entries are changes in native 0–100 scores relative to full Varest
+at each token budget, with textness set to zero without retraining. The absence of the text localizer damages TextVQA most consistently on
+all three backbones and DocVQA on LLaVA-1.5. CountBench is extremely damaged on LLaVA-1.5-7B and slightly on LLaVA-NeXT-8B.
+K
+Varest
+-[REL]
+Random Selection†
+Oracle Selection†
+-Object Localizer†
+-Text Localizer†
+No Localizer†
+LLaVA-1.5-7B (up to 576 image tokens)
+224
+101.89%
+101.80%
+98.83%
+101.97%
+101.36%
+101.69%
+101.35%
+128
+100.37%
+99.61%
+96.99%
+100.72%
+98.97%
+100.13%
+98.21%
+64
+97.08%
+95.45%
+94.36%
+97.60%
+93.31%
+96.53%
+92.67%
+32
+92.33%
+89.18%
+90.14%
+92.81%
+86.02%
+91.77%
+85.55%
+LLaVA-1.5-13B (up to 576 image tokens)
+224
+102.37%
+100.65%
+100.26%
+101.98%
+101.85%
+101.88%
+101.82%
+128
+100.03%
+97.76%
+98.59%
+100.00%
+99.40%
+99.49%
+98.91%
+64
+95.82%
+94.07%
+94.37%
+95.86%
+93.54%
+95.50%
+92.77%
+32
+91.31%
+88.90%
+90.45%
+91.64%
+85.55%
+91.37%
+85.32%
+LLaVA-NeXT-8B (up to 2880 image tokens)
+1120
+98.18%
+97.24%
+93.90%
+98.22%
+98.03%
+97.95%
+97.70%
+640
+96.04%
+94.28%
+91.58%
+95.89%
+95.49%
+95.68%
+94.74%
+320
+91.85%
+89.66%
+87.85%
+92.31%
+86.77%
+91.55%
+85.01%
+160
+86.10%
+82.84%
+82.73%
+86.81%
+74.11%
+86.00%
+71.82%
+Table 4. Retention of Varest variants at matched budgets.
+†
+denotes an inference-time ablation of the joint model Varest. Lo-
+calization and [REL] pruning provide complementary benefits.
+requires larger merged regions. See Appendix C.2 and C.3
+for the localizers’ predictive accuracy analysis.
+Text localization.
+The small aggregate gap for −Text
+Localizer masks larger changes on individual benchmarks
+(Table 3).
+At the smallest budgets, TextVQA drops by
+1.21–2.24 native score points across the three backbones.
+DocVQA also declines at every budget on both LLaVA-1.5
+models, but effects on other benchmarks vary. For exam-
+ple, at K = 160 on LLaVA-NeXT-8B, TextVQA loses 2.24
+points while DocVQA and ChartQA gain 0.81 and 1.60
+points. Table 5 and Appendix F.1 further support keeping
+the text localizer with additional results on how it improves
+semantic preservation by capturing more answer cells.
+Partition-level preservation.
+To examine how the local-
+izers affect spatial allocation, Table 5, at Km = 64, re-
+ports Region IoU for object-mask reconstruction over 3,811
+referred objects from RefCOCO and Native text for the
+fraction of OCR-matched answer cells retained individu-
+ally, averaged over 2,688 eligible TextVQA questions. Re-
+placing the object-boundary ordering reduces reconstruc-
+tion IoU from 68.43% to 45.01%.
+Zeroing textness in-
+stead reduces individual answer-cell retention from 43.2%
+to 17.1%, while object alignment remains similar.
+Re-
+moving both cues lowers text preservation further to 7.9%.
+These complementary effects support the intended alloca-
+tion of coarse object and finer text.
+Full tokenizer
+−Object Localizer
+−Text Localizer
+No Localizer
+Region IoU ↑
+68.43%
+45.01%
+69.24%
+45.72%
+Native text ↑
+43.2%
+37.8%
+17.1%
+7.9%
+Table 5. Structural preservation on LLaVA-1.5 grid. Removing
+the text localizer slightly improves region IoU but destroys native
+text capture, showing its necessity.
+Decoder-stage pruning.
+The joint model exceeds the
+separately trained −[REL] variant at every budget, gain-
+ing 2.41–3.26 retention points at the smallest budgets. This
+comparison evaluates the joint design, including training
+and token allocation across layers. At fixed pruning lay-
+ers and retained token counts, learned selection also out-
+performs random selection at every budget on all three
+backbones. Although the architecture permits, it learns to
+be prompt-blind (Figure 6) because of the little benefit of
+prompt sensitivity. In Table 4, Oracle Selection remains
+within 0.71 retention points of the Varest reference at ev-
+ery budget, suggesting limited headroom for greater prompt
+sensitivity. This is further demonstrated in Appendix F.4,
+where we analyze a more formal upper bound than this
+attention-based signal using ground-truth labels in selected
+benchmarks and further explain the prompt blindness. To-
+gether, we justify that reading-relevance is sufficient.
+5. Discussion
+Varest allocates resolution to maximize semantic fungibil-
+ity, summarizing compatible regions while reserving finer
+representations for text and object boundaries. By main-
+taining full spatial coverage before decoder-stage pruning,
+it allows early decoder layers to integrate scene context be-
+fore reducing subsequent visual access.
+The method re-
+mains compatible with FlashAttention [9], since token se-
+lection does not require decoder attention weights, although
+translating computational savings into lower latency also re-
+quires an efficient implementation. Adapting Varest to ad-
+ditional VLM families, such as Qwen-VL and InternVL,
+remains promising future work. More broadly, the same
+semantic fungibility principle could extend beyond natural
+images. For example, in medical images, healthy organs
+are like objects and lesions are like text. Such extensions
+require domain-specific validation, but have great potential.
+8
+
+
+Contribution
+and
+Acknowledgements.
+TF
+led
+the
+project and proposed the entire method.
+TF, AW, and
+CC contributed to the manuscript, while TF and CC pro-
+duced the core visualizations. AW implemented and trained
+CORE, HiDrop, and DUET-VLM. CC implemented and
+trained LearnPruner and VisionZip/VisionZip++. RA, XJ,
+and YC implemented the other baselines. VX managed the
+experiment results and contributed to visualization utilities.
+CC and MT proposed and developed the efficiency bench-
+mark, VarestBench, as well as its dataset.
+We thank Ruihang Zhang and Jun Ma for their advice
+and feedback on the manuscript; Emile Petit for his help
+on the visualization experiments; Jean-S´ebastien Giroux for
+his suggestions on the paper. In addition, we would like to
+thank Lambda.ai for their sponsored compute credits.
+References
+[1] Saeed Ranjbar Alvar, Gursimran Singh, Mohammad Akbari,
+and Yong Zhang. DivPrune: Diversity-based visual token
+pruning for large multimodal models. In CVPR, pages 9392–
+9401, 2025. 1, 4, 7, 25
+[2] Jason Ansel, Edward Yang, Horace He, Natalia Gimelshein,
+Animesh Jain, Michael Voznesensky, Bin Bao, Peter Bell,
+David Berard, Evgeni Burovski, Geeta Chauhan, An-
+jali Chourdia, Will Constable, Alban Desmaison, Zachary
+DeVito, Elias Ellison, Will Feng, Jiong Gong, Michael
+Gschwind, Brian Hirsh, Sherlock Huang, Kshiteej Kalam-
+barkar, Laurent Kirsch, Michael Lazos, Mario Lezcano,
+Yanbo Liang, Jason Liang, Yinghai Lu, CK Luk, Bert Ma-
+her, Yunjie Pan, Christian Puhrsch, Matthias Reso, Mark
+Saroufim, Marcos Yukio Siraichi, Helen Suk, Michael Suo,
+Phil Tillet, Eikan Wang, Xiaodong Wang, William Wen,
+Shunting Zhang, Xu Zhao, Keren Zhou, Richard Zou, Ajit
+Mathews, Gregory Chanan, Peng Wu, and Soumith Chin-
+tala. PyTorch 2: Faster Machine Learning Through Dynamic
+Python Bytecode Transformation and Graph Compilation. In
+29th ACM International Conference on Architectural Sup-
+port for Programming Languages and Operating Systems,
+Volume 2 (ASPLOS ’24). ACM, 2024. 15
+[3] Pablo Arbel´aez, Michael Maire, Charless Fowlkes, and Ji-
+tendra Malik. Contour detection and hierarchical image seg-
+mentation. IEEE Transactions on Pattern Analysis and Ma-
+chine Intelligence, 33(5):898–916, 2011. 3
+[4] Yoshua Bengio, Nicholas L´eonard, and Aaron Courville.
+Estimating or propagating gradients through stochastic
+neurons for conditional computation.
+arXiv preprint
+arXiv:1308.3432, 2013. 3, 4, 7
+[5] Daniel Bolya, Cheng-Yang Fu, Xiaoliang Dai, Peizhao
+Zhang, Christoph Feichtenhofer, and Judy Hoffman. Token
+merging: Your ViT but faster. In ICLR, 2023. 1, 4, 7, 25
+[6] Lin Chen, Jinsong Li, Xiaoyi Dong, Pan Zhang, Yuhang
+Zang, Zehui Chen, Haodong Duan, Jiaqi Wang, Yu Qiao,
+Dahua Lin, and Feng Zhao. Are we on the right way for
+evaluating large vision-language models? In NeurIPS, pages
+27056–27087, 2024. 5, 7, 6
+[7] Liang Chen, Haozhe Zhao, Tianyu Liu, Shuai Bai, Junyang
+Lin, Chang Zhou, and Baobao Chang. An image is worth 1/2
+tokens after layer 2: Plug-and-play inference acceleration for
+large vision-language models. In ECCV, 2024. 1, 4, 7, 25
+[8] Xiwen Chen, Wenhui Zhu, Gen Li, Xuanzhao Dong, Yu-
+jian Xiong, Hao Wang, Peijie Qiu, Qingquan Song, Zhipeng
+Wang, Shao Tang, Yalin Wang, and Abolfazl Razi. OTPrune:
+Distribution-aligned visual token pruning via optimal trans-
+port. In CVPR, 2026. 1, 4, 7, 25
+[9] Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and
+Christopher R´e. FlashAttention: Fast and memory-efficient
+exact attention with IO-awareness. In Advances in Neural
+Information Processing Systems, 2022. 8
+[10] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+Deep residual learning for image recognition. In Proceed-
+ings of the IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 770–778, 2016. 1
+[11] Dan Hendrycks and Kevin Gimpel.
+Gaussian error linear
+units (GELUs), 2016. 1
+[12] Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-
+Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen.
+LoRA: Low-rank adaptation of large language models. In In-
+ternational Conference on Learning Representations, 2022.
+4, 9
+[13] Yihong Huang, Fei Ma, Yihua Shao, Jingcai Guo, Zitong
+Yu, Laizhong Cui, and Qi Tian. N¨uwa: Mending the spatial
+integrity torn by VLM token pruning. In ICLR, 2026. 1, 4,
+7, 22, 23, 25
+[14] Drew A. Hudson and Christopher D. Manning. GQA: A new
+dataset for real-world visual reasoning and compositional
+question answering. In CVPR, pages 6700–6709, 2019. 5, 7,
+6
+[15] Jaided AI.
+EasyOCR.
+https://github.com/
+JaidedAI/EasyOCR, 2020. Accessed: 2026-10-10. 3
+[16] Sarthak Jain and Byron C. Wallace. Attention is not expla-
+nation. In Proceedings of the 2019 Conference of the North
+American Chapter of the Association for Computational Lin-
+guistics: Human Language Technologies, Volume 1, pages
+3543–3556, 2019. 5
+[17] Aniruddha Kembhavi, Mike Salvato, Eric Kolve, Minjoon
+Seo, Hannaneh Hajishirzi, and Ali Farhadi. A diagram is
+worth a dozen images. In ECCV, pages 235–251, 2016. 5, 7,
+6
+[18] Jingyu Lei, Gaoang Wang, and Der-Horng Lee.
+CORE:
+Compact object-centric representations as a new paradigm
+for token merging in LVLMs. In CVPR, 2026. 1, 4, 7, 25
+[19] Bo Li, Kaichen Zhang, Hao Zhang, Dong Guo, Renrui
+Zhang, Feng Li, Yuanhan Zhang, Ziwei Liu, and Chunyuan
+Li. LLaVA-NeXT: Stronger LLMs supercharge multimodal
+capabilities in the wild, 2024. 2, 23
+[20] Yifan Li, Yifan Du, Kun Zhou, Jinpeng Wang, Xin Zhao, and
+Ji-Rong Wen. Evaluating object hallucination in large vision-
+language models. In Proceedings of the 2023 Conference on
+Empirical Methods in Natural Language Processing, pages
+292–305, 2023. 5, 7, 6
+[21] Haotian Liu, Chunyuan Li, Yuheng Li, and Yong Jae Lee.
+Improved baselines with visual instruction tuning. In Pro-
+ceedings of the IEEE/CVF Conference on Computer Vision
+9
+
+
+and Pattern Recognition (CVPR), pages 26296–26306, 2024.
+2, 22, 23
+[22] Yuan Liu, Haodong Duan, Yuanhan Zhang, Bo Li, Songyang
+Zhang, Wangbo Zhao, Yike Yuan, Jiaqi Wang, Conghui He,
+Ziwei Liu, Kai Chen, and Dahua Lin. MMBench: Is your
+multi-modal model an all-around player?
+In ECCV, pages
+216–233, 2024. 5, 7, 6
+[23] Ilya Loshchilov and Frank Hutter.
+Decoupled weight de-
+cay regularization. In International Conference on Learning
+Representations (ICLR), 2019. 9
+[24] Qiankun Ma, Ziyao Zhang, Haofei Wang, Jie Chen, Zhen
+Song, and Hairong Zheng.
+ApET: Approximation-error
+guided token compression for efficient VLMs.
+In CVPR,
+2026. 1, 4, 7, 25
+[25] Junhua Mao, Jonathan Huang, Alexander Toshev, Oana
+Camburu, Alan L. Yuille, and Kevin Murphy. Generation
+and comprehension of unambiguous object descriptions. In
+CVPR, pages 11–20, 2016. 5, 7, 6
+[26] Ahmed Masry, Do Xuan Long, Jia Qing Tan, Shafiq Joty,
+and Enamul Hoque. ChartQA: A benchmark for question
+answering about charts with visual and logical reasoning. In
+Findings of the Association for Computational Linguistics:
+ACL 2022, pages 2263–2279, 2022. 5, 6
+[27] Minesh Mathew, Dimosthenis Karatzas, and C. V. Jawahar.
+DocVQA: A dataset for VQA on document images.
+In
+IEEE/CVF Winter Conference on Applications of Computer
+Vision, pages 2200–2209, 2021. 5, 7, 6, 11
+[28] nostalgebraist. interpreting GPT: the logit lens. LessWrong,
+2020. 4
+[29] Roni Paiss, Ariel Ephrat, Omer Tov, Shiran Zada, Inbar
+Mosseri, Michal Irani, and Tali Dekel. Teaching CLIP to
+count to ten. In ICCV, pages 3170–3180, 2023. 5, 7, 6
+[30] Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya
+Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry,
+Amanda Askell, Pamela Mishkin, Jack Clark, Gretchen
+Krueger, and Ilya Sutskever.
+Learning transferable visual
+models from natural language supervision. In Proceedings
+of the 38th International Conference on Machine Learning,
+pages 8748–8763. PMLR, 2021. 7
+[31] Oriane Sim´eoni, Huy V. Vo, Maximilian Seitzer, Federico
+Baldassarre, Maxime Oquab, Cijo Jose, Vasil Khalidov,
+Marc Szafraniec, Seungeun Yi, Micha¨el Ramamonjisoa,
+Francisco Massa, Daniel Haziza, Luca Wehrstedt, Jianyuan
+Wang, Timoth´ee Darcet, Th´eo Moutakanni, Leonel Sentana,
+Claire Roberts, Andrea Vedaldi, Jamie Tolan, John Brandt,
+Camille Couprie, Julien Mairal, Herv´e J´egou, Patrick La-
+batut, and Piotr Bojanowski. DINOv3, 2025. 2
+[32] Amanpreet Singh, Vivek Natarajan, Meet Shah, Yu Jiang,
+Xinlei Chen, Dhruv Batra, Devi Parikh, and Marcus
+Rohrbach. Towards VQA models that can read. In CVPR,
+pages 8317–8326, 2019. 5, 7, 6, 11
+[33] Aditya Kumar Singh, Hitesh Kandala, Pratik Prabhanjan
+Brahma, Zicheng Liu, and Emad Barsoum. DUET-VLM:
+Dual-stage unified efficient token reduction for VLM train-
+ing and inference. In CVPR, 2026. 1, 4, 5, 7, 22, 23, 25
+[34] Rinyoichi Takezoe, Yaqian Li, Zihao Bo, Anzhou Hou,
+Mo Guang, and Kaiwen Long.
+LearnPruner: Rethinking
+attention-based token pruning in vision language models. In
+ICLR, 2026. 1, 4, 5, 7, 25
+[35] Yahong Wang, Juncheng Wu, Zhangkai Ni, Longzhen Yang,
+Yihang Liu, Chengmei Yang, Ying Wen, Lianghua He, Xian-
+feng Tang, Hui Liu, and Yuyin Zhou. When token pruning is
+worse than random: Understanding visual token information
+in vllms. In CVPR, 2026. 3, 12
+[36] Hao Wu, Yingqi Fan, Jinyang Dai, Junlong Tong, Yunpu Ma,
+and Xiaoyu Shen. HiDrop: Hierarchical vision token reduc-
+tion in MLLMs via late injection, concave pyramid pruning,
+and early exit. In ICLR, 2026. 1, 4, 5, 7, 15, 22, 23, 25
+[37] Penghao Wu and Saining Xie. V ∗: Guided visual search as
+a core mechanism in multimodal LLMs. In CVPR, pages
+13084–13094, 2024. 5, 7, 6
+[38] Yuxin Wu and Kaiming He. Group normalization. In Pro-
+ceedings of the European Conference on Computer Vision
+(ECCV), pages 3–19, 2018. 1
+[39] Long Xing, Qidong Huang, Xiaoyi Dong, Jiajie Lu, Pan
+Zhang, Yuhang Zang, Yuhang Cao, Conghui He, Jiaqi Wang,
+Feng Wu, and Dahua Lin. PyramidDrop: Accelerating your
+large vision-language models via pyramid visual redundancy
+reduction. In CVPR, 2025. 1, 3, 4, 5, 7, 15, 25
+[40] Senqiao Yang, Yukang Chen, Zhuotao Tian, Chengyao
+Wang, Jingyao Li, Bei Yu, and Jiaya Jia. VisionZip: Longer
+is better but not necessary in vision language models.
+In
+CVPR, pages 19792–19802, 2025. 4, 7, 22, 23, 25
+[41] Sihan Yang, Runsen Xu, Chenhang Cui, Tai Wang, Dahua
+Lin, and Jiangmiao Pang.
+VFlowOpt: A token pruning
+framework for LMMs with visual information flow-guided
+optimization. In ICCV, pages 23924–23934, 2025. 1, 4, 7,
+25
+[42] Fisher Yu and Vladlen Koltun. Multi-scale context aggrega-
+tion by dilated convolutions. In International Conference on
+Learning Representations (ICLR), 2016. 1
+[43] Licheng Yu, Patrick Poirson, Shan Yang, Alexander C. Berg,
+and Tamara L. Berg. Modeling context in referring expres-
+sions. In ECCV, pages 69–85, 2016. 5, 7, 6, 10
+[44] Yuan Zhang, Chun-Kai Fan, Junpeng Ma, Wenzhao Zheng,
+Tao Huang, Kuan Cheng, Denis Gudovskiy, Tomoyuki
+Okuno, Yohei Nakata, Kurt Keutzer, and Shanghang Zhang.
+SparseVLM: Visual token sparsification for efficient vision-
+language model inference. In International Conference on
+Machine Learning, 2025. 1, 4, 7, 25
+10
+
+
+Just Respect the Semantics: Image-Token Compression via Pre-LLM Semantic
+Variable-Resolution Tokenization and In-LLM Relevance Pruning
+Supplementary Material
+(E) Text Localizer
+Per-cell
+Mean
+Normalized
+Variance
+GELU
+GroupNorm
+2×
+3×3 Conv
+1×1 Conv
+GELU
+Grayscale
+ResBlock
+×3
+1×1 Conv
+Textness
+EasyOCR
+(D) Object Localizer
+GELU
+GroupNorm
+3×
+3×3 Conv
+GELU
+Cosine
+Distance
+ResBlock
+×4
+Per-cell
+Mean
+Normalized
+Variance
+1×1 Conv
+1×1 Conv
+DINOv3
+Feature Map
+Boundary Field
+Target
+ResBlock
+N×
+GELU
+GroupNorm
+GroupNorm
+3×3 Conv
+3×3 Conv
+(C) Adaptive Halting
+LLM Decoder
+LLM Decoder
+LLM Decoder
+LLM Decoder
+LLM Decoder
+LLM Decoder
+Logit Lens
+Logit Lens
+Logit Lens
+Logit Lens
+0.5
+0.4
+0.6
+0.8
+#layers ≥ W = 3?
+≥ T = 0.7?
+Confidence
+argmax
+...
+...
+6
+9
+9
+9
+LayerNorm
+Mean over 4
+Wq Projection
+Wk Projection
+LayerNorm
+4 [REL] states
+Km image states
+(B) [REL] Token
+Protect Text Borders
+B* = max(B, λ|ΔT|)
+Filter Text Cells
+T > τ(rm)
+Minimum # Objects
+kmin = min(kmin, Km)
+Allocate Km Tokens
+Group text cells if tight
+Pin text cells if enough
+Average-linkage
+Merging
+Mean within Regions
+(cx, cy, extent)
+Position Tag
+Km image tokens
+Fused Boundary
+Strengths
+(A) Variable-Resolution Tokenizer (Varest)
+Partition
+Projected image tokens
+Boundary Field
+Textness
+Relevance
+Object
+Localizer(D)
+Image tokens
+Vision
+Encoder
+Projector
+Text
+Localizer(E)
+Varest(A)
+Position Tag
+MLP ×2
+EasyOCR
+DINOv3
+Language
+Encoder
+LLM
+layers 1 - ½L
+Text tokens
+Km image tokens
+[REL]
+"How many trains are
+visible in the image?"
+"There are two trains."
+"2"
+Literal
+Text token
+Image token
+Supervision
+New module
+Module
+Operator
+[REL] tokens(B)
+Text tokens
+Kp image tokens
+Attention Mask
+Top-k
+LM Head
+Input image
+Cosine
+Distance
+Figure 8. Detailed overview of Varest. (A) Object boundaries and textness guide the budget-controlled partitioning. Mean pooling within
+regions produces Km image tokens, each augmented with an additive learned position tag, while preserving full spatial coverage. (B) Four
+learned [REL] registers score these tokens at the midpoint of the decoder, retaining the Kp most relevant to LLM reading. Selection uses
+attention masking during training and hard top-k at inference. (C) Optional adaptive halting removes all remaining image tokens once the
+intermediate answer predictions become stable and confident. (D–E) Lightweight object and text localizers predict boundary strengths and
+textness from RGB and grayscale pixels, respectively. Both concatenate per-cell feature means and normalized variances before residual
+processing. DINOv3 feature distances and EasyOCR boxes provide their training supervision.
+A. Method and Training Details
+We describe the method architecture, components, and
+training design in detail. The architecture components and
+their positions are described in Section A.1. We then de-
+scribe training protocols in Section A.2.
+Finally, Sec-
+tion A.3 documents baseline adjustments and evaluation
+protocols.
+A.1. Method
+A.1.1. Localizer Architecture and Field Alignment
+Figure 8(D–E) details the two localizers, both of which op-
+erate on pixels scaled to [0, 1], independently of the vision
+encoder, prompt, and token budget. DINOv3 and EasyOCR
+provide supervision targets only. After both localizers are
+separately trained, they remain frozen, including during the
+VLM adaptation and inference.
+Shared architecture.
+Each stem layer consists of a bias-
+free 3×3 convolution with stride 2 and padding 1, followed
+by eight-group GroupNorm [38] and GELU [11]. Within
+each cell, we compute the channel-wise feature mean µi
+and population variance vi. The variance is standardized
+across cells of the same image, independently for each
+channel, and concatenated with the mean:
+ui =
+
+µi,
+vi −¯v
+max{Stdj(vj), 10−9}
+
+,
+(5)
+where Std uses the sample standard deviation. A 1 × 1 pro-
+jection and GELU precede the residual blocks [10]. Each
+block applies a dilated 3 × 3 convolution [42], GroupNorm,
+GELU, another convolution with the same dilation, and
+GroupNorm, then adds the input without a further activa-
+tion. Padding equals the dilation. GroupNorm uses eight
+groups, affine parameters, and ϵ = 10−5. Convolutions
+1
+
+
+Input
+Teacher
+Prediction
+Figure 9. Visualization of the object localizer. Top: input images. Middle: teacher boundary strengths computed as cosine distances
+between neighbour DINOv3 features. Bottom: predictions from the lightweight RGB localizer. Brighter edges indicate stronger bound-
+aries. The localizer captures the teacher’s main boundary structure across documents, diagrams, product images, charts, and natural scenes,
+providing continuous evidence for region merging.
+Input
+Varest
+CORE
+HiDrop
+Figure 10. Varest applied to document images. Compared with
+baselines, Varest is able to consistently identify text, while wasting
+little budget on whitespace.
+after the stem are biased, and no additional normalization
+precedes the 1 × 1 projection.
+Object localizer.
+The RGB stem has three layers with
+channel widths 4 →96 →192 →384. Each 16 × 16 input
+cell becomes a 2×2 stem block. Concatenating its moments
+yields 768 channels, which we project to 288 channels and
+process with four residual blocks with dilations (1, 2, 4, 8).
+A final 1×1 convolution predicts two unconstrained bound-
+ary strengths per cell, corresponding to its right and lower
+neighbours. No sigmoid is applied. Figure 9 visualizes the
+object localizer’s predictions on selected examples.
+Text localizer.
+The grayscale stem has two layers with
+channel widths 1 →32 →64.
+The image is bicubic-
+resized to 28nc × 28nr for a target grid of nr × nc cells. It
+yields a 7 × 7 stem block per cell. Moments are computed
+by average pooling, with variance max{AvgPool(y2) −
+AvgPool(y)2, 0}.
+The concatenated 128 channels pass
+through a 128-channel projection and three residual blocks
+with dilations (1, 2, 4). A final 1 × 1 convolution produces
+one logit per cell, converted to textness by sigmoid. Fig-
+ure 11 visualizes the text localizer’s predictions on selected
+examples. More importantly, the text localizer enables our
+method to perform well on no-text images as shown in Fig-
+ure 10, unlike CORE who only has a conceptually similar
+object localizer.
+Alignment with image tokens.
+For LLavA-1.5 [21], the
+object branch bicubic-resizes the image with aspect ratio
+preserved up to grid rounding, using a 768-pixel long side
+and 16-pixel cells. Its predictions are mapped to the visual
+grid by taking the maximum fine-grid boundary strength
+along each coarse boundary. Both fields occupy the cells
+whose centers lie inside the original image in the padded
+24 × 24 grid. Padding has zero textness and zero internal
+boundary strengths; image-padding boundaries are assigned
+strength 9.
+For LLaVA-NeXT [19], fields are aligned separately to
+the 24 × 24 base view and the stitched, unpadded nr × nc
+high-resolution view.
+The object branch runs once with
+long side max{768, 16 max(nr, nc)}, and its boundary
+field is max-pooled onto both grids. The text branch runs
+separately at each view’s grid shape.
+Nonexistent outer
+2
+
+
+Input
+Teacher
+Prediction
+Figure 11. Visualization of the text localizer. Top: input images. Middle: EasyOCR-derived text labels, visualized by masking unlabeled
+cells. Bottom: per-cell textness predicted by the lightweight grayscale localizer, with brighter colors indicating higher probabilities. The
+examples span charts, diagrams, documents, and natural scenes, illustrating localization of text at different scales and low responses to
+non-text textures in the fruit image.
+edges are set to zero.
+A.1.2. Token-Budget Allocation
+Stage budgets.
+Without adaptive halting, midpoint prun-
+ing targets a layer-averaged image-token budget K, exclud-
+ing prompt tokens and [REL] registers. The integer stage
+budgets are
+Km = round
+8K
+5
+
+,
+Kp = 2K −Km.
+(6)
+For K
+∈{32, 64, 128, 224} on LLaVA-1.5, this gives
+(Km, Kp) = (51, 13), (102, 26), (205, 51), and (358, 90),
+respectively. The intended 4:1 split is therefore approximate
+after rounding.
+Image-dependent NeXT budgets.
+For a high-resolution
+grid of nr×nc cells, the native sequence length is Nnative =
+576 + nrnc + nr, including one newline token per high-
+resolution row. A requested retention ratio r determines
+Kimg = max{1, ⌊rNnative⌋}. We compute
+Km = clip(round(8Kimg/5), 6, 576 + nrnc) ,
+Kp = clip(2Kimg −Km, 0, Km).
+(7)
+The merging budget is divided between the base and high-
+resolution views in proportion to their cell counts. We round
+the base-view share and assign the remainder to the high-
+resolution view, enforcing at least three tokens per view
+and each view’s cell capacity. Both views use the same
+merging-stage ratio rm = Km/Nnative to determine the
+textness threshold. Newline tokens enter the native-length
+accounting but are not emitted by our tokenizer. Capacity
+constraints can make the realized mean (Km+Kp)/2 differ
+from Kimg.
+Text and non-text groups.
+Let M denote the merging
+budget assigned to one grid: M = Km for LLaVA-1.5,
+or the allocated view budget for NeXT. If letterbox padding
+is present, its cells form one reserved token, leaving a con-
+tent budget C = M −1; otherwise, C = M. The builder
+requires C ≥2. Among image-content cells, we identify
+text by Ti > τ(rm), where
+τ(rm) = 1 −1
+2 clip(rm, 0, 1).
+(8)
+For LLaVA-1.5, rm = Km/576. Let nt and no be the num-
+bers of text and non-text cells.
+Non-text reserve.
+We estimate the reserve from the fused
+boundary field B∗, before separating text and non-text cells.
+Starting from individual cells on the complete aligned grid,
+including padding when present, we run weakest-mean-
+boundary agglomeration down to two regions. The refer-
+ence threshold is
+qB = Quantile0.75
+
+max(B∗
+i,→, B∗
+i,↓)
+	
+i
+
+.
+(9)
+3
+
+
+Budget increases
+Figure 12. Varest tokenization across token budgets. Text is kept at native resolution consistently, while extra budget splits objects into
+finer semantic parts, e.g., the head in the top row separates into face and hair.
+“a bowl of pasta next to a bowl of salad”
+Input
+w/o pos. tags
+✗ IoU 0.22
+w/ pos. tags
+✓ IoU 0.65
+Figure 13. Varest compared with and without position tags.
+Position tags enable more precise grounding coordinates.
+Let k0 be the number of regions immediately after the first
+merge whose cost strictly exceeds qB; if no crossing occurs,
+we set k0 = 1. The budget-dependent reserve is
+kmin = max{1, min(k0, round(M/2))} .
+(10)
+The cap uses the grid’s total budget M, before reserving the
+padding token. Each NeXT view computes its own reserve.
+All rounding uses nearest-integer rounding with ties to even.
+Quota assignment.
+When both groups are nonempty and
+C −nt ≥kmin, we preserve every text cell individually
+and allocate C −nt regions to non-text content. Otherwise,
+we initially allocate min{kmin, C −1} non-text regions and
+assign the remaining budget to text. We cap the non-text
+quota at no, recompute the remaining text quota, and cap
+it at nt. Any unused capacity is reassigned first to non-text
+cells and then to text cells. If either group is empty, the other
+receives the content budget up to its cell count. Thus, every
+content cell remains represented, and the requested region
+count is attained whenever sufficient cells are available. We
+demonstrate the management of token budget in Figure 12.
+A.1.3. Region-Merging Procedure
+Graph construction.
+For each nonempty text or non-
+text group, we initialize one region per cell.
+Horizontal
+and vertical neighbours within the same group are con-
+nected by undirected edges weighted by the fused boundary
+strength B∗
+ij. Each grid edge is included once. The groups
+are processed independently, so merging never crosses the
+text/non-text split. Padding is excluded from these graphs
+and retains its reserved region.
+Merge updates.
+For each connected region pair (R, S),
+we maintain the sum ARS of its edge weights and the num-
+ber nRS of those edges. The merge priority is d(R, S) =
+ARS/nRS, implementing the mean-boundary rule in Equa-
+tion 1. We repeatedly merge the pair with the smallest pri-
+ority. After merging R and S into U, its connection to any
+neighbouring region Q is updated by
+AUQ = ARQ + ASQ,
+nUQ = nRQ + nSQ,
+(11)
+with absent connections contributing zero to both terms.
+The new priority is AUQ/nUQ. Thus, updates preserve the
+mean over constituent edges rather than averaging region-
+pair costs equally. A min-heap stores candidate merges, and
+a union-find structure tracks region membership; outdated
+heap entries are discarded or refreshed when encountered.
+Disconnected components.
+Separating text and non-text
+cells can produce disconnected components whose number
+exceeds the allocated quota. Before agglomeration, we con-
+nect these components with a sparse set of auxiliary edges.
+Starting from the first component in raster order, we repeat-
+edly connect the nearest pair consisting of one component
+already in the tree and one outside it. Distances are mea-
+sured between component centroids in cell coordinates. For
+4
+
+
+Text localizer
+Object localizer
+Data
+20,000 text-bearing images from the OCR-VQA and
+TextVQA subsets of LLaVA-665K, plus text-free
+negatives from all of LLaVA-665K at the corpus
+text-free:text ratio. We take a 3,000-image held-out split
+at the same ratio.
+341,000 unique images from LLaVA-665K, 5% held out
+for validation.
+Input
+Grayscale, at the image’s own aspect ratio, resized to
+28 px per cell of the 24×24 token grid.
+RGB, at the image’s own aspect ratio, long side 768 px,
+16 px cells.
+Target
+EasyOCR (CRAFT + CRNN) boxes, rasterized to cells;
+a cell is positive if any box touches it.
+Cosine distance between adjacent DINOv3 ViT-L/16
+patch features (right and lower neighbour), on the
+teacher’s native patch grid.
+Loss
+Per-cell binary cross-entropy, positive weight (1 −p)/p,
+where p is the mean positive-cell fraction of the
+text-bearing training images.
+L1 regression, masked on the non-existent
+last-column/last-row edges.
+Optimizer
+AdamW, LR 10−3, weight decay 0.01, gradient clipping
+1.0.
+AdamW, LR 10−3, weight decay 0.01, gradient clipping
+1.0.
+LR
+schedule
+Constant.
+Cosine annealing to 0 over 100 epochs.
+Batch /
+duration
+16 images, 30,000 steps. Batches group images with the
+same grid shape.
+16 images, 100 epochs. Batches group images with the
+same grid shape.
+Checkpoint
+selection
+None; final weights.
+Best validation Spearman ρ to the teacher edges (the
+final epoch)
+Table 6. Localizer training. Both localizers are trained once, separately from the VLM, and are shared by all three backbones. They stay
+frozen during VLM adaptation and inference.
+components Ca and Cb, the auxiliary edge joins their first
+cells in raster order and receives weight
+wbridge(Ca, Cb) = 103 + ∥c(Ca) −c(Cb)∥2.
+(12)
+These weights are fixed before merging and enter the same
+sum-and-count updates as ordinary edges.
+Their large
+penalty defers merging across disconnected components,
+while allowing the requested quota to be reached. When
+such a merge occurs, the resulting region can be spatially
+disconnected.
+Termination and coverage.
+Agglomeration stops when
+the group’s allocated region count is reached. If its quota
+equals its cell count, all cells remain individual regions;
+empty groups are skipped. Combining the two partitions
+and the reserved padding region assigns every grid cell to
+exactly one output region. The procedure therefore reduces
+token count through aggregation without discarding spatial
+coverage.
+A.1.4. Region Encoding and Backbone Integration
+Feature pooling.
+We extract patch features from the
+backbone’s configured vision layer, discard the classifica-
+tion token, and apply the multimodal projector to each
+patch. Region pooling therefore operates in the LLM em-
+bedding space, after vision encoding and projection. For
+each region, all constituent cells contribute equally to the
+mean in Equation 2.
+Spatial tags.
+For a region R on an nr×nc grid, let (ri, ci)
+be the zero-based row and column indices of cell i. Its nor-
+malized centroid and extent are
+cx(R) =
+1
+|R|nc
+X
+i∈R
+(ci + 1
+2),
+cy(R) =
+1
+|R|nr
+X
+i∈R
+(ri + 1
+2),
+a(R) =
+s
+|R|
+nrnc
+.
+(13)
+The half-cell offset places each coordinate at the cell center.
+The extent measures the square root of the region’s fraction
+of the grid, using all member cells even when the region is
+disconnected. The position-tag MLP has architecture
+Linear(3, 256) →GELU →Linear(256, dLLM),
+(14)
+with biases in both linear layers.
+Its output is added to
+the pooled feature.
+The MLP is learned separately for
+5
+
+
+Benchmark
+Evaluation set
+Reported metric
+MMBench [22]
+English dev, 20230712; 4,377 questions
+Circular accuracy
+AI2D [17]
+Test; 1,904 text-option and 1,184 letter-label
+questions
+Accuracy over all 3,088 questions
+MMStar [6]
+Validation; 1,500 questions
+Accuracy
+POPE [20]
+COCO val2014; random: 2,910;
+popular/adversarial: 3,000 each
+Positive-class (yes) F1, separately per variant
+GQA [14]
+Testdev-balanced; 12,578 questions
+Normalized exact-match accuracy
+ChartQA [26]
+Test; 1,250 human and 1,250 augmented
+questions
+Relaxed accuracy; mean of the two subset
+accuracies
+DocVQA [27]
+SP-DocVQA v1.0 validation; 5,349 questions
+ANLS; similarities below 0.5 score zero
+TextVQA [32]
+v0.5.1 validation; 5,000 questions matched to
+LLaVA’s OCR prompt file
+Mean min(m/3, 1); m is the number of matching
+normalized answers among ten references
+RefCOCO [43]
+UNC validation; 10,834 expressions
+Accuracy at IoU ≥0.5
+RefCOCO+ [43]
+UNC validation; 10,758 expressions
+Accuracy at IoU ≥0.5
+RefCOCOg [25]
+UMD validation; 4,896 expressions
+Accuracy at IoU ≥0.5
+CountBenchQA [29]
+Test; 491 question–image pairs
+Exact count accuracy
+V* [37]
+Test; 115 direct-attribute and 76 relative-position
+questions
+Accuracy over all 191 questions
+Table 7. Benchmark evaluation protocols. Generation uses greedy decoding, one beam, and KV caching. Output limits are 1,024 tokens
+for MMBench, 16 for CountBenchQA and V*, and 128 otherwise. All listed evaluation sets are used without an additional sample limit.
+each backbone and shared across its regions and image
+views. We demonstrate the effectiveness of position tags
+on grounding tasks in Figure 13.
+Backbone geometry.
+For LLaVA-1.5, pooling and coor-
+dinate normalization use the complete 24 × 24 padded grid.
+The reserved padding region is encoded by the same mean-
+and-tag operation as other regions.
+For LLaVA-NeXT,
+we retain the backbone’s AnyRes resolution selection and
+tiling. The base image produces a 24 × 24 feature grid,
+while each high-resolution tile produces its own 24 × 24
+grid. We stitch the projected tile features into their spatial
+layout and remove padding using the backbone’s unpadding
+rule. Region encoding then operates separately on the base
+grid and the stitched high-resolution grid, with coordinates
+and extent normalized within each view. Regions may span
+tile boundaries within the stitched view.
+Sequence construction.
+Within each view, regions are
+ordered by the raster index of their first cell.
+LLaVA-
+NeXT concatenates the base-view regions before the high-
+resolution regions and emits no image-newline tokens. The
+resulting visual sequence occupies the image position in
+the backbone’s chat template, before the user prompt. The
+assembled sequence receives consecutive decoder position
+tags; the position tags supply the region geometry in ad-
+dition to this sequence-position information. Its effect is
+visualized in Figure 13.
+A.1.5. Decoder-Stage Selection
+Registers and scoring.
+Four learned [REL] embeddings
+are inserted after the user prompt and before the assistant-
+turn prefix.
+Selection occurs at the midpoint, which is
+after 16 completed decoder layers for LLaVA-1.5-7B and
+LLaVA-NeXT-8B, and after 20 for LLaVA-1.5-13B. The
+scoring head follows Equation 3, using non-affine Layer-
+Norm and bias-free projections to 256 dimensions. Each
+register state is normalized before averaging.
+Differentiable selection.
+Let nv be the number of image
+tokens at the selection boundary. During training, we stan-
+dardize their scores as
+¯sj =
+sj −meank(sk)
+max{Stdk(sk), 10−3},
+(15)
+using the sample standard deviation and retaining gradients
+through this operation.
+Standardization is skipped when
+nv = 1. Let mj ∈{0, 1} indicate membership in the top-
+Kp set, computed from detached scores. For 0 < Kp < nv,
+6
+
+
+What color jacket is the person holding the snowboard wearing?
+Original image answer: Blue
+One token per person
+Answer: Blue
+Both people in one token
+Answer: Blue
+People + snowboard in one token
+Answer: White
+Figure 14. Semantic compatibility affects token merging. Highlighted patches are merged into one token per person (left), one token
+shared by both people (middle), or one token combining both people and the snowboard (right). The first two configurations preserve the
+original answer, “Blue,” while including the snowboard changes the answer to “White.” This example illustrates how merging semantically
+different content can disrupt an attribute needed for answering, even when merging multiple instances of the same category preserves it.
+the detached threshold θ is the midpoint between the Kp-
+th and (Kp + 1)-th highest standardized scores.
+At the
+endpoints, we use θ = maxj ¯sj + γ for Kp = 0 and
+θ = minj ¯sj −γ for Kp = nv. A straight-through sur-
+rogate [4] defines
+uj = σ
+ ¯sj −θ
+γ
+
+,
+γ = 0.1,
+emj = mj + uj −sg(uj),
+(16)
+where sg stops gradients. The forward pass uses binary se-
+lection, while the backward pass follows the sigmoid surro-
+gate.
+Attention masking during training.
+A single selection
+mask is reused in every subsequent decoder layer and atten-
+tion head. It multiplies the exponentiated attention logits of
+visual keys before renormalization:
+αij =
+wj exp(eij)
+P
+k≤i wk exp(eik),
+j ≤i,
+(17)
+where eij is the scaled query-key logit, wj = emj for image
+tokens, and wj = 1 for text tokens and registers. Causal
+masking remains in effect. For numerical stability, logits
+are shifted by a detached row maximum, and the denom-
+inator is clamped below at 10−30. All sequence rows re-
+main present during training, but discarded visual keys con-
+tribute zero attention weight in the forward pass. The an-
+swer cross-entropy loss supplies gradients to the selector
+without token-relevance labels.
+Algorithm 2 Prefill with Adaptive Halting
+Require: Prompt states H, decoder depth L, pruning budget Kp
+1: halted ←False
+2: for ℓ= 0, . . . , L −1 do
+3:
+if not halted then
+4:
+pℓ←Lens(Hlast)
+5:
+ˆyℓ←arg maxv pℓ(v)
+6:
+if ℓ≥8 and Stable3(ˆy0:ℓ) and H(pℓ) ≤1 then
+7:
+Remove all image tokens and registers from H
+8:
+halted ←True
+9:
+end if
+10:
+end if
+11:
+if ℓ= L/2 and not halted then
+12:
+Retain the Kp image tokens selected by [REL]
+13:
+Remove the other image tokens and registers
+14:
+end if
+15:
+H ←Decoderℓ+1(H), storing its KV cache
+16: end for
+17: Generate the answer using the final states and KV caches
+Physical removal at inference.
+At the midpoint, we re-
+tain the Kp highest-scoring image tokens, restore their orig-
+inal sequence order, and physically remove the remaining
+image tokens together with the registers. Thus, registers re-
+main visible after selection during training but are removed
+at inference. Surviving tokens preserve their original posi-
+tion tags. Earlier-layer KV caches retain the full prompt,
+while later-layer caches contain the retained image tokens
+and text tokens. Selection is performed once during prefill;
+subsequent answer generation uses these per-layer caches.
+7
+
+
+(a) Boundary leakage
+K=32, Km =51; mask IoU 56%
+(b) Finer object alignment
+K=224, Km =358; mask IoU 89%
+(c) Visible text not flagged
+K=32, Km =51
+(d) Detected text merged
+K=32, Km =51
+(e) Detected text kept as cells
+K=224, Km =358
+(f) Non-text flagged as text
+K=224, Km =358
+Flagged text cells
+Object annotation / text callout
+Region borders (white)
+Figure 15. Tokenizer allocation and its failure cases. Cropped views of saved LLaVA-1.5-7B partitions, before decoder pruning. White
+lines are region borders; blue shading marks cells flagged as text. (a–b) The orange object annotation exposes boundary leakage at the
+smaller budget and closer alignment at the larger one. (c) The visible htc logo is not flagged at either endpoint budget; the orange box
+locates it. (d–e) Detected text is merged at the smaller budget and kept as single cells at the larger one. (f) Thirteen cells on and around
+cat silhouettes are incorrectly flagged and receive thirteen individual text tokens. These selected examples show mechanisms, not their
+frequency or effect on answer accuracy.
+A.1.6. Adaptive Halting Implementation
+Algorithm 2 implements the main-text criterion during pre-
+fill, independently for each example. Lens applies the final
+normalization and frozen base vocabulary head to the last
+prompt state, including the assistant-turn prefix, bypassing
+the vocabulary-head LoRA update. Stable3 tests whether
+the three most recent top-1 predictions agree; the entropy
+condition applies only to the current readout.
+Here, ℓcounts completed layers, so halting removes to-
+kens before layer ℓ+ 1 and takes precedence over midpoint
+pruning.
+Deletion preserves surviving tokens’ order and
+original position tags. Later layers cache only the shortened
+prompt; earlier layers retain their visual cache entries. An-
+swer generation continues through all decoder layers using
+the adapted vocabulary head, with position tags continuing
+from the original prompt length. Halting is not reevaluated
+during generation. If no trigger occurs, standard [REL]
+pruning proceeds.
+A.2. Training Details
+The object localizer is trained through distillation on DI-
+NOv3 ViT-L/16, while the text localizer learns from Easy-
+OCR annotations.
+Training settings are described in 6.
+We describe the loss formulation below; both are averaged
+across the batch, where each batch contains only images
+with the same aspect ratio (if it divides into the same grid
+shape).
+Object localizer.
+Consider a training image on the
+teacher’s nr × nc patch grid. Let fi be the DINOv3 fea-
+ture of cell i, and let o ∈{→, ↓} index its right and lower
+neighbour io. We define teacher edge strength by the cosine
+distance:
+Di,o = 1 −
+f ⊤
+i fio
+∥fi∥2 ∥fio∥2
+.
+(18)
+Let E be the set of existing edges, excluding the right edges
+of the last column and the lower edges of the last row, so
+|E| = nr(nc −1) + (nr −1)nc. Then, the loss is given
+by the average difference from the teacher’s edge strength
+across all edges:
+Lobj = 1
+|E|
+X
+(i,o)∈E
+ ˆBi,o −Di,o
+.
+(19)
+Text localizer.
+Consider a training image with N cells.
+Let yi ∈{0, 1} indicate that an EasyOCR box touches cell
+i, and let ˆTi = σ(zi) be the predicted textness from logit zi.
+8
+
+
+32
+64
+128
+224
+Tokenizer budget Km
+0
+25
+50
+75
+100
+Whole-region mask IoU (%)
+(a) RefCOCO
+Learned boundaries
+CLIP boundaries
+32
+64
+128
+224
+Tokenizer budget Km
+0
+25
+50
+75
+100
+Answer-associated cells unmerged (%)
+(b) TextVQA
+Textness-guided
+No textness
+32
+64
+128
+224
+Tokenizer budget Km
+0
+25
+50
+75
+100
+Answer-associated cells unmerged (%)
+(c) DocVQA
+Textness-guided
+No textness
+Figure 16. Spatial detail retained by the tokenizer. (a) Whole-region mask IoU on RefCOCO with learned or CLIP-derived boundaries.
+(b–c) Answer-associated OCR cells kept unmerged, with predicted or zero textness. Each comparison fixes the other field. Km counts
+regions before decoder pruning, not the layer-averaged budget. These are spatial measurements, not answer accuracy.
+The positive weight is
+w+ = 1 −p
+p
+,
+p =
+1
+|Itext|
+X
+m∈Itext
+1
+Nm
+Nm
+X
+i=1
+ym,i,
+(20)
+where Itext is the set of text-bearing training images and
+image m has Nm cells with labels ym,i. Text-free negatives
+are excluded from p so that they do not inflate w+. For
+each image, the loss is the positive-weighted binary cross-
+entropy averaged over its cells:
+Ltext = −1
+N
+N
+X
+i=1
+h
+w+ yi log ˆTi + (1 −yi) log
+ 1 −ˆTi
+i
+.
+(21)
+Joint adaptation.
+We train for one pass over the image
+rows of each backbone’s instruction-tuning set (LLaVA-1.5
+665K, 624,609 rows; LLaVA-NeXT-Data, 738,590 rows),
+using the first turn of each conversation and answer-token
+cross-entropy.
+LoRA [12] (rank 32, α = 64, dropout
+0.05) is applied to the LLM’s query/key/value projections,
+CLIP’s query/key/value projections, and the LM head. We
+directly fine-tune the projector and train the position tag and
+[REL] head from scratch. We use AdamW [23] with batch
+size 1, a constant learning rate of 2 × 10−5, weight decay
+0.01, and gradient clipping at 1.0. The [REL] head uses
+a learning rate of 10−3 with a 2,000-step warm-up and no
+weight decay. Each step samples Km ∼U{32, . . . , 576}
+and Kp ∼U{0, . . . , Km}. We average the final check-
+point with the last four 32k-step snapshots. Training runs
+on LLaVA-1.5-7B, LLaVA-1.5-13B, and LLaVA-NeXT-8B
+take one NVIDIA H100 for 54, 61, and 92 hours, respec-
+tively.
+A.3. Evaluation Settings
+Baseline configurations.
+Table 29 summarizes the base-
+line training requirements and changes made for our com-
+parisons.
+Budget matching.
+For a decoder with L layers, a sched-
+ule’s realized image-token budget is ¯K = L−1 PL
+ℓ=1 nℓ,
+where nℓis the number of image tokens processed at layer
+ℓ. This includes early unpruned stages and assigns zero to
+layers before visual injection or after visual exit. On NeXT,
+the labels 1120/640/320/160 express retention ratios rela-
+tive to a 2,880-token reference; per-image targets depend
+on the native sequence length. Integer rounding and ca-
+pacity limits can cause deviations from the requested bud-
+get. When transferring LLaVA-1.5 schedules from 7B to
+13B, we scale pruning, injection, and exit positions propor-
+tionally to decoder depth and adjust retained counts where
+needed to preserve the layer average.
+Benchmark protocols.
+Table 7 specifies the evaluated
+splits, scoring rules, and task-level prompts. Exact prompt
+strings and backbone chat templates are provided in the
+evaluation code.
+A.4. Compute Resources
+During development, we used an NVIDIA RTX 4090 (24
+GB), an NVIDIA RTX 5090 (32 GB), 8 NVIDIA H100
+(80 GB), and 8 NVIDIA H200 (141 GB) GPUs for about
+6000 GPU hours in total to run experiments such as full
+fine-tuning and hyperparameter searches to determine the
+ceiling and directions. Inference and evaluation utilized 32
+NVIDIA H100 (80 GB) GPUs concurrently, whereas other
+experiments were conducted on a single NVIDIA H100 (80
+GB) GPU, unless otherwise specified.
+9
+
+
+1 pair
+4 pairs
+Unmerged
+1797 km
+Text mean
+1797 m
+Background mean
+1797 km
+Unmerged
+XCVI
+Text mean
+XCVL
+Background mean
+XCVI
+Figure 17. Reading errors without token deletion. Orange boxes
+mark patches whose features are averaged. All 576 tokens remain
+at their original positions. Background averaging preserves the
+original readings. These are selected error examples; Table 8 re-
+ports the full cohort.
+Averaging operation
+Pairs
+Text
+Background
+Mean replacement
+1
+34/45
+35/45
+4
+33/45
+35/45
+All
+34/45
+35/45
+Mean-and-delete
+1
+34/45
+35/45
+4
+32/45
+35/45
+All
+30/45
+35/45
+Table 8. Correct word readings after averaging. The unmerged
+model reads 35/45 words correctly. Text and background inter-
+ventions average equally many pairs per crop. “All” varies by
+crop. Mean replacement retains 576 tokens; mean-and-delete re-
+moves one token per pair. Exact match ignores case and non-
+alphanumeric characters. All 45 words enter each result.
+B. Additional Experiments
+These experiments examine what merging preserves, be-
+yond the answer scores in the main text. Section B.1 ex-
+amines how merging affects answers. Section B.2 tests how
+averaging affects word reading and measures the text reso-
+lution retained across budgets.
+B.1. Cross-Boundary Merging Behaviour
+Semantic compatibility and answering.
+Figure 14 com-
+pares three ways of merging highlighted image patches.
+Representing each person separately preserves the original
+answer, “Blue,” as does combining both people into one to-
+ken. Including the snowboard in the same token changes
+the answer to “White.” In this example, merging across in-
+stances of the same category preserves the queried attribute,
+whereas mixing people with the snowboard disrupts it. This
+illustrates the role of semantic compatibility, without im-
+plying that every within-category merge preserves all task-
+relevant details.
+K
+Km
+Flagged
+text cells
+Text
+tokens
+Other
+tokens
+Unmerged
+text cells
+32
+51
+208
+45
+5
+20
+53
+85
+232
+79
+5
+39
+75
+120
+239
+114
+5
+69
+96
+154
+245
+148
+5
+104
+139
+222
+252
+216
+5
+189
+181
+290
+263
+263
+26
+263
+224
+358
+269
+269
+88
+269
+Table 9. Where the token budget goes. Allocation in the docu-
+ment shown in Figure 15(d–e), before decoder pruning. K is the
+requested layer-averaged budget; Km is the initial region count.
+Text and Other count regions assigned to flagged text and remain-
+ing image cells. One padding token completes Km. Unmerged
+counts flagged text cells kept individually. This selected example
+is not a benchmark average.
+Grid
+Method
+AP
+ODS-F
+Native 16-pixel
+Sobel gradient
+14.1
+22.1
+Object localizer
+47.2
+48.4
+DINOv3-L/16
+47.3
+49.2
+Tokenizer cells
+Sobel gradient
+20.8
+30.1
+Object localizer
+51.0
+51.1
+DINOv3-L/16
+50.5
+51.1
+Table 10. Object-boundary accuracy on 1,493 held-out images.
+AP and ODS-F (%) are computed over pooled grid edges, with
+ODS-F at the best single global threshold. Boundaries make up
+8.2% of edges on the native grid and 14.1% on the tokenizer grid.
+Measuring object alignment.
+We evaluate tokenizer par-
+titions on 3,811 referred objects from 1,500 RefCOCO val-
+idation images [43], before any decoder processing. Object
+polygons are rasterized on a padded 240 × 240 canvas and
+averaged into a 24×24 coverage map ci ∈[0, 1]. We recon-
+struct each object using complete tokenizer regions: ui = 1
+when the region containing cell i has mean object coverage
+greater than 0.5, and zero otherwise. We then compute
+IoUregion =
+P
+i min(ui, ci)
+P
+i max(ui, ci),
+(22)
+averaged equally over objects.
+This fixed reconstruction
+rule measures alignment between tokenizer regions and ob-
+ject masks.
+Boundary guidance across budgets.
+Figure 16(a) com-
+pares learned boundaries with CLIP-B, which replaces
+their spatial ordering using adjacent-cell CLIP cosine dis-
+tances while preserving the boundary-value histogram (Sec-
+tion F.1). Textness and region counts are held fixed. At
+Km = 32, learned boundaries achieve 54.21% region IoU,
+10
+
+
+Detector
+AUC
+AP
+ODS-F
+Sobel edge density
+72.8
+49.5
+54.9
+Text localizer (text-only version)
+97.1
+96.2
+89.7
+Text localizer
+97.1
+96.1
+89.1
+Table 11. Text localization on 1,432 held-out text-bearing im-
+ages. Labels come from OCR. AUC (%) is averaged per image;
+AP and ODS-F (%) pool cells across images.
+compared with 25.74% for CLIP-B. At Km = 224, the
+corresponding values are 80.13% and 76.28%. The larger
+advantage under tight compression indicates that boundary
+guidance matters most when individual regions must sum-
+marize larger portions of the image.
+Boundary leakage at tight budgets.
+Learned guidance
+still permits regions to cross object boundaries.
+Fig-
+ure 15(a–b) shows such leakage at Km = 51 and closer
+alignment at Km = 358, with mask IoU increasing from
+56% to 89% in this selected example.
+Together with
+the downstream losses under boundary interventions (Ta-
+ble 17), these results support object boundaries as useful al-
+location cues while showing how the available budget limits
+the distinctions that can be preserved.
+B.2. Text Resolution Across Budgets
+Controlled text-token averaging.
+Object boundaries
+alone do not protect the distinctions needed for reading. We
+evaluate 45 of 48 TextOCR validation word crops from dis-
+tinct TextVQA images, excluding three visually identified
+annotation errors. Crops are centred on 336 × 336 can-
+vases without resizing. Frozen LLaVA-1.5-7B transcribes
+them greedily, with at most 16 output tokens. We aver-
+age disjoint horizontal pairs of pre-projector features whose
+patches have at least 50% word-polygon coverage. Con-
+trols average equally many background pairs outside the
+crop and its margin.
+Mean replacement writes each pair’s mean into both
+original positions, keeping 576 tokens. Mean-and-delete
+keeps one mean token and removes the other, also chang-
+ing later positions. Table 8 separates these effects.
+Figure 17 shows that averaging alone can change a unit
+or letter. The full-cohort results show that not every text
+merge changes the reading, but equal-size background in-
+terventions preserve the unmerged score.
+Answer-text preservation across budgets.
+We mark
+patch cells touched by OCR boxes matching normalized an-
+swer words in 2,688 TextVQA questions from 2,044 im-
+ages [32] and 4,817 DocVQA questions from 1,260 im-
+ages [27]. For each question, we measure the fraction kept
+Text localizer
+Text-only version
+τ
+Recall
+Prec.
+False
+cells
+False
+images
+Recall
+False
+images
+0.500
+85.5
+88.9
+0.174
+3.4
+89.0
+80.5
+0.806
+76.3
+95.2
+0.068
+1.6
+81.6
+46.5
+0.889
+71.5
+97.0
+0.039
+1.1
+77.6
+30.4
+0.944
+65.5
+98.2
+0.022
+0.5
+72.6
+17.6
+0.972
+59.4
+98.9
+0.012
+0.4
+67.2
+10.9
+Table 12. Text localizer at different thresholds. A cell counts as
+text if pi > τ. All values are percentages. Recall and precision
+use the 1,432 text-bearing images. False cells is the share of cells
+detected as text, and false images the share of images with at least
+one detected cell, on 1,568 text-free images.
+in single-cell regions, then average over questions.
+Pre-
+dicted and zero textness use identical boundaries and region
+counts.
+Figure 16(b–c) shows how textness guidance preserves
+finer text resolution as the budget grows. Its benefit is larger
+on TextVQA; on DocVQA, the curves remain close at low
+budgets. These measurements track unmerged answer-text
+cells, not reading accuracy.
+Budget allocation and detection errors.
+Table 9 shows
+where the initial tokens go in one document.
+At tight
+budgets, flagged text cells outnumber their allocated to-
+kens, so some are merged. When the budget permits, each
+flagged cell receives its own region (Figure 15(d–e)). The
+flagged-cell count also changes with the budget-dependent
+text threshold.
+More tokens do not by themselves correct detection er-
+rors. The unflagged logo in Figure 15(c) receives no text-
+specific allocation and instead follows the non-text parti-
+tion. In (f), non-text shapes receive individual text tokens.
+These cases distinguish missed detection and false positives
+from budget-driven merging of correctly detected text.
+C. Further Quantitative Results
+We discuss the performance of Varest compared with other
+baselines per backbone in C.1, as well as the predictive per-
+formance of the object and text localizers.
+C.1. Per-Benchmark Performance
+We include charts for performance of each baseline for
+LLaVA-1.5 7B in Figure 21, 13B in Figure 22, and LLaVA-
+NeXT 8B in Figure 23. Furthermore, we highlight the per-
+metric performance of the top 4 baselines by overall reten-
+tion rate for LLaVA-1.5 7B in Table 23, LLaVA-1.5 13B in
+Table 24, and LLaVA-NeXT 8B in Table 24.
+On LLaVA-1.5-7B, Varest has first place on 11 metrics at
+K = 32, 10 at K = 64, 10 at K = 128, and 8 at K = 224,
+11
+
+
+(a) LLaVA-1.5-7B
+(b) Qwen2.5-VL-7B
+Figure 18. Information horizon by benchmark and tolerance for LLaVA-1.5-7B and Qwen2.5-VL-7B. Each marker indicates the
+earliest zero-indexed decoder layer after which all visual tokens can be removed while keeping the relative performance drop within
+ϵ ∈{1%, 2.5%, 5%} of the full-token baseline. Lower horizons indicate earlier opportunities to terminate visual-token processing.
+Horizons vary substantially across benchmarks and backbones: text-, chart-, and document-heavy tasks require late visual access in LLaVA,
+while grounding tasks reach the final decoder layer in Qwen. Relaxing the tolerance generally permits earlier withdrawal, but some tasks
+remain sensitive even at 5%. This variation motivates adaptive selection of the visual-token withdrawal depth.
+summing to 39 in total. The runner-up, DUET-VLM, has
+19 wins. On LLaVA-1.5-13B, Varest has 7, 11, 14, and
+13, summing to 39 in total, while HiDrop has 10 wins. On
+LLaVA-NeXT-8B, Varest has 10 at K = 160, 12 at K =
+320, 14 at K = 640, and 11 at K = 1120 summing to 47
+in total, and HiDrop has 6 wins.
+C.2. Object-Localizer Accuracy
+We evaluate the accuracy of our object localizer compared
+with Sobel gradient and DinoV3 in Table 10. The object
+localizer nearly matches its DINOv3-L/16 teacher: on the
+native 16-pixel grid it is within 0.1 AP and 0.8 ODS-F, and
+on the tokenizer cells, where the partition actually operates,
+it is on par (51.0 vs. 50.5 AP, identical 51.1 ODS-F). Both
+learned fields far outperform the Sobel gradient, by about
+33 AP on the native grid and 30 AP on tokenizer cells, indi-
+cating that the boundaries reflect semantic object structure.
+C.3. Text-Localizer Accuracy
+We compare the text localizer with a version trained only
+on images containing text, and with Sobel edge density,
+in Table 11. We evaluate on a held-out set of 1,432 text-
+bearing images. Both the localizer and the text-only version
+far outperform Sobel edge density (97.1 vs. 72.8 AUC). We
+also evaluate text detection across thresholds in Table 12.
+Training with text-free negatives sharply reduces false de-
+tections on text-free images.
+At the thresholds τ(K) ∈
+{0.806, 0.889, 0.944, 0.972} for K = 224 to 32, only 0.4–
+1.6% of text-free images receive any false text cell, against
+10.9–46.5% for the text-only version.
+D. Adaptive Halting
+Section D.1 measures the information horizon of full-token
+backbones across benchmarks. Section D.2 then examines
+where the adaptive rule stops visual processing in Varest,
+how its decisions relate to these horizons, and where answer
+quality declines.
+D.1. Information Horizon Analysis
+We first measure when visual-token withdrawal becomes
+tolerable, independently of any stopping rule.
+These
+benchmark-level horizons provide a reference for the adap-
+tive decisions in Section D.2.
+Wang et al. [35] observe that visual-token information
+gradually vanishes with decoder depth and term the transi-
+tion point the information horizon. Motivated by this obser-
+vation, we study a performance-based horizon under com-
+plete visual-token withdrawal. Let A0 denote the full-token
+baseline score and Al the score obtained after dropping all
+visual tokens following zero-indexed decoder layer l. We
+define the relative performance drop as
+∆(l) = A0 −Al
+A0
+,
+(23)
+and the information horizon at tolerance ϵ as
+hϵ = min {l | ∆(l) ≤ϵ} .
+(24)
+Dropping after layer l preserves visual-token access through
+layer l and removes it from layers l + 1 onward. Thus,
+a lower hϵ indicates that visual processing can terminate
+earlier without exceeding the prescribed performance loss.
+12
+
+
+8
+16
+24
+31
+Completed layers before withdrawal
+MMBench
+AI2D
+MMStar
+V*
+POPE-random
+POPE-popular
+POPE-adversarial
+GQA
+CountBench
+RefCOCO
+RefCOCO+
+RefCOCOg
+TextVQA
+DocVQA
+ChartQA
+0
+0
+4
+0
+0
+0
+0
+12
+73
+77
+83
+75
+25
+33
+23
+No halt
+(%)
+(a) LLaVA-1.5-7B
+0
+10
+20
+Saved visual-token work (%)
+−1.5
+−1.0
+−0.5
+0.0
+0.5
+Answer-score change
+(native 0–100 points)
+DocVQA
+(d) Score / work trade-off
+8
+16
+24
+32
+39
+Completed layers before withdrawal
+2
+6
+15
+4
+0
+0
+0
+10
+74
+2
+1
+2
+30
+46
+40
+No halt
+(%)
+(b) LLaVA-1.5-13B
+0
+10
+20
+Saved visual-token work (%)
+POPE-random
+ChartQA
+(e) Score / work trade-off
+8
+16
+24
+31
+Completed layers before withdrawal
+1
+7
+10
+3
+0
+0
+0
+14
+27
+9
+9
+6
+36
+44
+31
+No halt
+(%)
+(c) LLaVA-NeXT-8B
+0
+10
+20
+Saved visual-token work (%)
+DocVQA
+TextVQA
+(f) Score / work trade-off
+0
+5
+20
+50
+100
+Inputs halting at depth (%)
+White diamonds: full-token 1% horizon (7B only; completed layers)
+General / perception
+POPE-random
+Grounding
+POPE-popular
+Text / chart reading
+POPE-adversarial
+Figure 19. Adaptive halt depths versus measured horizons and answer quality. (a–c) Blue cells give the percentage of all inputs
+halting at each depth, averaged over four budgets; gray cells give the percentage that never halt. White diamonds in (a) mark the full-token
+1% horizons from Figure 18a, converted to completed-layer counts. They are benchmark-level references, not per-input ground truth for
+compressed Varest. Dashed lines separate halts that bypass [REL] (h ≤16 on 7B/NeXT; h ≤20 on 13B) from later halts. (d–f) Each
+point is a metric–budget configuration; negative score changes indicate worse answers. The three POPE splits are shown separately, with
+distinct purple markers. Saved work counts image-token processing across layers, not whole-model speedups, using recorded no-halting
+stage counts for all three backbones.
+We evaluate 12 benchmarks comprising 14 targets, as
+POPE contributes separate random, popular, and adversar-
+ial F1 scores, on LLaVA-1.5-7B and Qwen2.5-VL-7B. We
+locate hϵ by binary search with batch size 32 for ϵ ∈
+{1%, 2.5%, 5%}. On one NVIDIA RTX 6000 Ada Gen-
+eration GPU with 48 GB of memory, the complete evalua-
+tion takes 41 hours, 27 minutes, and 17 seconds for LLaVA-
+1.5-7B, and 4 days, 14 hours, 53 minutes, and 32 seconds
+for Qwen2.5-VL-7B. Medians are computed over targets
+whose horizons occur within the evaluated decoder bound-
+aries; fractional medians denote the average of the two cen-
+tral integer horizons rather than an evaluated layer.
+13
+
+
+LLaVA-1.5-7B
+LLaVA-1.5-13B
+LLaVA-NeXT-8B
+Task
+∆Score
+(pts)
+Halts
+(%)
+h
+(layers)
+Saved
+(%)
+∆Score
+(pts)
+Halts
+(%)
+h
+(layers)
+Saved
+(%)
+∆Score
+(pts)
+Halts
+(%)
+h
+(layers)
+Saved
+(%)
+MMBench
+−0.06
+99.7
+20.5
+14.6
++0.07
+98.2
+27.1
+16.7
++0.00
+98.6
+24.2
+9.6
+AI2D
+−0.04
+99.6
+20.9
+14.1
++0.02
+94.4
+32.9
+7.8
+−0.09
+93.3
+24.5
+8.8
+MMStar
++0.00
+96.4
+22.5
+11.8
++0.08
+84.9
+31.0
+9.3
+−0.03
+90.0
+24.9
+7.9
+V∗
++0.00
+99.7
+21.0
+13.9
+−0.26
+96.5
+26.4
+17.3
++0.13
+96.6
+24.8
+8.7
+POPE-random
+−0.02 100.0
+18.5
+17.0
+−0.65 100.0
+20.0
+26.5
+−0.08 100.0
+20.1
+14.9
+POPE-popular
+−0.01 100.0
+18.6
+16.9
+−0.60 100.0
+19.9
+26.3
+−0.08 100.0
+20.0
+15.0
+POPE-adversarial
+−0.02 100.0
+18.5
+17.0
+−0.31 100.0
+19.5
+27.1
+−0.05 100.0
+19.4
+15.7
+GQA
+−0.17
+88.4
+22.1
+11.1
+−0.28
+89.9
+23.3
+17.2
+−0.08
+85.9
+22.5
+10.2
+CountBench
+−0.05
+26.5
+25.2
+2.3
++0.10
+26.1
+24.8
+4.0
+−0.20
+73.2
+24.0
+7.3
+RefCOCO
+−0.04
+22.9
+25.4
+1.9
+−0.04
+98.1
+34.2
+5.8
++0.00
+90.8
+27.6
+5.0
+RefCOCO+
+−0.02
+17.2
+25.8
+1.3
+−0.03
+98.6
+34.1
+5.9
+−0.02
+91.5
+27.5
+5.1
+RefCOCOg
++0.01
+25.4
+25.5
+2.1
++0.01
+98.0
+34.2
+5.7
++0.04
+94.4
+27.5
+5.3
+TextVQA
+−0.37
+75.3
+23.8
+7.8
+−0.20
+69.7
+26.8
+9.8
+−0.99
+64.2
+24.9
+5.8
+DocVQA
+−0.57
+67.1
+25.0
+5.9
+−0.45
+53.7
+27.6
+6.9
+−1.43
+56.2
+25.8
+4.3
+ChartQA
+−0.11
+76.7
+25.3
+6.5
+−0.59
+60.5
+28.0
+7.8
+−0.32
+69.0
+25.3
+5.8
+Table 13. Task-wise effects of adaptive halting. Scores are changes from the same checkpoint without halting, averaged equally over
+four budgets. Pink and green indicate score decreases and increases, respectively, with a shared intensity scale across backbones. h is the
+mean number of completed layers among inputs that halt. Saved is the mean per-input reduction in image-token processing summed across
+decoder layers, using recorded stage counts from the matching no-halting run for all three backbones. The three POPE splits use F1 and
+are reported separately; other rows use their benchmark metric.
+D.1.1. LLaVA-1.5-7B
+On LLaVA-1.5-7B (see Figure 18a), the strict 1% horizon
+ranges from L10 for AI2D to L31 for ChartQA, with a me-
+dian of L18 across the 14 targets. Relaxing the tolerance
+moves the median horizon from L18 at 1% to L15.5 at both
+2.5% and 5%. The ranges become L7–L28 at 2.5% and
+L6–L24 at 5%. ChartQA and DocVQA retain a need for
+late visual-token access at every tolerance. TextVQA and
+GQA are also relatively late under the strict tolerance. This
+pattern is consistent with text-, chart-, and document-heavy
+tasks requiring visual evidence deeper in the decoder. AI2D
+has the earliest horizon at all three tolerances. MMBench,
+MMStar, and the POPE variants also reach their horizons
+comparatively early. POPE exhibits a sharp transition: its
+three targets remain far below baseline at L13 and recover to
+within 1% at L14. POPE-random selects L14 at every tol-
+erance, while POPE-popular and adversarial move to L12
+only at the 5% tolerance. The RefCOCO family is tightly
+grouped: the 1% horizons are L18-L19 and the 2.5%/5%
+horizons are all L17.
+D.1.2. Qwen2.5-VL-7B
+The LLaVA results show variation across tasks. Repeating
+the same criterion on Qwen tests whether the horizon also
+shifts with the backbone.
+On Qwen2.5-VL-7B (see Figure 18b), we observe that
+the horizon concentrates more than LLaVA near the end.
+At ϵ = 1%, the horizon ranges from L16 (MME (percep-
+tion), MMBench, AI2D) to L27 (RefCOCO+, RefCOCOg);
+the median across satisfied targets is 21. At ϵ = 2.5%,
+the horizon ranges from L14 (MME (perception), AI2D)
+to L27 (RefCOCO+, RefCOCOg); the median across satis-
+fied targets is 20.5. At ϵ = 5%, the horizon ranges from
+L14 (MME (perception), MMBench, AI2D) to L27 (Ref-
+COCO+, RefCOCOg); the median across satisfied targets
+is 19. A fractional median, if present, is only the average of
+the two middle integer horizons across the 14 targets; it is
+not an evaluated or selectable layer. POPE-random is most
+sensitive to the tolerance choice: its selected horizon moves
+3 layers, from L19 at 1% to L16 at 5%. The selected hori-
+zon is unchanged across all three tolerances for RefCOCO,
+RefCOCO+, RefCOCOg.
+D.2. Task-wise Halting Depth and Performance
+Table 13 and Figure 19 break down the main-text halting
+results by metric and backbone, with separate POPE splits,
+using the same checkpoints and four budgets. The 7B halt
+depths are compared with the reference horizons in Sec-
+tion D.1.
+14
+
+
+Module
+Params (M)
+TFLOPs
+Object localizer
+7.03
+0.0403
+DINOv3-L/16 (teacher)
+303.13
+1.3447
+CLIP-L/14-336
+≈304
+0.3650
+Table 14. Object-localizer cost. The localizer and its DINOv3
+teacher are measured on a 768 × 576 RGB input.
+E. Further Efficiency Analysis
+We describe our efficiency analysis procedure and bench-
+mark in Section E.1. We then describe the computational
+complexity, before describing quantitative space and com-
+plexity measurements per baseline E.2.
+E.1. VarestBench and Measurement Protocol
+We introduce VarestBench, a benchmark for efficiency
+analysis intended to be time–efficient while staying ro-
+bust. It contains 180 short-answer VQA cases from AI2D,
+ChartQA, DocVQA, GQA, and TextVQA, organized in two
+sweeps which vary a workload variable. The first varies the
+prompt length from 57 to 74 tokens over 16 levels, with
+answers of 1–11 tokens. The second varies the reference-
+answer length from 1 to 21 tokens over 20 levels, with
+prompts of 59–63 tokens. Each level has five cases, and
+token counts use LLaVA-1.5’s tokenizer and prompt tem-
+plate. The number of image tokens is fixed on LLaVA-1.5
+but varies with resolution on LLaVA-NeXT. The reference-
+answer length sets an intended workload, but the model may
+generate more or fewer tokens, and all measurements use
+the tokens it generates.
+Each case is run independently at batch size 1 on 1 H100
+in fp16, with greedy decoding up to 64 new tokens. FLOPs
+and memory are measured in two separate passes so that
+neither affects the timings. Memory is sampled every 1 ms.
+E.2. Computational Complexity
+Tables 26–28 report two FLOP counts.
+The theoretical
+count follows prior token-pruning work [36, 39] and cov-
+ers only the image tokens in the LLM prefill:
+FLOPs =
+L
+X
+ℓ=1
+ 4nℓd2 + 2n2
+ℓd + 3nℓdm
+
+,
+(25)
+where nℓis the number of image tokens entering decoder
+layer ℓ, d is the hidden size, and m is the FFN intermediate
+size. For Varest, nℓ= Km before the [REL] layer, nℓ=
+Kp after it, and nℓ= 0 after an adaptive halt. Since K is a
+layer average, the theoretical cost of Varest is close to that
+of the baselines at the same budget.
+The measured count uses PyTorch [2]’s FLOP counter
+mode to count every matrix multiplication, convolution, and
+attention kernel that is run during inference. This includes
+Module
+Params (M)
+TFLOPs
+Text localizer
+0.92
+0.0016
+CLIP-L/14-336
+≈304
+0.3650
+Table 15. Text-localizer cost. Measured on a 672×504 grayscale
+input (24 × 18 cells).
+the vision encoder, compression modules, prefill, and every
+decoding step at its actual KV-cache length. Notably, each
+multiply–accumulate counts as two FLOPs.
+The overhead of Varest before the LLM comes mainly
+from the two localizers.
+They cost 0.0016 and 0.0403
+TFLOPs on a LLaVA-1.5 input (Tables 15 and 14), about
+11% of the CLIP encoder and 1.0–2.3% of the measured
+total on LLaVA-1.5-7B. On LLaVA-NeXT, the text local-
+izer runs on both views, and the object localizer runs once
+on the full image. Region construction runs on the CPU,
+uses no matrix operations, and is not included in the FLOP
+counts. [REL] scoring applies two rank-256 projections
+to the Km image tokens at one layer, which costs less than
+0.001 TFLOPs.
+At the same budget, the theoretical cost of Varest
+matches the baselines to within a few percent, since all
+methods are compared at the same layer-averaged token
+count. Measured FLOPs are 2–9× higher than theoretical
+FLOPs because they also include the vision encoder, text
+tokens, and decoding, and count two FLOPs per multiply–
+accumulate. These fixed costs dominate at small budgets:
+from K = 224 to K = 32 on LLaVA-1.5-7B, theoret-
+ical FLOPs fall by about 7× but measured FLOPs only
+by 2.4×. In measured FLOPs, Varest is within 1.3% of
+HiDrop on both LLaVA-1.5 models and 3–8% below it on
+LLaVA-NeXT-8B. Adaptive halting further reduces theoret-
+ical FLOPs by 4–10% and measured FLOPs by 1–7%.
+We measure GPU memory in a separate pass over each
+case.
+A background thread reads PyTorch’s allocated
+CUDA memory every 1 ms, and we report its time-weighted
+mean. This counts memory held by tensors, including the
+model weights. Varest slightly exceeds full-token’s VRAM
+usage because of the localizers’ additional weights.
+F. Further Ablation Studies
+We extend the main-text ablations to examine how local-
+ization, budget allocation, and decoder-stage selection con-
+tribute to Varest. We first test the importance of image-
+specific spatial guidance (Section F.1) and the budget-
+dependent textness threshold (Section F.2). We then exam-
+ine selection policy and pruning depth (Section F.3). Fi-
+nally, we test whether greater prompt sensitivity improves
+answering and test the remaining dependence on specific
+image regions across decoder depth (Section F.4).
+15
+
+
+Variant
+TextVQA
+DocVQA
+ChartQA
+RefCOCO
+RefCOCO+
+RefCOCOg
+CountBench
+POPE-R
+POPE-P
+POPE-A
+GQA
+V*
+AI2D
+MMStar
+MMBench
+LLaVA-1.5-7B
+Random Selection†
+−1.87
+−4.81
+−1.63
+−0.38
+−0.17
+−0.43
+−2.14
+−0.05
+−0.07
+−0.05
+−0.61
++0.00
+−0.05
+−0.02
++0.03
+Oracle Selection†
++0.21
++0.75
++0.30
++0.19
++0.23
+−0.03
++0.00
+−0.04
+−0.02
++0.01
++0.20
++0.26
+−0.04
++0.03
++0.05
+LLaVA-1.5-13B
+Random Selection†
+−0.62
+−2.15
+−1.26
+−0.12
+−0.11
++0.09
+−0.51
++0.03
+−0.02
++0.02
+−0.32
+−0.26
+−0.02
+−0.05
++0.00
+Oracle Selection†
++0.20
++0.50
++0.16
+−0.06
+−0.04
++0.00
++0.21
++0.02
++0.02
++0.00
++0.16
+−0.13
++0.02
+−0.04
+−0.05
+LLaVA-NeXT-8B
+Random Selection†
+−5.17
+−16.59
+−16.65
+−0.14
+−0.23
++0.13
+−1.02
+−0.03
+−0.02
+−0.01
+−0.63
++0.13
++0.01
++0.08
++0.08
+Oracle Selection†
++0.47
++2.40
++1.11
++0.41
++0.30
++0.58
+−0.51
++0.01
++0.02
++0.01
++0.40
++0.13
+−0.04
++0.00
++0.02
+Table 16. Per-benchmark effects of the selection policy. Entries are score differences from the matched Varest reference in each
+benchmark’s native 0–100 scale, averaged over four token budgets. Each intervention preserves the checkpoint, initial regions, pruning
+depth, and token counts. POPE-R, POPE-P, and POPE-A denote the random, popular, and adversarial splits, respectively. † denotes an
+inference-time ablation of Varest.
+LLaVA-1.5-7B
+LLaVA-1.5-13B
+LLaVA-NeXT-8B
+Intervention
+−[REL]
+Varest
+−[REL]
+Varest
+−[REL]
+Varest
+T = 0
+−0.13
+−0.09
+−0.03
+−0.02
++0.06
+−0.02
+Shuffled T
+−0.35
+−0.24
+−0.27
+−0.15
+−1.04
+−0.87
+CLIP-B
+−2.71
+−1.96
+−2.88
+−1.65
+−5.23
+−2.90
+Shuffled B
+−2.47
+−1.76
+−2.49
+−2.05
+−4.40
+−3.57
+Both
+−2.83
+−2.04
+−2.91
+−1.76
+−6.40
+−3.84
+Table 17. Sensitivity to the spatial organization of localizer
+fields. Entries are intervention-minus-parent changes on native
+0–100 score scales, averaged equally over 15 metrics and four
+budgets.
+POPE contributes three separate metrics.
+−[REL]
+and Varest are separately trained models, each compared with its
+own unmodified parent. These are score changes, not retention
+changes. Pink and green indicate decreases and increases, respec-
+tively, with intensity reflecting magnitude on a shared scale.
+F.1. Spatial Information in the Localizer Fields
+The main ablations establish the contribution of localiza-
+tion. Here, we test whether its spatial correspondence to the
+input image matters. We replace localization fields without
+retraining, evaluating both the separately trained tokenizer-
+only model and joint Varest on all three backbones and four
+budgets.
+Each intervention preserves its parent’s token-
+count schedule; adaptive halting is disabled.
+Controlled field replacements.
+We use the following in-
+terventions:
+• CLIP-B: reorder the original image’s object boundary
+values according to adjacent-cell CLIP cosine distances.
+The smallest boundary value is assigned to the small-
+est distance, with stable tie ordering. This preserves the
+learned boundary-value histogram and padding bound-
+aries while changing their spatial arrangement.
+• T = 0: set all textness values to zero, removing both
+text-specific allocation and text-border reinforcement.
+• Shuffled T: replace textness with another image’s field.
+• Shuffled B: replace interior boundaries with another im-
+age’s field.
+• Both: combine CLIP-B and T = 0.
+CLIP-B, T = 0, and Both correspond to −Object Local-
+izer, −Text Localizer, and No Localizer in Table 4. CLIP-
+B retains the original boundary statistics and therefore does
+not remove all information supplied by the object localizer.
+Shuffle construction.
+Donor images are assigned within
+each benchmark without self-assignment, using seeds 1
+and 2 for textness and boundaries, respectively. We trans-
+fer fields by cell-center nearest-neighbour resampling, han-
+dling horizontal and vertical edges separately and preserv-
+ing recipient padding boundaries. On NeXT, both the base
+and high-resolution views are modified. Unlike CLIP-B,
+these controls need not preserve the recipient’s value his-
+togram; they test the effect of guidance from an unrelated
+image.
+Image-specific guidance.
+Table 17 uses matched par-
+ents evaluated with the same protocol as their interven-
+tions; these references can differ slightly from the main-
+comparison scores. Shuffled textness causes larger aggre-
+gate losses than zero textness for both model variants on
+every backbone. On NeXT, for example, shuffled textness
+reduces the joint model’s mean score by 0.87 points, com-
+pared with 0.02 points for zero textness. Thus, assigning
+text-specific resolution to incorrect locations can be more
+harmful than withholding that guidance.
+Both CLIP-B
+and shuffled boundaries also reduce performance across all
+backbones. The CLIP-B result shows that preserving the
+boundary-value distribution alone is insufficient.
+Budget dependence.
+Boundary guidance becomes par-
+ticularly important under aggressive compression. On Re-
+fCOCO, CLIP-B reduces the tokenizer-only model’s score
+by 16.56 points at K = 32 on LLaVA-1.5-13B, compared
+with 2.54 points at K = 224. On NeXT, the correspond-
+ing losses are 32.20 points at K = 160 and 0.16 points
+at K = 1120. Incorrect spatial guidance can nevertheless
+remain harmful at larger budgets: shuffled boundaries still
+cost 5.32 points on NeXT RefCOCO at K = 1120.
+16
+
+
+Retention (%)
+K
+τ(K)
+Fixed
+Budget-dependent
+∆(pp)
+224
+0.8056
+100.34
+101.75
++1.41
+128
+0.8889
+97.92
+99.05
++1.13
+64
+0.9444
+92.83
+95.26
++2.43
+32
+0.9722
+86.73
+88.91
++2.17
+Mean
+—
+94.45
+96.24
++1.79
+Table 18. Text-threshold comparison for −[REL] on LLaVA-
+1.5-7B. Fixed uses τ = 0.5 at every budget; Budget-dependent
+uses the displayed threshold. Retention averages 15 full-token-
+normalized metrics, counting the three POPE splits separately.
+The mean weights all four budgets equally. Differences are cal-
+culated before rounding.
+Comparison with −[REL].
+Varest incurs smaller ag-
+gregate losses than −[REL] under both shuffled controls
+and CLIP-based boundary replacement. However, the two
+variants differ in training and token allocation across de-
+coder depth, so this comparison does not isolate the ef-
+fect of [REL] alone.
+Together, the interventions show
+that the trained models benefit from image-specific spatial
+guidance, beyond the presence of localization fields or their
+value statistics.
+F.2. Budget-Dependent Text Threshold
+We compare two trained −[REL] configurations on
+LLaVA-1.5-7B: one uses a fixed textness threshold τ =
+0.5, while the other uses the budget-dependent schedule in
+Varest. Both retain K image tokens throughout the decoder,
+so Km = K and
+τ(K) = 1 −
+K
+1152.
+(26)
+At smaller budgets, the higher threshold requires greater
+confidence before assigning cells to the text group. This
+comparison evaluates the corresponding trained configura-
+tions; it does not isolate an inference-time threshold change
+on a single checkpoint.
+Table 18 uses the supplementary evaluation references
+described in Section F.1. The budget-dependent configura-
+tion improves mean retention at every budget by 1.13–2.43
+points, increasing the four-budget average from 94.45% to
+96.24%. The larger gains occur at K = 32 and K = 64,
+where allocating tokens to low-confidence text competes
+most strongly with preserving other image content.
+Task-level changes reveal the allocation tradeoff. Av-
+eraged across budgets, RefCOCO, RefCOCO+, and Re-
+fCOCOg improve by 2.42, 2.49, and 2.21 native score
+points, respectively.
+DocVQA improves by 0.79 points,
+while TextVQA declines by 0.50 points. Together with the
+precision–recall tradeoff in Table 12, these results support
+Configuration
+ℓ
+ρ
+∆all
+∆REC
+Varest
+16
+1/4
+0.00
+0.00
+Earlier pruning
+8
+1/4
+−1.12
+−5.13
+Earlier pruning
+8
+1/2
+−0.74
+−2.81
+Earlier pruning + Oracle
+8
+1/4
+—
+−1.24
+Table 19. Pruning depth on LLaVA-1.5-7B at matched bud-
+gets. Entries are native-score changes relative to midpoint Varest,
+averaged over four budgets. ∆all averages 15 metrics from 13
+benchmarks, counting the three POPE splits separately; ∆REC av-
+erages RefCOCO, RefCOCO+, and RefCOCOg. The early oracle
+is evaluated on the three grounding benchmarks. Stronger pink in-
+dicates a larger decrease on a shared scale.
+balancing text-specific resolution against the capacity avail-
+able to other regions.
+F.3. Decoder-Stage Selection
+We examine the effects of the selection policy and prun-
+ing depth separately. The first comparison changes only to-
+ken ranking within a fixed checkpoint; the second evaluates
+a separately trained variant with earlier pruning. Adaptive
+halting is disabled throughout.
+F.3.1. Selection Policy at a Fixed Depth
+We compare Varest with Random Selection and Oracle Se-
+lection at the same pruning layer and token counts. Ran-
+dom Selection samples Kp image tokens uniformly. Oracle
+Selection ranks tokens by gold-answer attention, averaged
+over attention heads, answer positions, and decoder layers
+from the pruning boundary onward in an unpruned teacher-
+forced pass. It is an answer-informed diagnostic, not a de-
+ployable policy or a guaranteed upper bound.
+Table 16 reports task-level changes from matched sup-
+plementary evaluations. Random selection is particularly
+damaging on reading tasks.
+On LLaVA-NeXT-8B, its
+budget-averaged losses reach 5.17 points on TextVQA,
+16.59 on DocVQA, and 16.65 on ChartQA. In contrast,
+POPE, MMStar, and MMBench change little on average.
+The contribution of learned selection therefore varies sub-
+stantially across tasks.
+Oracle gains are generally smaller, but the aggregate
+comparison conceals task-specific opportunities. On NeXT,
+Oracle Selection improves DocVQA by 2.40 points on aver-
+age, reaching 3.87 points at K = 160; ChartQA gains 2.80
+points at that budget. Thus, the limited aggregate headroom
+observed in the main text coexists with larger gains on some
+reading tasks. Occasional negative oracle differences also
+demonstrate that gold-answer attention does not guarantee
+a better retained set.
+17
+
+
+LLaVA-1.5-7B
+LLaVA-1.5-13B
+ℓ
+RefCOCO
+TextVQA
+DocVQA
+RefCOCO
+8
+0.1045 ± 0.0011
+1.5175 ± 0.0351
+0.4964 ± 0.0128
+0.1137 ± 0.0011
+14
+0.0628 ± 0.0007
+1.3961 ± 0.0338
+0.4475 ± 0.0116
+0.0592 ± 0.0007
+16
+0.0025 ± 0.0001
+1.2547 ± 0.0319
+0.4062 ± 0.0108
+0.0383 ± 0.0005
+18
+0.0009 ± 0.0001
+0.7224 ± 0.0231
+0.2549 ± 0.0078
+0.0009 ± 0.0001
+20
+0.0002 ± 0.0001
+0.4260 ± 0.0166
+0.1717 ± 0.0058
+0.0000 ± 0.0001
+24
+0.0001 ± 0.0000
+0.0916 ± 0.0054
+0.0551 ± 0.0022
+−0.0002 ± 0.0000
+Table 20. Remaining dependence on the target region. Entries
+report the paired deletion contrast S(ℓ) in nats per answer token,
+with standard errors over examples. Both interventions mask the
+same number of visual tokens. These inference-time diagnostics
+use −[REL] and the eligible cohorts described in the text. Values
+displayed as zero are rounded.
+F.3.2. Selection Depth at a Matched Budget
+We evaluate an earlier-pruning variant trained to select af-
+ter eight decoder layers on LLaVA-1.5-7B, compared with
+Varest after sixteen layers. Let ℓdenote the number of com-
+pleted layers before pruning. We choose the stage counts
+to match the requested layer-averaged budget, up to integer
+rounding:
+K = ℓKm + (L −ℓ)Kp
+L
+.
+(27)
+The earlier-pruning checkpoint is evaluated with target ra-
+tios ρ = Kp/Km ∈{1/4, 1/2}. Matching K controls the
+average number of image tokens processed per layer, while
+allowing their allocation across depth to change.
+Earlier pruning reduces mean performance under both
+retention ratios (Table 19), with larger losses on ground-
+ing. For ρ = 1/4, Oracle Selection recovers 3.89 points of
+the 5.13-point grounding gap, leaving a 1.24-point deficit
+relative to midpoint Varest. Selection quality therefore mat-
+ters more at this earlier boundary in the evaluated config-
+urations. These results support preserving broader visual
+access through the early decoder layers. Section F.4 exam-
+ines how this dependence relates to prompt sensitivity and
+remaining visual reading.
+F.4. Prompt Sensitivity and Remaining Visual De-
+pendence
+We examine whether changing the prompt changes vi-
+sual selection, whether explicit supervision can increase
+this sensitivity, and whether doing so improves answer-
+ing. We then distinguish when prompt-conditioned selec-
+tion becomes available from when it remains useful, us-
+ing attention-based probes, selection sweeps, and regional
+deletion across decoder depth.
+These experiments cover
+LLaVA-1.5-7B and LLaVA-1.5-13B, with adaptive halting
+disabled. As in Section F.3, ℓcounts completed decoder
+layers.
+Split
+Swap gain [95% CI]
+rsame
+rdifferent
+Accuracy (%)
+RefCOCO val
+−0.0002 [−0.0005, +0.0002]
+0.999
+0.998
+67.44
+RefCOCOg val
++0.0001 [−0.0007, +0.0010]
+0.997
+0.997
+62.56
+Table 21. Prompt sensitivity of Varest on LLaVA-1.5-7B. Score-
+rank correlations compare expressions naming the same or differ-
+ent referents. Accuracy is grounding accuracy at IoU ≥0.5 over
+each validation split.
+F.4.1. Sensitivity to Prompt Changes
+We evaluate Varest on LLaVA-1.5-7B at K = 64, with
+(Km, Kp) = (102, 26) and ℓ= 16. For two expressions
+naming different objects A and B in the same image, we
+measure the fraction of cells inside A’s box whose regions
+survive pruning. The swap gain is this fraction when the
+prompt names A minus the fraction when it names B. We
+exclude box pairs with IoU at least 0.5, average ordered
+pairs within each image, and estimate 95% confidence in-
+tervals using 2,000 image-level bootstrap resamples.
+Table 21 shows swap gains near zero and nearly identical
+score rankings for different referents. Despite this weak se-
+lection sensitivity, grounding accuracy reaches 67.44% on
+RefCOCO and 62.56% on RefCOCOg. The decoder there-
+fore answers different prompts effectively even when their
+visual rankings change little.
+F.4.2. Capacity for Prompt-Conditioned Selection
+To test whether this behavior is imposed by the readout ar-
+chitecture, we freeze the 7B model and train only its scor-
+ing readout using RefCOCO training boxes. At ℓ= 16 and
+(Km, Kp) = (205, 51), supervision encourages score prob-
+ability mass on regions covering the named object. Training
+and held-out examples are separated by image; checkpoints
+are selected by held-out recall of target regions among the
+retained tokens.
+Without changing the original readout architecture, two
+training seeds achieve swap gains of +0.395 and +0.394.
+Their highest-scoring token belongs to the target region in
+88.5% and 87.2% of held-out examples, respectively. The
+architecture can therefore express prompt-conditioned rank-
+ings. These tests establish readout capacity; they do not
+measure an improvement in downstream answering.
+F.4.3. Effect of Explicit Prompt Supervision
+We next refine the selector with region supervision from Vi-
+sual Genome referring expressions, GQA object links, and
+TextCaps OCR boxes.
+The objective includes a 1.5-cell
+margin around target boxes and KL regularization toward
+the original selector on every prompt. This intervention pro-
+duces substantial prompt sensitivity: RefCOCO swap gains
+range from +0.268 to +0.284 on 7B and from +0.230 to
++0.262 on 13B across two seeds.
+The downstream comparisons nevertheless show small
+aggregate changes (Table 22). Averaged over 13 bench-
+18
+
+
+0.0
+0.3
+0.6
+Sensitivity A
+7B
+13B
+8
+12
+16
+20
+24
+Completed decoder layers ℓ
+0.00
+0.04
+0.08
+V (nats/token)
+8
+16
+24
+32
+Completed decoder layers ℓ
+0.0
+0.5
+1.0
+Relative dependence S(ℓ)/S(8)
+RefCOCO, 7B
+RefCOCO, 13B
+TextVQA, 7B
+DocVQA, 7B
+8
+11
+14
+16
+20
+Completed decoder layers ℓ
+0.0
+0.2
+0.4
+V (nats/token)
+Kp =73
+Kp =18
+(a) Availability and value
+RefCOCO, Kp =73
+(b) Remaining dependence
+Scaled to layer 8
+(c) Budget dependence
+TextVQA, LLaVA-1.5-7B
+Figure 20. Prompt-selection availability and remaining benefit vary with depth, task, and budget. (a) On RefCOCO, selection
+sensitivity A increases while the answer-informed advantage V falls toward zero near layers 16 and 18 on 7B and 13B, respectively. A
+measures changes in prompt-attention selections through one minus their mean pairwise Jaccard overlap; it does not measure grounding
+correctness. V is reference-minus-oracle answer NLL, with the reference averaging oracle scores from other question groups on the same
+image and excluding the current referent on RefCOCO. (b) Deletion contrast S compares masking target-region tokens with masking
+equally many control tokens. Scaling each curve by its measured S(8) compares timing rather than effect size and reveals later dependence
+on text regions. (c) Tighter TextVQA retention increases V . All panels use −[REL] with Km = 293; panel (a) retains Kp = 73. Markers
+denote measured means; bands show ±1 standard error for V and S, with the latter rescaled by the same fixed S(8). NLL differences use
+teacher-forced gold answers and are in nats per answer token. These depth sweeps hold stage counts fixed and do not match layer-averaged
+computation.
+Backbone
+K = 32
+K = 64
+K = 128
+K = 224
+Mean
+LLaVA-1.5-7B
++0.08
+−0.04
++0.01
+−0.04
+0.00
+LLaVA-1.5-13B
++0.07
+0.00
++0.05
+−0.03
++0.02
+Table 22. Effect of prompt-supervised selector refinement. En-
+tries are native 0–100 score changes from the matched unmodi-
+fied Varest checkpoint, averaged equally over 15 metrics from 13
+benchmarks, counting the three POPE splits separately. The final
+column averages all four budgets. These are trained interventions
+and score changes, not retention changes. Pink and green indicate
+decreases and increases, respectively.
+marks and four budgets, native scores change by +0.00 and
++0.02 points on 7B and 13B, respectively, with gains at
+some budgets and losses at others. Thus, increasing prompt
+sensitivity does not yield a consistent performance improve-
+ment in these refinement runs.
+F.4.4. Availability and Value Across Decoder Depth
+We sweep the separately trained −[REL] models with
+Km = 293 and Kp = 73.
+At boundary ℓ, a prompt-
+conditioned selector P ranks visual tokens by attention
+from the actual prompt, averaged over heads, prompt po-
+sitions, and the three preceding layers. This probes infor-
+mation available in decoder attention, separately from the
+learned [REL] readout tested above. For an image x, let
+T q
+P (ℓ) be the retained set for prompt q. We measure selec-
+tion sensitivity as
+A(ℓ) = 1 −ExEq̸=q′ |T q
+P (ℓ) ∩T q′
+P (ℓ)|
+|T q
+P (ℓ) ∪T q′
+P (ℓ)|
+.
+(28)
+On RefCOCO, pairs name different objects in the same im-
+age. We average pairs within each image before averaging
+across images. A measures whether prompt changes alter
+selection, not whether the selected tokens correctly ground
+the prompt.
+To measure the remaining benefit of question-specific se-
+lection, we compare an answer-attention oracle O with a
+reference B that averages oracle scores from other question
+groups on the same image. The oracle averages attention
+from gold-answer prediction positions over heads and lay-
+ers from ℓonward in an unpruned teacher-forced pass. Re-
+fCOCO groups are referred objects, so B excludes all para-
+phrases of the current referent; elsewhere, each question is
+a group. The paired advantage is
+V (ℓ) = E[NLLB(ℓ) −NLLO(ℓ)] ,
+(29)
+19
+
+
+using the same gold-answer sequence for both interventions
+and only examples with another question group available.
+NLL is measured in nats per answer token. Both B and
+O use answer information; neither establishes an optimal
+selection bound.
+Figure 20(a) shows availability increasing as object-
+specific benefit declines. On 7B RefCOCO, A rises from
+0.098 at ℓ= 8 to 0.407 at ℓ= 16, while V falls from 0.0633
+to 0.0031. On 13B, A reaches 0.515 at ℓ= 18, when V is
+only 0.0006. A separate zero-shot probe on 300 RefCOCO
+image pairs tests grounding directly, selecting tokens using
+prompt attention at individual layers. Retained-cell cover-
+age of the named box minus the comparison box rises from
+0.023 at ℓ= 8 to 0.110 at ℓ= 11 on 7B, and from 0.026 to
+0.098 between ℓ= 8 and ℓ= 12 on 13B. These probes
+indicate a relatively narrow overlap between appreciable
+prompt-to-region signals and substantial selection benefit,
+mainly at sampled depths 11–14 on 7B and 12–16 on 13B.
+Weaker signals already occur earlier, so these ranges are
+empirical transitions rather than universal onset thresholds.
+Actual prompt-conditioned selection shows a similar
+pattern. Compared with attention from the fixed prompt
+“Describe this image.” averaged over the same three pre-
+ceding layers, P reduces RefCOCO answer NLL by 0.0161
+and 0.0253 at ℓ= 11 and 14 on 7B, but only 0.0003 at
+ℓ= 16.
+F.4.5. Remaining Dependence on Specific Image Regions
+To test remaining regional access directly, we use the same
+−[REL] models with Km = 293. Starting from an un-
+pruned teacher-forced pass, we mask selected visual keys
+from boundary ℓonward. Each example compares with-
+drawal of tokens covering the named object or answer text
+with withdrawal of an equal number of tokens covering an-
+other object or other text:
+S(ℓ) = E[NLLtarget(ℓ) −NLLother(ℓ)] .
+(30)
+NLL is measured in nats per answer token, using the same
+target sequence for both interventions. Positive S indicates
+greater sensitivity to withdrawing the target region.
+For RefCOCO, candidate tokens have at least half their
+cells inside the relevant box and are excluded if they also
+qualify for the comparison box. For reading tasks, normal-
+ized answer words are matched to OCR boxes; control to-
+kens touch other text without touching answer text. Each
+side contributes the same number of tokens, ranked by re-
+gional coverage. The eligible cohorts contain 10,170 Ref-
+COCO expressions, 2,518 TextVQA questions, and 4,817
+DocVQA questions. The reading cohorts require a match-
+ing OCR word and at least one eligible token on each side.
+Figure 20(b) shows that RefCOCO’s target-specific de-
+pendence falls sharply around ℓ= 16 on 7B and ℓ= 18
+on 13B, coinciding with the decline in V . Each curve is di-
+vided by its measured S(8) to compare the timing of this de-
+cline; Table 20 reports unnormalized values. Reading tasks
+remain sensitive later: at ℓ= 20 on 7B, S is 0.4260 for
+TextVQA and 0.1717 for DocVQA. A near-zero contrast
+indicates little additional loss from withdrawing the target
+region relative to the matched control. It does not estab-
+lish that all image tokens are unnecessary or identify where
+previously accessed information is stored.
+Dependence on depth and budget.
+The selection sweeps
+also show later opportunities on reading tasks. At ℓ= 16
+and Kp = 73 on 7B, DocVQA retains an answer-informed
+advantage of V = 0.0491, compared with 0.0031 on Re-
+fCOCO. Figure 20(c) shows the effect of budget pressure:
+reducing TextVQA’s retained count from 73 to 18 increases
+V (16) from 0.0174 to 0.3107.
+These sweeps hold stage counts fixed rather than match-
+ing layer-averaged computation, and −[REL] was not
+trained for decoder-stage pruning. Their conclusions con-
+cern the tested models and interventions. In the ground-
+ing experiments, appreciable prompt-to-region signals and
+substantial remaining selection benefit overlap within a rel-
+atively narrow decoder window. Together, these observa-
+tions support preserving broad early visual access before
+pruning. Reading tasks retain regional dependence later,
+and tighter budgets increase the remaining opportunity for
+prompt-conditioned selection.
+20
+
+
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+ToMe
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+VisionZip
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+VisionZip++
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+DivPrune
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+VFlowOpt
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+OTPrune
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+ApET
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+FastV
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+SparseVLM
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+PyramidDrop
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+Nüwa
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+DUET-VLM
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+LearnPruner
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+HiDrop
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+CORE
+LLaVA-1.5-7B
+Baseline (panel title)
+Full-token reference
+Budget 38.89%
+Budget 22.22%
+Budget 11.11%
+Budget 5.56%
+Figure 21. Per-benchmark results for LLaVA-1.5 7B.
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+ToMe
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+VisionZip
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+VisionZip++
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+DivPrune
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+VFlowOpt
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+OTPrune
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+ApET
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+FastV
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+SparseVLM
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+PyramidDrop
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+Nüwa
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+DUET-VLM
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+LearnPruner
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+HiDrop
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+CORE
+LLaVA-1.5-13B
+Baseline (panel title)
+Full-token reference
+Budget 38.89%
+Budget 22.22%
+Budget 11.11%
+Budget 5.56%
+Figure 22. Per-benchmark results for LLaVA-1.5 13B.
+21
+
+
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+ToMe
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+VisionZip
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+VisionZip++
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+DivPrune
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+VFlowOpt
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+OTPrune
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+ApET
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+FastV
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+SparseVLM
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+PyramidDrop
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+Nüwa
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+DUET-VLM
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+LearnPruner
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+HiDrop
+MMBench
+AI2D
+MMStar
+POPE
+GQA
+ChartQA
+DocVQA
+TextVQA
+RefCOCO
+RefCOCO+RefCOCOg
+CountBench
+V*
+0.2
+0.4
+0.6
+0.8
+1.0
+CORE
+LLaVA-NeXT-8B
+Baseline (panel title)
+Full-token reference
+Budget 38.89%
+Budget 22.22%
+Budget 11.11%
+Budget 5.56%
+Figure 23. Per-benchmark results for LLaVA-NeXT 8B.
+Method
+General VQA
+POPE
+Fine-grained
+Grounding
+Text-rich
+GQA
+MMB MMStar
+AI2D
+Rand.
+Pop.
+Adv.
+V∗
+Count
+RefCOCO
+RefCOCO+
+RefCOCOg
+VQAT
+DocVQA
+ChartQA
+Upper Bound, 576 Tokens (100%)
+Full-Token [21]
+61.9
+64.1
+32.9
+54.6
+87.5
+86.3
+84.4
+50.3
+45.6
+72.3
+61.3
+68.1
+58.8
+21.5
+19.9
+Retain 224 Tokens (↓61.1%)
+VisionZip++ [40] [CVPR25]
+60.0
+63.4
+32.6
+55.1
+86.8
+85.8
+83.5
+48.2
+47.9
+39.6
+32.5
+35.5
+58.4
+20.6
+19.6
+N¨uwa [13] [ICLR26]
+61.3
+62.9
+32.1
+54.0
+86.3
+85.3
+83.2
+46.1
+46.8
+64.4
+55.1
+62.1
+58.4
+20.2
+20.1
+DUET-VLM [33] [CVPR26]
+62.6
+66.8
+34.1
+55.2
+87.3
+86.5
+84.5
+51.3
+46.8
+71.9
+62.3
+66.8
+57.7
+21.3
+19.8
+HiDrop [36] [ICLR26]
+61.4
+62.3
+34.0
+50.2
+86.5
+84.7
+82.9
+48.2
+39.9
+72.2
+60.1
+66.7
+55.5
+18.1
+17.0
+Varest (Ours)
+62.0
+66.5
+34.3
+55.4
+86.6
+85.4
+83.7
+42.9
+51.7
+75.8
+66.5
+71.9
+59.0
+22.5
+19.7
+Retain 128 Tokens (↓77.8%)
+VisionZip++ [40] [CVPR25]
+58.6
+62.9
+32.4
+54.5
+85.1
+84.4
+81.7
+42.9
+43.4
+27.4
+22.1
+23.2
+57.6
+18.9
+18.7
+N¨uwa [13] [ICLR26]
+60.4
+62.6
+31.5
+53.5
+84.6
+84.0
+81.9
+44.0
+43.0
+56.0
+47.7
+52.9
+57.7
+19.1
+19.7
+DUET-VLM [33] [CVPR26]
+61.7
+66.3
+34.3
+55.7
+86.7
+85.5
+83.8
+47.1
+47.0
+54.3
+45.1
+50.2
+56.7
+20.5
+19.8
+HiDrop [36] [ICLR26]
+60.9
+61.4
+33.7
+49.8
+86.7
+84.6
+83.1
+45.5
+40.5
+69.7
+57.7
+63.6
+54.5
+16.1
+16.6
+Varest (Ours)
+61.8
+66.1
+33.9
+55.0
+87.1
+86.2
+84.3
+42.9
+51.7
+72.1
+63.4
+68.2
+58.4
+21.4
+19.6
+Retain 64 Tokens (↓88.9%)
+VisionZip++ [40] [CVPR25]
+56.8
+61.0
+32.2
+54.2
+81.2
+80.3
+78.1
+40.3
+36.9
+14.7
+11.6
+13.5
+56.2
+16.3
+18.6
+N¨uwa [13] [ICLR26]
+58.7
+61.0
+31.6
+53.0
+81.0
+80.5
+78.4
+44.0
+40.3
+41.7
+34.8
+35.5
+55.4
+15.3
+18.2
+DUET-VLM [33] [CVPR26]
+60.2
+67.1
+34.7
+55.1
+84.8
+83.1
+81.7
+40.3
+43.8
+40.5
+31.0
+35.3
+56.3
+18.7
+19.2
+HiDrop [36] [ICLR26]
+60.1
+62.5
+33.1
+52.1
+86.3
+84.6
+82.4
+45.5
+39.3
+67.0
+55.0
+60.8
+55.1
+16.6
+16.5
+Varest (Ours)
+61.0
+64.2
+33.6
+55.3
+86.9
+86.0
+83.8
+45.0
+49.9
+67.5
+59.0
+62.7
+57.4
+18.6
+18.1
+Retain 32 Tokens (↓94.4%)
+VisionZip++ [40] [CVPR25]
+54.2
+58.9
+32.1
+52.9
+76.3
+76.3
+73.9
+38.7
+28.5
+6.5
+5.1
+5.8
+54.7
+14.0
+17.3
+N¨uwa [13] [ICLR26]
+52.9
+57.5
+30.3
+49.3
+79.3
+78.9
+75.9
+37.2
+28.3
+17.5
+13.7
+15.6
+52.4
+13.3
+17.0
+DUET-VLM [33] [CVPR26]
+59.2
+65.9
+32.4
+53.9
+84.2
+81.6
+79.6
+37.7
+39.5
+35.2
+25.3
+29.6
+55.3
+17.0
+18.4
+HiDrop [36] [ICLR26]
+59.1
+61.9
+31.9
+50.1
+85.2
+83.3
+80.4
+41.4
+36.7
+51.2
+39.1
+43.4
+54.4
+15.4
+16.1
+Varest (Ours)
+59.6
+62.8
+33.7
+54.4
+85.9
+84.8
+82.4
+46.6
+45.6
+62.0
+52.5
+55.8
+55.2
+15.5
+16.5
+Table 23. Comparison with the strongest baselines on LLaVA-1.5-7B.
+22
+
+
+Method
+General VQA
+POPE
+Fine-grained
+Grounding
+Text-rich
+GQA
+MMB MMStar
+AI2D
+Rand.
+Pop.
+Adv.
+V∗
+Count
+RefCOCO
+RefCOCO+
+RefCOCOg
+VQAT
+DocVQA
+ChartQA
+Upper Bound, 576 Tokens (100%)
+Full-Token [21]
+63.3
+67.7
+34.1
+60.5
+87.3
+86.4
+84.6
+51.3
+50.1
+81.0
+72.2
+76.1
+61.6
+23.5
+21.6
+Retain 224 Tokens (↓61.1%)
+VisionZip++ [40] [CVPR25]
+61.8
+66.9
+32.7
+59.0
+87.1
+86.4
+84.3
+46.1
+47.9
+44.2
+39.5
+39.4
+60.1
+23.3
+21.6
+N¨uwa [13] [ICLR26]
+62.6
+67.9
+34.3
+60.1
+86.6
+85.8
+84.1
+48.7
+50.5
+77.4
+68.6
+73.2
+61.1
+22.9
+22.5
+DUET-VLM [33] [CVPR26]
+63.7
+67.8
+35.6
+58.7
+87.1
+86.1
+84.5
+48.7
+53.0
+74.2
+66.1
+70.3
+60.3
+22.7
+22.9
+HiDrop [36] [ICLR26]
+63.4
+65.5
+36.0
+56.7
+87.2
+85.8
+84.3
+47.6
+49.7
+78.4
+68.5
+74.0
+58.6
+20.8
+20.2
+Varest (Ours)
+63.7
+67.1
+37.5
+60.4
+87.7
+86.8
+85.0
+51.8
+57.6
+80.5
+73.7
+77.7
+61.6
+23.7
+22.5
+Retain 128 Tokens (↓77.8%)
+VisionZip++ [40] [CVPR25]
+60.0
+66.9
+32.8
+58.4
+86.5
+85.8
+83.4
+47.6
+50.5
+32.8
+28.4
+29.7
+60.5
+21.8
+21.3
+N¨uwa [13] [ICLR26]
+61.9
+66.3
+33.5
+59.0
+85.6
+85.1
+83.3
+43.5
+48.5
+69.9
+61.8
+66.4
+60.3
+20.9
+21.3
+DUET-VLM [33] [CVPR26]
+63.0
+66.9
+35.9
+58.9
+86.1
+85.2
+83.7
+48.7
+50.7
+60.1
+52.6
+55.9
+59.9
+22.4
+22.6
+HiDrop [36] [ICLR26]
+63.2
+65.8
+33.9
+54.5
+86.3
+84.9
+83.4
+46.1
+48.5
+75.9
+64.5
+71.3
+58.2
+21.1
+20.3
+Varest (Ours)
+63.2
+67.6
+37.1
+59.7
+87.9
+87.1
+85.0
+51.3
+52.5
+77.8
+70.7
+74.2
+60.5
+22.6
+21.7
+Retain 64 Tokens (↓88.9%)
+VisionZip++ [40] [CVPR25]
+58.5
+66.0
+32.8
+57.0
+84.7
+83.8
+80.6
+44.5
+40.5
+24.9
+20.3
+21.0
+59.3
+18.9
+21.0
+N¨uwa [13] [ICLR26]
+59.9
+64.6
+32.8
+57.6
+83.1
+83.0
+81.1
+40.8
+43.6
+53.7
+45.9
+49.6
+57.6
+17.1
+21.0
+DUET-VLM [33] [CVPR26]
+61.6
+66.2
+35.4
+58.3
+86.3
+84.9
+82.8
+45.0
+50.3
+48.0
+40.0
+42.0
+58.4
+20.2
+21.2
+HiDrop [36] [ICLR26]
+62.7
+64.0
+33.9
+55.6
+86.9
+85.4
+83.7
+42.4
+45.6
+74.6
+63.7
+69.1
+56.2
+18.7
+18.9
+Varest (Ours)
+62.3
+66.9
+35.5
+59.3
+87.1
+86.3
+84.3
+47.1
+48.9
+73.0
+65.4
+69.1
+59.6
+20.4
+20.3
+Retain 32 Tokens (↓94.4%)
+VisionZip++ [40] [CVPR25]
+55.1
+63.0
+31.5
+56.8
+83.1
+82.6
+78.9
+43.5
+27.9
+15.8
+11.7
+12.3
+57.7
+16.2
+19.0
+N¨uwa [13] [ICLR26]
+46.7
+57.8
+31.1
+48.2
+79.9
+76.5
+74.9
+38.7
+18.1
+18.3
+14.8
+19.1
+49.5
+14.5
+17.3
+DUET-VLM [33] [CVPR26]
+59.4
+64.1
+35.5
+56.1
+84.8
+81.4
+79.9
+42.4
+45.8
+39.0
+30.5
+34.1
+58.7
+18.1
+20.4
+HiDrop [36] [ICLR26]
+61.5
+64.7
+34.6
+55.2
+87.9
+86.4
+84.0
+45.5
+47.3
+63.3
+51.4
+57.2
+56.9
+18.2
+19.4
+Varest (Ours)
+60.8
+66.6
+36.3
+58.0
+86.0
+85.5
+83.3
+46.6
+45.2
+66.1
+58.1
+62.3
+57.7
+16.8
+18.8
+Table 24. Comparison with the strongest baselines on LLaVA-1.5-13B.
+Method
+General VQA
+POPE
+Fine-grained
+Grounding
+Text-rich
+GQA
+MMB MMStar
+AI2D
+Rand.
+Pop.
+Adv.
+V∗
+Count
+RefCOCO
+RefCOCO+
+RefCOCOg
+VQAT
+DocVQA
+ChartQA
+Upper Bound, 2880 Tokens (100%)
+Full-Token [19]
+65.2
+72.0
+40.4
+72.5
+88.2
+87.4
+86.1
+60.2
+61.7
+70.0
+65.9
+62.7
+65.7
+72.6
+70.5
+Retain 1120 Tokens (↓61.1%)
+VisionZip++ [40] [CVPR25]
+64.7
+71.4
+39.4
+70.5
+88.3
+87.3
+85.9
+59.2
+54.0
+25.9
+22.9
+21.7
+64.5
+65.2
+63.0
+N¨uwa [13] [ICLR26]
+60.4
+59.6
+25.1
+30.3
+88.3
+87.4
+85.4
+40.3
+24.2
+43.6
+39.5
+40.1
+44.0
+11.6
+38.7
+DUET-VLM [33] [CVPR26]
+63.9
+69.8
+42.6
+69.8
+88.6
+88.0
+86.1
+62.8
+48.5
+52.2
+47.2
+47.5
+57.6
+65.8
+66.4
+HiDrop [36] [ICLR26]
+63.2
+67.5
+42.6
+68.9
+87.7
+86.5
+85.2
+56.5
+55.6
+65.6
+60.4
+59.6
+61.4
+66.2
+68.2
+Varest (Ours)
+64.4
+71.5
+44.3
+72.8
+89.1
+87.8
+86.5
+52.9
+58.2
+67.6
+62.8
+58.8
+66.1
+68.4
+70.5
+Retain 640 Tokens (↓77.8%)
+VisionZip++ [40] [CVPR25]
+63.7
+70.5
+38.3
+69.3
+87.8
+86.6
+85.4
+59.7
+48.9
+14.3
+13.0
+11.9
+63.5
+59.0
+60.4
+N¨uwa [13] [ICLR26]
+61.2
+59.1
+20.7
+21.2
+86.2
+85.5
+84.0
+59.7
+15.9
+37.5
+33.2
+34.3
+48.3
+10.6
+32.1
+DUET-VLM [33] [CVPR26]
+63.8
+69.0
+41.1
+68.3
+87.6
+87.0
+85.2
+58.1
+51.1
+36.1
+31.6
+33.5
+59.6
+62.3
+64.8
+HiDrop [36] [ICLR26]
+63.0
+65.6
+41.2
+67.6
+87.9
+87.2
+85.3
+55.0
+49.5
+58.1
+53.1
+51.8
+57.4
+62.2
+66.1
+Varest (Ours)
+64.2
+71.6
+43.1
+72.4
+88.5
+87.4
+86.2
+53.9
+57.0
+64.1
+59.5
+55.8
+65.2
+63.3
+67.8
+Retain 320 Tokens (↓88.9%)
+VisionZip++ [40] [CVPR25]
+61.5
+68.8
+37.6
+67.6
+86.7
+85.2
+83.8
+62.8
+40.3
+6.5
+5.5
+5.0
+62.5
+47.2
+53.2
+N¨uwa [13] [ICLR26]
+59.9
+61.8
+24.7
+28.5
+81.9
+81.8
+80.8
+62.3
+14.5
+22.0
+18.9
+21.8
+55.9
+29.5
+45.5
+DUET-VLM [33] [CVPR26]
+63.1
+68.3
+42.7
+69.0
+87.5
+86.7
+85.0
+61.3
+46.8
+21.8
+18.5
+19.6
+59.0
+54.1
+58.8
+HiDrop [36] [ICLR26]
+62.4
+67.7
+40.7
+66.5
+87.7
+86.7
+84.8
+58.1
+45.8
+43.9
+39.9
+40.0
+52.6
+55.0
+60.7
+Varest (Ours)
+63.3
+70.4
+41.9
+71.4
+88.5
+87.2
+86.3
+50.8
+53.4
+59.9
+55.7
+51.1
+62.9
+51.8
+63.9
+Retain 160 Tokens (↓94.4%)
+VisionZip++ [40] [CVPR25]
+58.3
+68.4
+36.7
+66.9
+85.1
+83.5
+81.8
+61.8
+26.9
+4.1
+3.4
+2.9
+60.2
+33.2
+45.7
+N¨uwa [13] [ICLR26]
+55.8
+64.2
+28.5
+48.3
+74.4
+74.6
+73.7
+63.9
+8.1
+9.1
+7.2
+8.5
+54.9
+23.6
+44.3
+DUET-VLM [33] [CVPR26]
+61.2
+69.0
+39.6
+67.4
+86.8
+85.5
+84.1
+58.6
+38.9
+12.9
+10.8
+12.6
+55.6
+46.6
+54.4
+HiDrop [36] [ICLR26]
+61.9
+65.5
+38.1
+65.8
+88.5
+86.8
+84.6
+54.5
+44.2
+28.3
+24.0
+25.0
+48.6
+47.4
+54.6
+Varest (Ours)
+62.4
+70.0
+41.7
+70.1
+87.4
+86.5
+85.2
+49.7
+49.5
+51.7
+47.1
+44.6
+60.2
+39.5
+53.9
+Table 25. Comparison with the strongest baselines on LLaVA-NeXT-8B.
+23
+
+
+K
+ToMe
+VisionZip
+VisionZip++
+DivPrune
+VFlowOpt
+OTPrune
+ApET
+FastV
+SparseVLM
+PyramidDrop
+N¨uwa
+DUET-VLM
+LearnPruner
+HiDrop
+CORE
+Varest
+Varest + AH
+Theoretical (TFLOPs)
+224
+1.4638
+1.4638
+1.4638
+1.4638
+1.4673
+1.4638
+1.4671
+1.4636
+1.5566
+1.4758
+1.4712
+1.4679
+1.4678
+1.4773
+–
+1.4261
+1.3248
+128
+0.8332
+0.8332
+0.8332
+0.8332
+0.8335
+0.8332
+0.8343
+0.8348
+0.9542
+0.8417
+0.8356
+0.8351
+0.8329
+0.8400
+–
+0.8335
+0.7753
+64
+0.4155
+0.4155
+0.4155
+0.4155
+0.4141
+0.4155
+0.4158
+0.4224
+0.5411
+0.4203
+0.4161
+0.4144
+0.4208
+0.4214
+–
+0.4159
+0.3873
+32
+0.2075
+0.2075
+0.2075
+0.2075
+0.2075
+0.2075
+0.2076
+0.2072
+0.3275
+0.2100
+0.2077
+0.2060
+0.2043
+0.2103
+–
+0.2076
+0.1917
+Measured Complexity (TFLOPs)
+224
+4.0791
+4.1995
+4.2001
+4.2273
+4.2518
+4.2173
+4.2201
+4.2669
+4.5025
+4.3099
+4.2457
+4.2682
+4.2537
+4.3885
+6.4378
+4.2555
+4.0582
+128
+2.7698
+2.9243
+2.9262
+2.9578
+2.9627
+2.9454
+2.9299
+2.9891
+3.2691
+3.0416
+2.9599
+2.9551
+2.9526
+3.0726
+4.9101
+3.0568
+2.9483
+64
+1.9069
+2.0811
+2.0819
+2.1083
+2.1144
+2.1121
+2.0888
+2.1527
+2.4201
+2.1895
+2.1196
+2.0979
+2.1096
+2.2020
+3.9034
+2.2103
+2.1591
+32
+1.4632
+1.6592
+1.6508
+1.6979
+1.6945
+1.6988
+1.6688
+1.7393
+1.9942
+1.7609
+1.6949
+1.6681
+1.6653
+1.7895
+3.4188
+1.7877
+1.7635
+Mean VRAM (MiB)
+224
+13592.7
+13601.1
+13641.7
+13596.2
+13606.0
+13592.3
+13603.7
+13604.6
+13616.7
+13611.5
+13620.3
+13611.7
+13606.6
+13615.4
+18370.9
+13819.0
+13814.5
+128
+13563.4
+13570.0
+13610.6
+13569.0
+13572.4
+13567.6
+13570.0
+13573.1
+13584.3
+13576.6
+13587.0
+13575.6
+13575.0
+13583.1
+18342.6
+13793.4
+13791.6
+64
+13545.6
+13549.2
+13589.6
+13549.0
+13550.9
+13549.2
+13549.5
+13552.1
+13561.8
+13553.9
+13564.8
+13552.4
+13553.2
+13561.6
+18326.6
+13775.0
+13773.6
+32
+13535.4
+13538.4
+13578.4
+13539.2
+13540.5
+13538.4
+13539.2
+13540.8
+13549.8
+13542.4
+13553.7
+13540.9
+13541.4
+13549.8
+18318.0
+13765.7
+13765.0
+Table 26. Computational complexity measurements on LLaVA-1.5-7B. Green and pink indicate lower and higher costs, respectively,
+relative to the full-token baseline, with intensity reflecting the relative change.
+K
+ToMe
+VisionZip
+VisionZip++
+DivPrune
+VFlowOpt
+OTPrune
+ApET
+FastV
+SparseVLM
+PyramidDrop
+N¨uwa
+DUET-VLM
+LearnPruner
+HiDrop
+CORE
+Varest
+Varest + AH
+Theoretical (TFLOPs)
+224
+2.8626
+2.8626
+2.8626
+2.8626
+2.8616
+2.8626
+2.8678
+2.8580
+3.0100
+2.8814
+2.8742
+2.8684
+2.8689
+2.8859
+–
+2.7874
+2.5194
+128
+1.6307
+1.6307
+1.6307
+1.6307
+1.5476
+1.6307
+1.6324
+1.6373
+1.8198
+1.6440
+1.6345
+1.6337
+1.6296
+1.6443
+–
+1.6306
+1.4749
+64
+0.8137
+0.8137
+0.8137
+0.8137
+0.8105
+0.8137
+0.8141
+0.8244
+1.0144
+0.8210
+0.8146
+0.8112
+0.8238
+0.8236
+–
+0.8143
+0.7366
+32
+0.4064
+0.4064
+0.4064
+0.4064
+0.4060
+0.4064
+0.4065
+0.4089
+0.6011
+0.4099
+0.4067
+0.4034
+0.4002
+0.4107
+–
+0.4066
+0.3687
+Measured Complexity (TFLOPs)
+224
+7.7125
+7.8546
+7.8590
+7.8769
+7.8870
+7.8987
+7.8864
+7.9212
+8.3192
+8.0308
+7.9300
+7.9292
+7.9314
+8.1625
+10.5024
+7.9039
+7.3729
+128
+5.2224
+5.3741
+5.3784
+5.4328
+5.3314
+5.4146
+5.3987
+5.4583
+5.9164
+5.5598
+5.4285
+5.4234
+5.4348
+5.5966
+7.6142
+5.5708
+5.2635
+64
+3.5535
+3.7297
+3.7128
+3.7805
+3.8354
+3.7702
+3.7287
+3.8311
+4.2325
+3.8419
+3.7657
+3.7332
+3.7983
+3.8969
+5.7106
+3.9287
+3.7844
+32
+2.7043
+2.9024
+2.8896
+2.9493
+2.9484
+2.9172
+2.8962
+2.9819
+3.4110
+3.0405
+2.9346
+2.9230
+2.9109
+3.0597
+4.7724
+3.0981
+3.0305
+Mean VRAM (MiB)
+224
+25644.5
+25658.1
+25718.6
+25647.1
+25657.4
+25640.4
+25660.5
+25658.4
+25673.1
+25668.8
+25675.4
+25665.7
+25660.8
+25672.9
+33176.6
+25961.7
+25952.0
+128
+25594.4
+25604.0
+25665.4
+25601.7
+25603.5
+25598.4
+25606.1
+25605.8
+25624.0
+25613.1
+25620.2
+25610.5
+25609.5
+25621.1
+33127.5
+25917.5
+25912.0
+64
+25563.5
+25569.4
+25629.5
+25568.8
+25572.2
+25567.8
+25569.7
+25573.4
+25586.7
+25574.1
+25582.1
+25567.6
+25574.2
+25585.0
+33097.1
+25887.7
+25885.0
+32
+25547.7
+25551.1
+25611.7
+25552.0
+25553.7
+25550.2
+25551.6
+25553.4
+25567.6
+25556.4
+25564.4
+25554.5
+25554.7
+25565.6
+33084.6
+25872.2
+25870.7
+Table 27. Computational complexity measurements on LLaVA-1.5-13B. Green and pink indicate lower and higher costs, respectively,
+relative to the full-token baseline, with intensity reflecting the relative change.
+K
+ToMe
+VisionZip
+VisionZip++
+DivPrune
+VFlowOpt
+OTPrune
+ApET†
+FastV
+SparseVLM
+PyramidDrop
+N¨uwa
+DUET-VLM
+LearnPruner
+HiDrop
+CORE∗
+Varest
+Varest + AH
+Theoretical (TFLOPs)
+1120
+6.9690
+6.9690
+7.1802
+6.9690
+6.9957
+6.9690
+7.0212
+7.0224
+7.0430
+7.1561
+7.1077
+7.2586
+7.0353
+7.2223
+–
+7.0423
+6.7042
+640
+3.9289
+3.9289
+4.1923
+3.9289
+3.9495
+3.9289
+3.9470
+4.0142
+4.0209
+4.1649
+3.9763
+4.2245
+3.9554
+4.1328
+–
+3.9528
+3.7657
+320
+1.9461
+1.9461
+2.2408
+1.9461
+1.9461
+1.9461
+1.9509
+2.0575
+2.0581
+2.0604
+1.9589
+2.2399
+1.9544
+2.1682
+–
+1.9521
+1.8639
+160
+0.9684
+0.9684
+1.2767
+0.9684
+0.9637
+0.9684
+0.9709
+1.0070
+1.0087
+1.0101
+0.9729
+1.2753
+0.9738
+1.1576
+–
+0.9699
+0.9289
+Measured Complexity (TFLOPs)
+1120
+15.0137
+15.0282
+15.2856
+15.0172
+15.0974
+15.0445
+15.1335
+15.1776
+15.3143
+15.5152
+15.4483
+15.5540
+15.2063
+15.7762
+9.1612
+15.2710
+14.6898
+640
+9.5022
+9.5075
+9.8705
+9.5188
+9.5751
+9.5573
+9.5429
+9.7426
+9.8119
+10.0663
+9.7500
+9.9973
+9.6025
+10.0704
+6.2576
+9.6544
+9.3469
+320
+5.9264
+5.9301
+6.3380
+5.9540
+5.9480
+5.9774
+5.9374
+6.2173
+6.2561
+6.2426
+6.0037
+6.3687
+5.9635
+6.4601
+4.3285
+6.0251
+5.8964
+160
+4.2039
+4.1575
+4.6135
+4.1918
+4.1675
+4.2025
+4.1678
+4.2964
+4.3379
+4.3385
+4.1616
+4.6128
+4.2035
+4.6403
+3.3694
+4.2564
+4.2133
+Mean VRAM (MiB)
+1120
+16079.2
+16064.8
+16098.1
+16089.0
+16079.2
+16126.7
+16085.1
+16067.0
+16071.6
+16075.3
+16214.0
+16072.1
+16099.5
+16087.5
+21032.7
+16254.7
+16254.4
+640
+16052.0
+16030.0
+16063.4
+16052.1
+16046.8
+16084.9
+16039.5
+16034.5
+16038.8
+16042.7
+16162.2
+16036.1
+16058.8
+16056.5
+21018.5
+16237.2
+16236.7
+320
+16035.2
+16008.3
+16041.3
+16022.5
+16022.5
+16047.2
+16016.7
+16015.5
+16018.9
+16016.8
+16169.0
+16013.3
+16030.3
+16036.1
+21011.6
+16227.3
+16226.6
+160
+16027.7
+15997.9
+16031.1
+16004.7
+16012.5
+16020.9
+16005.8
+16003.6
+16005.8
+16004.0
+16174.3
+16002.5
+16016.0
+16024.5
+21007.9
+16222.8
+16222.1
+Table 28. Computational complexity measurements on LLaVA-NeXT-8B. Green and pink indicate lower and higher costs, respectively,
+relative to the full-token baseline, with intensity reflecting the relative change.
+24
+
+
+Method
+Training Protocol
+Inference changes in our implementation
+ToMe [5]
+None (training-free)
+On NeXT, move merging after CLIP feature extraction so crop
+grids can be reconstructed and unpadded before compression.
+Merge within unpadded crop regions, order merged tokens by
+spatial centroid, and preserve row separators.
+VisionZip [40]
+None (training-free)
+On NeXT, replace fixed per-crop retention with a per-image target
+divided across crops to maintain the requested retention ratio across
+image layouts.
+VisionZip++ [40]
+Projector-only tuning on 10% of
+instruction data, separately per budget;
+vision encoder and LLM frozen.
+On NeXT, distribute the per-image target across unpadded crop
+regions to exclude padding from selection and budget allocation.
+Preserve budget-exempt row separators to retain image-row
+structure.
+DivPrune [1]
+None (training-free)
+Exclude already-selected tokens from subsequent selection to
+prevent duplicates when distances tie.
+VFlowOpt [41]
+None (training-free); pruning-policy
+search on calibration data.
+Replace SigLIP with CLIP attention to match LLaVA. Restore
+high-ranked tokens from recycling when needed to meet target
+budget. On NeXT, resize recycling grid to unpadded crop geometry.
+OTPrune [8]
+None (training-free)
+None.
+ApET [24]
+None (training-free)
+On NeXT, replace fixed per-crop retention with image-wide budget
+allocation across crop patches to match layer-averaged budgets.
+FastV [7]
+None (training-free)
+Since the original FastV paper specifies post-pruning token counts,
+recompute retention to match layer-averaged budgets. On
+LLaVA-1.5 and NeXT at 32/5.56%, advance the cut to reduce
+unpruned overhead. On NeXT, compute retention per image.
+SparseVLM [44]
+None (training-free)
+On LLaVA-1.5 at 32, advance the first cut to reduce unpruned
+overhead. On NeXT, scale retained counts per image, including
+recycled tokens in the budget.
+PyramidDrop [39]
+Training-free variant; pretrained
+backbone remains frozen.
+On LLaVA-1.5 at 128/32, advance cuts to reduce unpruned
+overhead. On NeXT, advance the first cut to reach low budgets.
+N¨uwa [13]
+None (training-free)
+On NeXT, fix global/local token allocation to avoid rounding losses
+and respect unpadded capacity. Include row separators in budget.
+DUET-VLM [33]
+Two-stage training: projector
+alignment, then joint projector and
+full-LLM instruction tuning; vision encoder
+frozen.
+Preserve prefill position IDs during decoding for cache consistency.
+On NeXT, correct crop packing to match NeXT’s unpadded image
+layout and preserve budget-exempt row separators.
+LearnPruner [34]
+Budget-agnostic training of the scoring
+MLP on 10% of data; VLM frozen.
+On NeXT, score post-projector tokens instead of CLIP features,
+using a separately trained MLP for image-wide selection.
+HiDrop [36]
+Per-budget projector alignment, then
+joint projector and full-LLM instruction
+tuning; vision encoder frozen.
+On LLaVA-1.5 at 32, add an early cut to reduce unpruned overhead.
+On NeXT, scale retained counts by image patch count; preserve
+row structure with budget-exempt separators until visual exit.
+CORE [18]
+Projector alignment, then joint
+projector and rank-512 LLM LoRA tuning;
+vision stack frozen. Budget-agnostic
+training with 1,024 visual tokens.
+Use fixed-rate rather than adaptive CORE, enforcing an exact
+K-token budget. Replace InternLM2 with Vicuna (LLaVA-1.5) or
+Llama-3 (LLaVA-NeXT) to match the other methods’ LLMs. If
+objects outnumber K, pool the K −1 largest separately and the
+remainder into one token.
+Table 29. Baseline training requirements and inference changes.
+25
