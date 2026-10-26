@@ -1,0 +1,854 @@
+Task-Phase-Conditioned Expert Routing Is Not a Reliable Proxy
+for Quantization Sensitivity in MoE FFN Tensors
+Yifan Liu
+UIUC MCS Student yifanl25@illinois.edu
+October 16, 2026
+Abstract
+We investigate whether per-layer, per-task-phase (prompt/reasoning/response) expert-
+routing statistics in a Mixture-of-Experts (MoE) language model can guide layer-wise
+mixed-precision quantization of routed-expert FFN tensors (down/gate and up). To attain
+layerwise routing statistics, we build a routing-capture and profiling pipeline for Qwen-3.6-
+35B-A3B in ik llama.cpp [Kawrakow et al., 2024], derive a composite sensitivity score from
+routing entropy/decisiveness, coefficient of variation (CV), Jaccard/phase-fragility, and top-1
+expert strength, and use coordinate descent to tune a layer allocation that respects a fixed
+average bits-per-weight budget. Notably, the profiling pipeline is applicable to standard
+top-k MoE architectures. Across independent experimental conditions (∼4.0 bpw flat, ∼2.7
+bpw steep, and ∼2.7 bpw random allocation as a control), reallocation fails to outperform
+the uniform baseline within each quality tier. In the flat regime, reallocation is statistically
+neutral (z ≈0.9). For the steep tier, the random reallocation performs within 1 SE of the
+routing-guided reallocation at the same tier, indicating a structural loss at this quality rung
+caused by mandatory downgrades and Kullback-Leibler Divergence (KLD) tail injection.
+This aggressive-budget condition shows a decisive loss (z > 4 SE) replicated across three
+independent weight vectors. We argue that the deeper issue is that routing-behavior statistics
+are an unvalidated proxy for true per-layer quantization cost.
+1
+Introduction
+As MoE models have become ubiquitous in deployment, there exists a need for the development
+of targeted quantization strategies to achieve better KLD and Perplexity (PPL) values. A
+notable trend has been models becoming increasingly large, where users frequently turn to
+aggressive quantizations to run these models locally.
+We construct a test harness to evaluate whether MoE routing behavior through different
+experts for token types and phases can guide budget-neutral reallocation of precision per layer.
+Specifically, we characterize these phases as prompt, Chain of Thought (CoT) reasoning, and
+response. We employ the high-quality IQ quantization types present in ik llama.cpp [Kawrakow
+et al., 2024]. A natural hypothesis arising from MoE routing is that there exist MoE layers with
+more distinctive phase-dependent or concentrated routing behavior and that these layers should
+receive more quantization precision while less distinctive layers should receive more aggressive
+quantization; we test whether this hypothesis holds. We initially allocated extra precision to the
+distinctive/fragile layers; however, our best-measured point for KLD actually resulted from a
+flip in allocation strategy placing more precision on the uniform/robust layers. That direction
+flip still failed to beat the uniform baseline.
+Previous work on MoE quantization has mainly focused on activation-frequency or expert-
+importance mixed-precision MoEs [Duanmu et al., 2025, Deng et al., 2026, Chitty-Venkata
+et al., 2025], classical rate-distortion (water-filling) bit allocation, and sensitivity-based mixed
+precision in dense LLMs with direct measures, such as the Hessian and single-layer ablation.
+1
+arXiv:2610.20826v1  [cs.LG]  14 Oct 2026
+
+
+These methods condition on either a behavioral activation or importance signal that is not
+phase-aware (MxMoE, GEMQ) or on a direct sensitivity measurement (MoPEQ and the dense-
+model methods); none tests whether a phase-conditioned routing proxy can substitute for a
+direct measurement.
+We do not describe a method that beats existing quantization types and methods. We lay
+out the precise coordinate descent experiments to find coefficients for our allocation function
+that tests the hypothesis and analyze the likely causes for failure. During the evaluation of the
+quantized candidates devised from the reallocation strategy against a corpus of coding text,
+there were several positions with dramatically large KLD; the 99th-percentile KLD rose from
+0.44 (uniform) to ∼0.49 on the reallocated candidates. Since mean-KLD is tail-dominated the
+injection of these values increased KLD and PPL against the uniform baseline and decreased
+top-1 token agreement. The magnitude of these effects varied across quant tier. In the flat
+regime, the difference in KLD with the uniform baseline was within noise (a neutral result for
+KLD z ≈0.9), whereas the steep regime shows a decisive loss across all these metrics (KLD
+z > 4 SE).
+The rest of this paper will explore the data used, the profiling pipeline, the composite score,
+and the coordinate-descent search in Section 3. We report the two budget regimes and the
+random-selection control in Section 4. Finally, we provide an analysis of why budget-neutral
+reallocation loses and its implications for routing statistics as a quantization signal in Section 5.
+2
+Related Work
+MoE mixed-precision quantization. Mixed-precision quantization has become the standard
+for post-training quantization (PTQ) of MoE LLMs. Existing approaches differ in the signals for
+bit-width allocation. MxMoE [Duanmu et al., 2025] combines two strategies, including linear-
+block sensitivity estimates and a systems approach that leverages expert activation frequency for
+hardware co-designed allocation, tailoring to the computational capabilities of the deployment
+environment. GEMQ [Deng et al., 2026] focuses on global, expert-level importance ranking in a
+progressive refinement loop to achieve extremely low-bit quantizations, arguing that per-layer
+local importance estimation does not optimally account for routing, which is perturbed by
+quantization. MoPEQ [Chitty-Venkata et al., 2025] uses Hessian trace approximation to allocate
+varying bit-widths for experts, noting that expert activation frequency does not predict sensitivity.
+EAQuant [Fu et al., 2026] addresses the problem of activation outliers by employing expert-aware
+activation smoothing and router-logit alignment, while also focusing on improving calibration
+data for MoE LLM PTQ. MoEQuant [Chen et al., 2025] also leverages calibration sampling while
+contributing affinity-guided quantization to quantify the interplay between individual samples
+and experts. Both EAQuant and MoEQuant do not propose a sensitivity-based allocation scheme.
+None of these methods conditions its sensitivity or importance signal on task phase (prompt,
+reasoning, and response). Building on MoPEQ’s finding that expert activation frequency does
+not predict sensitivity, our approach instead tests whether a phase-conditioned routing-behavior
+signal can serve as a lightweight proxy for the direct measurements (Hessian trace, per-expert
+ablation) that MoPEQ and dense-model methods employ.
+Classical rate-distortion allocation. Optimal bit allocation given a total-rate constraint is
+a classical problem in rate-distortion theory [Cover and Thomas, 2006]. Notably, the water-filling
+solution [Shoham and Gersho, 1988] allocates marginal bits to equalize marginal distortion-
+reduction per bit across all dimensions when given a per-dimension distortion-rate function. The
+allocation problem for distributing a fixed average-bpw budget across layers is structurally the
+same as water-filling; however, the routing-behavior signals (decisiveness, CV, phase-fragility,
+and top-1 expert strength) we leverage in our composite score are an indirect proxy for the true
+distortion-rate curve for a layer.
+Sensitivity-based mixed precision in dense LLMs. In dense-model quantization,
+2
+
+
+Hessian-trace and eigenvalue approximation methods such as HAWQ [Dong et al., 2019] and
+GPTQ’s [Frantar et al., 2023] Hessian-guided error compensation, along with single-layer ablation
+measurements to isolate the contribution of one component to output error serve as the standard
+methods to directly estimate per-weight or per-layer sensitivity. The accuracy of these direct
+measurements depends on a backward pass or ablation sweep per layer. Other more ubiquitous
+methods include imatrix [Kawrakow et al., 2024], which can be applied to both MoE and dense
+models by calculating per-channel activation statistics through calibration sampling. This paper
+relies on a purely behavioral routing statistic computed through forward passes alone (somewhat
+similar to imatrix) to substitute for direct sensitivity measurement in a MoE setting.
+3
+Methods
+3.1
+Model and Setup
+The model employed throughout all the experiments is Qwen-3.6-35B-A3B [Qwen Team, 2026].
+This model has 40 layers plus a separate MTP head (blk.40); dynamic allocation applies to
+blk.0-38, with the terminal layer blk.39 held at baseline. The model is quantized with an
+imatrix and run in ik llama.cpp [Kawrakow et al., 2024], the engine that we modify for our
+experiments. The imatrix supplies per-channel activation statistics from a calibration set to
+guide quantization scaling; it is the standard llama.cpp calibration mechanism and is separate
+from the routing-capture allocation signal developed in Section 3.4.
+3.2
+Data Pipeline and Bug Fixes
+We curate a pool of 186 coding prompts from HumanEval-X [Zheng et al., 2023] (Python, C++,
+Java, JS, Go), HumanEval-Rust [Diverso AI Lab, 2023], and LiveCodeBench Lite [Jain et al.,
+2024], spanning easy, medium, and hard difficulty. For the profiling pass through the modified
+ik llama.cpp engine, we stratify-sample 30 prompts from this pool, balanced across source,
+language, and difficulty.
+We patch ik llama.cpp to capture the per-token top-k expert selections and gate probabilities
+at each MoE block, allowing us to characterize the routing behavior of Qwen-3.6-35B-A3B. For
+efficiency gains, the strategy we use is surrogate routing capture. The model is first quantized
+to ∼4 bpw per tensor with a Q8 0 precision router and attention/SSM tensors to ensure high
+fidelity routing with the routed experts quantized to IQ4 KS (down) and IQ3 K (gate/up). Since
+the Q8 0 router decides the actual top-k experts which fire per token, the signal is still faithful
+when the routed experts are quantized. The objective of surrogate routing capture was to ensure
+that it was possible to capture routing data on systems where running the full quality BF16 is
+not possible.
+We resolve several bugs regarding our patch. Initially, we encountered issues with identifying
+the boundaries of prompts in the captured data. To be able to separate each prompt from
+the routing capture data, we added per-request IDs for each prompt profiled. One bug caused
+routing capture data to be dropped without error. We discovered that the fix was to turn
+graph reuse off. This change decreases decode performance to ensure proper routing capture
+data. Another separate bug also caused silent failures for the pipeline to capture prompts of
+certain lengths. The source of this bug was when prompt token length exceeded the value set
+for ubatch-size which corrupted the capture. It was essential to set both the batch and ubatch
+size to be longer than the maximum token count of the 30 coding prompts.
+During the collection phase, we obtain expert coverage percentage, top-1 fraction, normalized
+entropy, and cross-prompt Jaccard (mean/std) and cross-phase pairwise Jaccard. These scores
+are combined into four signals to describe per-layer and per-phase statistics. These signals
+include entropy (decisiveness), CV (concentration), cross-phase Jaccard (phase-fragility), and
+top-1 gate prob (confidence). These become the four scores which we assign coefficients and
+3
+
+
+optimize for in coordinate descent. In Table 1 and Figure 1, we describe a high-level summary of
+the results from the routing capture pipeline. The prompt-phase coverage floor shows that some
+experts never fire in prompt-processing across all thirty prompts. Also, there is a position-count
+disparity across the different phases.
+segment
+npositions
+med. top-1 frac.
+med. Hnorm
+expert coverage
+prompt
+8,508
+0.0558
+0.863
+0.89–1.00
+reasoning
+128,287
+0.0322
+0.907
+0.996–1.00
+response
+26,721
+0.0366
+0.912
+0.996–1.00
+Table 1: Per-phase routing statistics over 30 coding prompts (39 profiled layers each). Prompt-
+phase routing is markedly less diffuse (lower Hnorm) and leaves some experts never selected
+(coverage down to 0.89), unlike the reasoning/response phases.
+Figure 1: Per-expert routing behavior across the three task phases. Top row shows aggregate
+expert selection counts per phase. Middle row shows per-layer expert-usage heatmaps, one row
+per profiled layer. Bottom row shows KDEs of top-1 gate probability. Data spans 30 coding
+prompts, 39 profiled layers, and 256 routed experts. Prompt-phase routing is visibly less diffuse
+than the reasoning and response phases.
+3.3
+Segmentation
+The profiling is segmented into prompt, reasoning, and response through two boundary rules.
+The prompt is designated as the prefill region and defined by the request’s prompt tokens length,
+whereas the reasoning is the span from the end of the prompt up to and including the first
+</think> token. The remainder of the generation is the response. If any generation lacks a
+</think> token, then all post-prompt content is folded into the response; in practice, all 30
+prompts emit a close delimiter. We constrained the model’s server-side reasoning budget to
+8192 tokens. The maximum total tokens per request was set to 32768, ensuring that the model
+4
+
+
+finished its reasoning and emitted a full response. Since each segment differs substantially in
+token count (8.5k / 128k / 26.7k), per-layer statistics were computed and z-scored within each
+segment.
+3.4
+Composite Sensitivity Score
+To allocate bits and different quantizations to routed-experts tensors (down, and gate/up), we
+devise a composite score function. This score consists of four signals each representing a property
+of a layer’s expert-usage distribution, including decisiveness (sharp routing), concentration,
+phase-fragility (how differently the model routes across phases), and confidence.
+With each segment having a different aggregate token count (differing up to ∼15x) each signal
+needs to be z-scored for normalization within its own scale. Since we take the maximum composite
+score (max-aggregation) across all three segments, the z-scoring prevents any composite score
+from dominating through volume of tokens processed, facilitating fair comparison across the
+different segments.
+The weighted composite function is shown in Equation (1). The weights allow each signal’s
+relative importance to be tuned. Iterative coordinate descent is applied to determine the optimal
+weights.
+dl = 1 −Hl,
+cl = CVl,
+fl = 1 −min
+ Jrr
+l , Jpr
+l
+
+,
+tl = τl
+z(s)
+l
+(x) = xl −¯x(s)
+σ(s) + ϵ
+S(s)
+l
+= wd z(s)
+l
+(dl) + wc z(s)
+l
+(cl) + wp z(s)
+l
+(fl) + wt z(s)
+l
+(tl)
+(1)
+where Hl is the normalized routing entropy, CVl the coefficient of variation of expert usage,
+Jrr
+l
+and Jpr
+l
+the cross-phase pairwise Jaccard overlaps (reasoning ∩response, prompt ∩reasoning),
+τl the top-1 expert fraction, x ∈{d, c, f, t} a signal (so xl is its value at layer l), ¯x(s)/σ(s) the
+mean/std of signal x within segment s, and ϵ a small constant.
+The purpose of the max-aggregation is to identify if a layer is sensitive or extreme in any
+phase according to the four signals. Whether a high score receives more or fewer bits is a free
+allocation-direction choice, handled in Section 3.5.
+Because the downstream allocation in Section 3.5 consumes only rank(Sl), the ordering of
+layers by score and not values, the composite score is invariant to any affine rescaling of its
+inputs. We exploit this characteristic to fix wd ≡1, so the composite score is parameterized by
+a four-component weight vector w = (wd, wc, wp, wt) with wd held at 1; the search is therefore
+over the three free ratios {wc, wp, wt} only. The 3-axis coordinate descent in Section 3.6 is
+consequently well-posed.
+3.5
+Allocation Mechanism
+For every profiled layer, we choose a down tier and gu tier pair. Specifically, we bundle the gate
+and up tensors together and quantize them at the same tier. The byte model is down + 2 · gu
+per layer. The multiplier 2 is deliberate since gate and up are separate tensors.
+To designate different quantization types to allocate to the layers, we draw from ik llama.cpp’s
+IQK family; the per-tensor bpw of every tier used in this work is listed in Appendix A (Table 6).
+Each layer’s allocated tier is within a small band (±1-2 rungs ≈0.25-0.5 bpw per rung) of that
+regime’s baseline so the reallocation is a local rearrangement. We analyze the effects of dynamic
+layer-wise quantization at two quality regimes.
+We run a budget-fit algorithm that consists of the following steps. The layers are first
+ranked by their composite-score percentile. The layers are then split into a fragile pool of the
+low-ranked layers and a robust pool of the high-ranked ones. We downgrade the layers of the
+5
+
+
+Regime
+Ladder (rungs)
+Down base
+GU base
+Combined bpw/layer
+Flat (∼4 bpw)
+iq3 ks·iq3 k·iq4 kss·iq4 ks·iq4 k
+iq4 ks
+iq3 k
+11.13
+Steep (∼2.7 bpw)
+iq2 ks·iq2 k·iq2 kl·iq3 ks·iq3 k
+iq3 ks
+iq2 kl
+8.57
+Table 2: Quantization regimes and corresponding ladder configurations. gu = the bundled
+gate/up tier.
+fragile pool to save bytes and build a byte bank surplus. We then use this surplus to fund the
+upgrades of the robust pool, one rung at a time, while keeping the total routed-expert bytes
+at or below the budget fixed by the uniform baseline, so every candidate is budget-neutral by
+construction. Several quality parameters such as max step (max rungs a layer may move) and
+stay frac (fraction of layers that may move at all) allow us to vary experiments for aggressive
+and conservative reallocation.
+The importance of budget-neutral quantizations cannot be understated, as it forms the
+basis for comparable and fair quality (KLD and PPL) comparisons between the quantizations
+generated from the budget-fit algorithm and the uniform baseline. We define budget-neutral as
+size-matched to the uniform baseline of that quality regime with approximately the same amount
+of bits just rearranged. This definition is enforced in the algorithm with the two gates, including
+a pre-quantize dry-run projection check for the final size of the model post quantization and
+a post-quantize measured-byte check. Both of these checks are compared against the uniform
+baseline’s bytes.
+Another parameter we set is whether the extra bits go to the fragile layers or the robust
+layers. We ran experiments in both directions; the favorable direction is discussed in Section 4.
+To avoid re-benchmarking identical allocations, we canonicalize each tier map to a sorted JSON
+form, hash it with SHA-1, and use the resulting hash as the cache key. If a tier map is already
+in the cache, its metrics are reused with no re-quantization, while a miss triggers a single
+quantize-and-evaluate. Two distinct weight vectors that yield the same tier map therefore
+collapse to one entry so redundant allocations are never re-quantized.
+3.6
+Coordinate Descent Search
+The coordinate descent process optimizes the 4 weights in the composite score; however, we only
+tune the 3 free weight ratios from Section 3.4 with wd anchored to 1. We tune each free ratio
+with coordinate descent cyclically, one axis at a time, where the objective is minimum KLD. The
+top-1 token agreement and PPL are also recorded but not used to dictate descent direction. Each
+weight vector maps to a tier map, as mentioned in Section 3.5, and each tier map is evaluated
+one time to obtain the KLD.
+A different grid of multipliers is implemented for each round. In the first round, which
+is coarse, each axis tests multipliers {0.5, 1.5, 3.0} of its value. In the second round, which is
+adaptive, the grid of an axis is chosen by the winner of the first round. An interior winner is
+assigned a grid of {0.75, 1.0, 1.25}. A high-edge winner gets a grid of {1.0, 1.5} which extends the
+search up, capped at 4.5x. A low-edge winner gets a grid of {1.0, 0.5, 0.25}, extending the search
+down. In the worst case, the coordinate search explores at most 18 distinct quantizations (3
+axes x 3 candidates x 2 rounds). The number of quantizations is usually fewer after the caching
+strategy in Section 3.5 and early-stop is applied. The early-stop strategy defines a stopping
+condition as a full pass that changes nothing, where there is no KLD improvement. As a control
+experiment, we use a seed-frozen, depth and budget-matched random-layer-selection variant
+evaluated through the same pipeline as a control.
+Our coordinate descent implementation is resumable and cache-aware, as intermediate states
+are written to temporary JSON tracking files as checkpoints. This design allows for pausing
+and resuming the GPU-driven evals. Since the objective is a plateau, many weight vectors map
+6
+
+
+to the same tier map and hence the same KLD. The search is also dedupe-aware, skipping any
+candidate whose tier map is already measured. An example of the full logs can be found in
+Appendix B.
+3.7
+Evaluation Methodology
+To evaluate each quantization generated by the budget-fit algorithm, we first construct the high-
+precision KLD reference by running the model quantized uniformly to Q8 0 over a coding corpus.
+We use Q8 0 as a proxy for BF16 quality; prior work on Qwen3 quantization reports near-lossless
+performance at moderate-to-high bit-widths including 8-bit precision, with degradation emerging
+primarily under ultra-low-bit settings [Zheng et al., 2026], and independent KL-divergence
+measurements on Qwen-3.6 similarly find that 8-bit quantization tracks BF16 closely, with
+residual divergence roughly an order of magnitude smaller than 4-bit quantization [McLeod,
+2026].
+We measure each candidate with a single llama-perplexity run using --kl-divergence and
+--kl-divergence-base against the Q8 0 reference logits. This single run yields mean KLD, PPL,
+and top-1 agreement, along with the KLD tail: the 99th and 95th percentiles, the median, and
+the maximum. The llama-perplexity flags are shared across the Q8 0 reference, the candidates,
+and the uniform baseline through a single function, so all three are computed with identical
+context, layer placement, and batch settings to ensure direct comparability.
+The evaluation corpus is drawn from The Stack v3 by streaming the dataset from Hugging-
+FaceCode [Lozhkov et al., 2026]. It is held out from the profiling data, which originates from
+HumanEval-X and LiveCodeBench, so no prompt in the evaluation set was seen during routing
+capture. To reduce training-data contamination we exclude repositories created before June
+2024, restrict to permissively-licensed code, and drop vendored third-party files. To promote
+representational diversity, a per-language token budget balances coverage across 21 languages,
+including niche languages, while seeded shuffling and multi-shard sampling provide additional
+diversity during data selection. The final corpus is ∼331K tokens (∼647 chunks at context 512),
+comparable in size to the widely-used wikitext-2 test set [Merity et al., 2016].
+3.8
+A Methodological Note on Validation-Set Bias
+The coordinate-descent search is a plateau objective over a small weight space. Initially, we run
+the evaluations on a frozen 12K-token slice (∼24 chunks at context 512) to keep GPU evaluation
+cheap. We unfortunately note that the slice does not serve as an accurate proxy for the true
+full-corpus KLD. Specifically, the uniform baseline’s KLD at the IQ3 K quality regime was
+0.019325 on the 12K slice but 0.014725 on the full 331K-token corpus. The full-corpus KLD is
+∼24% lower than the slice estimate. Since the relative ranking of candidates against the uniform
+baseline also did not transfer from the slice to the full corpus, we report all final results on the
+full corpus and acknowledge that the slice is only used to drive the descent.
+4
+Results
+4.1
+Flat Regime (∼4 bpw, Compressed Ladder)
+Quantizations in this regime along with the uniform baseline are at the flat region of the Pareto
+curve. Across all 8 quantized candidates benchmarked, in Table 3, we observed that none of
+them beat the uniform baseline that had down experts at IQ4 KS and gate/up experts at IQ3 K.
+The best candidate (C1) achieves a result close to neutral (+0.94 SE) on KLD compared to
+the uniform baseline. At ∼4 bpw, every layer is already near its per-layer optimum, so moving
+bits between layers trades a small gain on a few layers against a small loss on the rest. This
+reallocation nets to roughly zero change in KLD.
+7
+
+
+Allocation
+KLD (± SE)
+Top-1 (%)
+Uniform (baseline)
+0.014725 ± 0.000430
+97.5
+C1
+0.015276 ± 0.000400
+97.4
+C2
+0.015327 ± 0.000405
+97.3
+C3
+0.015362 ± 0.000407
+97.3
+C4
+0.015363 ± 0.000403
+97.4
+C5
+0.015507 ± 0.000423
+97.3
+C6
+0.015662 ± 0.000459
+97.3
+C7
+0.015709 ± 0.000451
+97.3
+C8
+0.015851 ± 0.000457
+97.3
+Table 3: Flat regime (∼4 bpw, compressed ladder). Uniform baseline vs. the 8 coordinate-descent
+allocations C1–C8 ordered by KLD, on the full 331K-token corpus. No allocation beats the
+uniform baseline. The best candidate is statistically neutral. PPL is a wash across all candidates
+at ∼2.00 and is omitted.
+4.2
+Steep Regime (∼2.7 bpw, Low-Bit)
+Quantizations in this regime along with the low-bit uniform baseline are on the steep region
+of the Pareto curve (past the elbow). Notably, in this quality tier, the loss is decisive (z ≈4.3
+SE, combined). As shown in Table 4, the loss is tail dominated from the floor tier quality at
+IQ2, and the 99th percentile KLD shows substantial increases, rising from 0.437 (uniform) to
+0.487–0.492, while the median KLD stays at most 0.0019. The tail dominates because the mean
+of 0.034 is ∼20× the median. We analyze the exact mechanism for the mean KLD degradation
+in this regime in Section 5. The top-1 token agreement percentage also drops modestly from
+95.8% to 95.6%, showing the effects of quantization noise at the token level.
+Allocation
+KLD (± SE)
+KLD p99
+Top-1 (%)
+Uniform U (baseline)
+0.034321 ± 0.000608
+0.437
+95.8
+cv 0.5
+0.038249 ± 0.000659
+0.490
+95.6
+cv 1.5
+0.038142 ± 0.000665
+0.487
+95.6
+cv 3.0
+0.038223 ± 0.000662
+0.492
+95.6
+Table 4: Steep regime (∼2.7 bpw, low-bit, IQ2 floor tier). Uniform baseline U vs. the 3
+score-guided allocations on the full corpus. All candidates lose decisively. The KLD tail (p99)
+rises on every candidate.
+4.3
+Random-Selection Control
+To determine if our method held any statistical significance, we compare our score guided
+approach against two quantization recipes generated with random seeds. Holding depth, tiers,
+and budget fixed and randomizing the assignment of quantization types to the layers, the random
+candidates land within ∼1 SE of (and marginally below) the score-guided ones. This result
+informs us that the reallocation structure is responsible for the loss, where the mandatory IQ2
+downgrades that were required to fund the upgraded-quality layers inject KLD-tail positions.
+Decisively, the composite score adds no selection signal over random layer selection. Table 5
+reports these random candidates alongside the score-guided set and the uniform baseline.
+8
+
+
+Allocation
+KLD (± SE)
+KLD p99
+Top-1 (%)
+Uniform U (baseline)
+0.034321 ± 0.000608
+0.437
+95.8
+random, seed 42
+0.037728 ± 0.000642
+0.483
+95.7
+random, seed 1337
+0.037808 ± 0.000617
+0.495
+95.6
+ref: score-guided (cv 0.5–3.0)
+0.03814–0.03825
+0.487–0.492
+95.6
+Table 5: Random-selection control (∼2.7 bpw). Depth, tiers, and budget are matched to the
+score-guided candidates. Only layer selection is randomized across 2 seeds. Random lands within
+∼1 SE of the score-guided candidates, showing the composite score carries no selection signal
+over random.
+5
+Discussion
+5.1
+Why Budget-Neutral Reallocation Loses
+Fundamentally, budget-neutral reallocation loses because of its zero-sum structure: every upgrade
+is funded by downgrades on other layers. In the steep regime, for example, upgrading 17 layers
+by one rung (+1.25 bpw per layer) required downgrading 19 layers to the IQ2 floor tier (−1.12
+bpw per layer), with 3 layers staying at baseline; the gains and costs cancel almost exactly,
+so every candidate lands at the uniform budget. This finding leads to the fact that the net
+∆KLD = P
+l gl −P
+l cl, where gl and cl are the per-layer marginal gains and costs. To produce
+a win against the uniform baseline, the reallocation criterion would need to rank layers by their
+true marginal KLD-per-byte.
+Water-filling theory states that optimal allocation equalizes marginal distortion-reduction per
+bit. Our proxy composite score utilizes routing behavior measures (entropy, CV, phase-fragility,
+top-1 strength) which are not a direct measurement of quantization distortion. The premise
+of our experiments was based on the hypothesis that layerwise phase-distinctive routing had a
+degree of correlation with the cost of reducing or increasing the bpw for a specific layer. There
+was never a theoretical basis for this expectation, and our empirical results showed it to be
+unsupported as well.
+In the flat regime, the effect of the net ∆KLD can be seen directly. At this quality tier
+all layers are near optimum on the uniform baseline. Therefore, any marginal gains from our
+allocation are immediately nullified by the marginal costs. The overall KLD nets to ∼zero, with
+all 8 candidates actually scoring slightly worse (z = +0.94 to +1.79). In the steep regime, there
+was a convex cost curve and the IQ2 floor cliff. This characteristic led to downgrades costing
+disproportionately more than upgrades gain; therefore, any nontrivial reallocation loses.
+Naturally, we questioned the entire premise with the random-selection control. If the routing
+statistics tracked quantization sensitivity even weakly, the score-guided allocations would have
+beaten random selection at matched depth and budget. Since random selection lands within ∼1
+SE of (and marginally better than) the score-guided candidates, at 0.03773/0.03781 KLD versus
+0.03814–0.03825, we acknowledge that the composite score adds no selection signal over random.
+5.2
+Relationship to Floor-Tier Cliff
+As we discussed in Section 5.1, there are two compounding effects: the per-tensor IQ2 floor
+quality cliff, and the proxy failing to identify differentially-sensitive layers.
+The floor-tier cliff can be quantified by its tail KLD injections. With 19 out of 39 profiled
+layers requiring mandatory downgrades, the 99th percentile KLD rises from 0.437 to 0.483–0.495
+on every reallocated candidate, score-guided and random alike. The baseline KLD distribution
+is already heavy-tailed: median 0.0016, 95th percentile 0.119, maximum 26.4, hence the ∼20×
+mean/median gap reported in Section 4.2. The mandatory downgrades act on this tail rather
+9
+
+
+than on the bulk. The median moves only from 0.0016 to at most 0.0019, and the maximum
+stays within 26.4–27.5, so neither the typical position nor the single worst case is what degrades.
+Instead, the distribution develops greater mass in the tail, with more positions entering the
+catastrophic regime, and this shift accounts for the mean-KLD loss of 0.0034–0.0039.
+The random-selection allocations lose to the uniform baseline because the cliff toll is incurred
+per tensor rather than per layer. At this depth, any budget-neutral reallocation must therefore
+downgrade 19 layers to the floor tier, regardless of which layers are selected. Swapping which
+layers receive the floor-tier IQ2 quality does not change the cost, because the tail injection is a
+property of the tier itself rather than of the specific layers that carry it. The implication is that
+below the elbow of the Pareto curve, reallocation within a fixed budget does not help. The only
+mitigation of catastrophic tail injection is to raise the floor globally, providing more budget.
+5.3
+Limitations
+A primary limitation of our study was the application of the composite score budget-reallocation
+strategy to a single model, Qwen-3.6-35B-A3B, which is a hybrid linear-attention MoE. We do
+not claim that our results can generalize to other models or scales. A cross-model transfer to
+the much larger GLM-5.3 [GLM-5 Team, 2026], a MoE language model with 753B total and
+40B active parameters, was planned but not executed.
+Since our per-layer, phase-based routing profiling ran on a surrogate quantization (down
+experts at IQ4 KS, gate/up at IQ3 K, with a Q8 0 router), it is possible that the routing was
+itself perturbed by quantization. There was no comparison performed to check the routing
+agreement versus a full-precision BF16 version of the model.
+There was also no direct-sensitivity ground truth. We disclose the limitation of having no
+single-layer ablation study and the lack of Hessian correlation values. We are unable to bound
+what a direct quantization-sensitivity signal would have achieved; we can only conclude that
+this proxy achieves nothing.
+For the data, we constructed additional datasets for multiple topics (reasoning, roleplay,
+chat, and trivia); however, the experiments in this paper only utilized the code task domain
+for both profiling and evaluation. The number of samples profiled was 30, and no tests were
+done to validate whether this was the optimal number of profiling samples. During the layerwise
+quality allocations, we opted to hold the terminal layer (blk.39) at the same quality as the
+uniform baseline; therefore, 39 of the 40 layers were profiled and received allocations. It is
+possible that including the terminal layer in the allocation could have influenced the results
+slightly. Segmentation also depended on the </think> delimiter to split generations into prompt,
+reasoning, and response, which all 30 profiling prompts happened to emit; a segmentation using
+only the prompt and response segments (e.g., for models without a reasoning trace) could have
+produced different sensitivity signals for the composite score.
+6
+Conclusion
+Task-phase-conditioned routing statistics, despite a carefully instrumented pipeline spanning
+routing capture, composite scoring, and budget-neutral coordinate descent, do not translate
+into a useful equal-budget allocation criterion for layer-wise mixed-precision quantization of the
+routed-expert FFN tensors. The score-guided allocations are neutral at ∼4 bpw and decisively
+harmful at ∼2.7 bpw. We underscore that the mechanism behind these results is structural:
+mandatory downgrades cause the KLD tail injection. The random-selection control shows that
+the heuristic is not at fault. We report these results to show that the intuitive connection
+presumed to exist between routing behavior and layer-wise quantization sensitivity does not hold.
+Future work would need to explore the connection at a higher level of granularity, potentially
+allocating precision to individual experts within a layer, and to validate candidate signals against
+10
+
+
+directly measured layer sensitivity.
+References
+Zhixuan Chen, Xing Hu, Dawei Yang, Zukang Xu, Xu Chen, Zhihang Yuan, Sifan Zhou, and
+Jiangyong Yu. MoEQuant: Enhancing quantization for mixture-of-experts large language
+models via expert-balanced sampling and affinity guidance. In Aarti Singh, Maryam Fazel,
+Daniel Hsu, Simon Lacoste-Julien, Felix Berkenkamp, Tegan Maharaj, Kiri Wagstaff, and
+Jerry Zhu, editors, Proceedings of the 42nd International Conference on Machine Learning,
+volume 267 of Proceedings of Machine Learning Research, pages 8245–8260. PMLR, 13–19 Jul
+2025. URL https://proceedings.mlr.press/v267/chen25aa.html.
+Krishna Teja Chitty-Venkata, Jie Ye, and Murali Emani. Mopeq: Mixture of mixed precision
+quantized experts, 2025. URL https://arxiv.org/abs/2509.02512. Accepted by the ICCV
+2025 BiVision Workshop.
+Thomas M. Cover and Joy A. Thomas. Elements of Information Theory. Wiley, 2nd edition,
+2006.
+Jianing Deng, Song Wang, Dongwei Wang, Zijie Liu, Tianlong Chen, Huanrui Yang, and Jingtong
+Hu. GEMQ: Global expert-level mixed-precision quantization for MoE LLMs. In Tong Zhang,
+Miroslav Dudik, Martin Jaggi, Alekh Agarwal, Sharon Li, Dale Schuurmans, Jerry Zhu, Felix
+Berkenkamp, Hanze Dong, and Alberto Bietti, editors, Proceedings of the 43rd International
+Conference on Machine Learning, volume 306 of Proceedings of Machine Learning Research,
+pages 24313–24333. PMLR, 06–11 Jul 2026. URL https://proceedings.mlr.press/v306/
+deng26t.html.
+Diverso AI Lab.
+Humaneval-rust.
+https://huggingface.co/datasets/diversoailab/
+humaneval-rust, 2023. Hugging Face dataset; accessed 2026.
+Zhen Dong, Zhewei Yao, Amir Gholami, Michael W. Mahoney, and Kurt Keutzer. Hawq: Hessian
+aware quantization of neural networks with mixed-precision. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision (ICCV), pages 293–302, October 2019.
+Haojie Duanmu, Xiuhong Li, Zhihang Yuan, Size Zheng, Jiangfei Duan, Xingcheng Zhang, and
+Dahua Lin. MxMoE: Mixed-precision quantization for MoE with accuracy and performance
+co-design. In Aarti Singh, Maryam Fazel, Daniel Hsu, Simon Lacoste-Julien, Felix Berkenkamp,
+Tegan Maharaj, Kiri Wagstaff, and Jerry Zhu, editors, Proceedings of the 42nd International
+Conference on Machine Learning, volume 267 of Proceedings of Machine Learning Research,
+pages 14793–14806. PMLR, 13–19 Jul 2025. URL https://proceedings.mlr.press/v267/
+duanmu25a.html.
+Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. OPTQ: Accurate quantization
+for generative pre-trained transformers. In The Eleventh International Conference on Learning
+Representations (ICLR), 2023. URL https://openreview.net/forum?id=tcbBPnfwxS.
+Zhongqian Fu, Tianyi Zhao, Ning Ding, Xianzhi Yu, Xiaosong Li, Yehui Tang, and Yunhe
+Wang. EAQuant: Enhancing post-training quantization for moe models via expert-aware
+optimization, 2026. URL https://arxiv.org/abs/2506.13329.
+GLM-5 Team. GLM-5: From vibe coding to agentic engineering, 2026. URL https://arxiv.
+org/abs/2602.15763.
+11
+
+
+Naman Jain, King Han, Alex Gu, Wen-Ding Li, Fanjia Yan, Tianjun Zhang, Sida Wang, Armando
+Solar-Lezama, Koushik Sen, and Ion Stoica. Livecodebench: Holistic and contamination free
+evaluation of large language models for code. arXiv preprint arXiv:2403.07974, 2024.
+Iwan Kawrakow et al. ik llama.cpp. https://github.com/ikawrakow/ik_llama.cpp, 2024.
+Fork of llama.cpp used for the routing-capture experiments; accessed 2026.
+Anton Lozhkov, Hugo Larcher, Mathieu Morlon, Loubna Ben Allal, and Leandro von Werra. The
+stack v3: The largest open code dataset, 2026. URL https://huggingface.co/datasets/
+HuggingFaceCode/stack-v3-train.
+Sam McLeod. Measuring model quantisation quality with kl divergence. Blog post, April
+2026.
+URL https://smcleod.net/2026/04/measuring-model-quantisation-quality-
+with-kl-divergence/. Accessed 2026.
+Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer sentinel mixture
+models, 2016. Introduces the WikiText language modeling benchmark.
+Qwen Team. Qwen3.6-35B-A3B: Agentic coding power, now open to all, April 2026. URL
+https://qwen.ai/blog?id=qwen3.6-35b-a3b.
+Yair Shoham and Allen Gersho. Efficient bit allocation for an arbitrary set of quantizers. IEEE
+Transactions on Acoustics, Speech, and Signal Processing, 36(9):1445–1453, 1988.
+Qinkai Zheng, Xiao Xia, Xu Zou, Yuxiao Dong, Shan Wang, Yufei Xue, Lei Shen, Zihan Wang,
+Andi Wang, Yang Li, Teng Su, Zhilin Yang, and Jie Tang. Codegeex: A pre-trained model
+for code generation with multilingual benchmarking on humaneval-x.
+In Proceedings of
+the 29th ACM SIGKDD Conference on Knowledge Discovery and Data Mining, KDD ’23,
+page 5673–5684, New York, NY, USA, 2023. Association for Computing Machinery. ISBN
+9798400701030. doi: 10.1145/3580305.3599790. URL https://doi.org/10.1145/3580305.
+3599790.
+Xingyu Zheng, Yuye Li, Haoran Chu, Yue Feng, Xudong Ma, Zining Wang, Jie Luo, Jinyang
+Guo, Haotong Qin, Michele Magno, and Xianglong Liu.
+An empirical study of Qwen3
+quantization. Visual Intelligence, 4(1):11, 2026. doi: 10.1007/s44267-026-00114-4. URL
+https://doi.org/10.1007/s44267-026-00114-4.
+A
+Full Launch Configuration
+IQK tier bandwidths used
+Each candidate quantization is produced by a single llama-quantize invocation with a per-
+layer --custom-q string and the shared imatrix. The perplexity/KLD measurement is a single
+llama-perplexity run against the Q8 0 reference log-probs. All flags below are identical across
+the reference, every candidate, and the uniform baseline (built by the shared
+ppl common
+function in driver.py) to ensure direct comparability.
+Quantization
+1
+llama -quantize \
+2
+--custom -q "$CUSTOM_Q" \
+3
+--imatrix
+qwen36moe.imatrix \
+4
+qwen3 .6-35B-A3B -bf16.gguf \
+5
+cand_ <hash >. gguf \
+6
+IQ3_K 128
+12
+
+
+Tier
+bpw/tensor
+Used in
+IQ2 KS
+2.1875
+steep ladder (floor)
+IQ2 K
+2.375
+steep ladder
+IQ2 KL
+2.69
+steep ladder (gu base)
+IQ3 KS
+3.19
+both ladders (steep down base)
+IQ3 K
+3.44
+both ladders (flat gu base)
+IQ4 KSS
+4.0
+flat ladder
+IQ4 KS
+4.25
+flat ladder (down base)
+IQ4 K
+4.5
+flat ladder
+Table 6: Per-tensor bits-per-weight of the IQK quantization tiers used in this work, as reported
+by ik llama.cpp. All other tensors (attention, SSM, shared experts, embeddings, MTP head) are
+held at fixed tiers (Q8 0 or IQ6 K) outside the reallocation budget.
+The --custom-q string is a comma-separated list of regex-weight=tier assignments. Routed-
+expert tensors (ffn down exps and ffn (gate|up) exps) receive per-layer tiers chosen by the
+budget-fit algorithm; all other tensors (attention, SSM, shared experts, embeddings, MTP head)
+are held at fixed tiers (Q8 0 or IQ6 K). A --dry-run size gate is run first, and the candidate is
+refused if its projected byte size exceeds the uniform baseline.
+Perplexity / KLD measurement
+1
+llama -perplexity \
+2
+-m cand_ <hash >. gguf \
+3
+-f eval_corpus.txt \
+4
+-c 512 -ngl 999 \
+5
+--threads 6 \
+6
+-fa on \
+7
+-b 8192 -ub 8192 \
+8
+-muge -gr -ger \
+9
+--kl -divergence \
+10
+--kl -divergence -base q80\_logits.dat
+The key settings are context 512, all layers on GPU, 6 CPU threads, flash-attention on,
+batch/ubatch 8192, and the -muge -gr -ger performance flags. The --kl-divergence-base
+file (q80 logits.dat) is the log-prob output of the Q8 0 reference model on the same corpus,
+saved via --save-all-logits. The single run yields mean KLD, PPL, top-1 agreement, and
+the KLD tail (p99, p95, median, max).
+B
+Coordinate-Descent Log
+Table 7 reproduces the full search trajectory for the flat-regime coordinate descent (6 axis-steps
+across 2 rounds). The initial weight vector is w = (1, 1, 1, 1) with wd anchored at 1. The last
+column indicates whether the axis winner differed from the current value.
+The search converges to a plateau where multiple weight vectors map to the same tier map
+(same SHA-1 hash), hence the same KLD. In this trajectory, round-2 cv×0.75 and top1×0.75
+both map to hash c5c523c8. . . (KLD 0.015276). The best candidate is reported as C1 in Table 3.
+The early-stop condition, which consists of a full pass with no KLD improvement, is not triggered
+because the 3 free axes still oscillate among distinct tier maps; however, the objective surface is
+flat, meaning that all 8 final candidates fall within ∼0.9 KLD-SE of each other.
+13
+
+
+Round
+Axis
+Winning multiplier
+KLD
+Changed
+1
+wc (CV)
+×1.5
+0.015276
+yes
+1
+wp (phase)
+×0.5
+0.015363
+yes
+1
+wt (top-1)
+×1.5
+0.015327
+yes
+2
+wc (CV)
+×0.75
+0.015276
+yes
+2
+wp (phase)
+×1.0
+0.015276
+no
+2
+wt (top-1)
+×0.75
+0.015276
+yes
+Table 7: Flat-regime coordinate-descent trajectory across 3 free axes and 2 rounds. The objective
+is full-corpus KLD. The KLD column reports the candidate evaluated at each step. A step
+whose candidate is worse than the current best (e.g., round-1 wp) is recorded but not accepted.
+Thus, the accepted KLD never regresses.
+C
+Dedupe Cache Schema
+The dedupe cache maps a canonical allocation hash to its measured metrics. The hash is
+computed as:
+1
+canon = json.dumps(
+2
+{str(k): v for k, v in sorted(tier_map.items ())},
+3
+sort_keys=True ,
+4
+)
+5
+hash = hashlib.sha1(canon.encode ()).hexdigest ()
+where tier map is a dictionary mapping layer index to a (down tier, gu tier) string pair.
+Two distinct weight vectors that yield the same per-layer tier assignment share a single cache
+entry. Each cache value is a JSON object with fields illustrated in Table 8.
+Field
+Description
+kld
+Mean KLD (nats/token), full corpus
+kld se
+Standard error of KLD (across chunks)
+kld p99
+99th-percentile per-position KLD
+kld p95
+95th-percentile per-position KLD
+kld median
+Median per-position KLD
+kld max
+Maximum per-position KLD
+ppl
+Perplexity on the evaluation corpus
+top1
+Top-1 token agreement (%) vs. Q8 0 reference
+bytes
+Measured GGUF file size (bytes)
+ref bytes
+Uniform baseline file size (bytes)
+over budget
+Whether bytes exceeds ref bytes
+Table 8: Dedupe cache value schema. Fields present in the low-bit cache (results lowbit.json).
+The flat-regime cache (results full.json) omits the KLD-tail fields.
+The cache is a flat JSON file: a single object mapping hashes to metrics. A cache hit
+(the hash is already present) short-circuits the GPU pipeline entirely; a miss triggers a single
+quantize-and-evaluate and appends the result. The cache is shared across all experiments
+and regimes. Thus, re-running the search after interruption or on a different machine never
+re-quantizes a previously measured allocation.
+14
