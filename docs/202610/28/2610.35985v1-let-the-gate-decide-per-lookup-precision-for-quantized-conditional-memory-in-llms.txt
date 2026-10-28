@@ -1,0 +1,966 @@
+Title: Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory in LLMs
+
+URL Source: https://arxiv.org/pdf/2610.35985v1
+
+Published Time: Wed, 28 Oct 2026 00:03:49 GMT
+
+Number of Pages: 22
+
+Markdown Content:
+# LET THE GATE DECIDE : P ER -L OOKUP PRECISION FOR QUANTIZED CONDITIONAL MEMORY IN LLM S
+
+Tianqi Chen 1,3 Xunchao Li 2 Linchuan Xie 2 Guanghua Yu 2
+
+Jianchen Zhu 2 Peisong Wang 1,3 Jian Cheng 1,3 †
+
+> 1
+
+C2DL, Institute of Automation, Chinese Academy of Sciences 2Tencent 
+
+> 3
+
+School of Artificial Intelligence, University of Chinese Academy of Sciences 
+
+chentianqi2023@ia.ac.cn , lucayu@tencent.com , jcheng@nlpr.ia.ac.cn 
+
+> †
+
+Corresponding author. 
+
+# ABSTRACT 
+
+Conditional memory layers, such as DeepSeek’s Engram, attach large hashed n-gram tables to a language model, and removing them from DeepSeek-V4.1-Flash costs 36 .8 PopQA points. Low-bit quantization loses long-tail facts first, and the standard remedy, giving more bits to frequently accessed rows, backfires: refining lookups by access frequency is worse than refining them at random. We trace this to the gate that scales each retrieved row. A lookup’s quantization error is weighted by its gate, which is small for frequent n-grams, large for the rare n-grams of long-tail entities, and computable from a 1-bit code. GateRQ therefore stores each row as a ladder of 1-bit residual codes, keeps level 1 in GPU memory to compute the gate, and reads deeper levels only for the lookups the gate ranks highest. Without retraining, GateRQ cuts GPU table memory by 7.8× on DeepSeek-V4.1-Flash, which raises vLLM throughput by 11% –31% over FP8 tables, while losing about 1 PopQA point at 
+
+1.50 bits read per lookup and 0.2 points at 2.10 bits across two models. 
+
+Keywords conditional memory · Engram · quantization · residual quantization · LLM inference 
+
+# 1 Introduction 
+
+Recent large language models (LLMs) place part of their parameters in conditional memory : hash tables, keyed by the preceding n-gram, that sit beside the Transformer backbone, as in DeepSeek’s Engram [1] and Qwen’s Per-Layer Embedding (PLE) [2]. Each token retrieves a fixed number of rows, and a gate computed from the current hidden state scales the retrieved vectors before they enter the residual stream. The tables thus add many parameters at little compute cost, and they hold much of the model’s factual knowledge. Zeroing them in DeepSeek-V4.1-Flash costs 36 .8 points on PopQA [3], a benchmark of questions about long-tail entities, more than two thirds of its accuracy; the answers stay well formed, but the facts are wrong. The tables are also large: 203 GB ( 189 GiB) in FP8, 40% of the checkpoint. On a node of 8 RTX PRO 6000 GPUs, keeping them in GPU memory takes 23 .6 GiB on every GPU and leaves a KV cache nine times smaller (as reported by vLLM) than when they are offloaded; offloading them instead pins all 189 GiB in host memory. Much of what these tables contribute is long-tail knowledge: facts about rare entities, such as the author of a little-known novel, that the backbone does not recover on its own. Quantization, the natural way to shrink the tables, erases exactly these facts first (Section 3), so a compression budget should not be spread evenly across rows. Recommender systems, whose embedding tables face the same pressure, have a standard rule for deciding which rows to keep precise: the frequently accessed ones, which receive larger dimensions [4] or higher precision [5, 6]. The rule rests on an assumption: every access contributes equally to the output, so frequent rows, read most often, accumulate the most quantization error. This assumption does not hold for conditional memory. Each retrieved row passes through a gate before it enters the residual stream, so its quantization error is paid at every lookup, scaled by that lookup’s gate (Section 3.1). The gates, arXiv:2610.35985v1 [cs.LG] 26 Oct 2026 Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory moreover, run against frequency: frequent n-grams are mostly function words and common phrases, which receive small gates, whereas the rare n-grams of named entities receive large ones. In the question “Who is the author of The Pianoplayers ?”, the gate is smallest at the token The and largest on the three tokens of Pianoplayers (Figure 1a). Over PopQA questions, rows seen more than a thousand times serve a third of the 2-gram lookups of block 2 but, under uniform quantization, carry under 4% of the output error (Figure 1b). A frequency rule therefore spends its bits where they matter least: choosing lookups to refine by frequency does worse than choosing them at random (Sections 3.2 and 5.2). One might hope to repair the rule instead, ranking rows by their expected gate rather than by frequency. This helps, but it still misses many important lookups, for two reasons. The rows that matter most belong to rare n-grams, which a counting corpus sees too seldom to estimate their gate; and even for common rows, the gate changes with context and can be large in one sentence and near zero in another (Section 3.2). Precision should therefore be decided per lookup, from the gate at hand. This seems to require the very precision one wants to save, since the gate is computed from the retrieved rows. It does not: the gate is insensitive to quantization, and gates computed from a 1-bit code closely match those computed from the FP8 table ( r ≥ 0.989 ; Section 3.2). Whether a lookup needs higher precision can thus be decided before any high-precision data is read. GateRQ (gate-driven residual quantization; Figure 2) combines two pieces. The first is a code whose precision can be raised after a row has been read: each row is stored as a ladder of 1-bit residual codes, with level 1 in GPU memory and deeper levels in host memory. The second is a rule that decides, per lookup, how far up the ladder to go: every lookup reads level 1 to obtain its key and gate, and under a fixed budget of bits per lookup, the lookups that the gate marks as most important fetch deeper levels, which refine only the value. Precision thus becomes a property of each access rather than of the stored row. Our contributions are as follows: • Analysis. We show three properties of quantization error in gated conditional memory: the gate error is negligible, so the gate can be computed accurately from a 1-bit code; importance runs against access frequency, so frequency-based allocation fails; and importance is concentrated in a few lookups whose identity depends on context, so row-level statistics cannot find them (Section 3). • Method. We propose GateRQ, a post-training scheme that stores each row as a ladder of 1-bit residual codes and uses the gate computed from the first level to choose how many levels each lookup reads. It needs no retraining, keeps the model’s gating mechanism intact, and applies to any codec that can encode residuals (Section 4). • Evaluation. We evaluate on two models, three codecs (trellis-coded quantization, TCQ; integer, INT; product quantization, PQ), and two read budgets ( 12 settings). At the same number of bits read per lookup, gate-based selection beats selection by expected gate, at random, and by access frequency in all 36 paired PopQA comparisons. With TCQ [7, 8], reading 1.50 and 2.10 bits per lookup costs about 1 and 0.2 PopQA points relative to FP8 and is statistically indistinguishable from reading the full two- and three-level ladders, which take 0.63 –1.20 more bits per lookup (Section 5.2). • System. In vLLM [9] on 8 RTX PRO 6000 GPUs, GateRQ cuts the table memory from 23 .6 to 3.0 GiB per GPU, which enlarges the KV cache 8.1× (as reported by vLLM) and raises throughput by 11% –31% over FP8 tables in GPU memory. Against FP8 host offloading, it matches throughput (within 1.5% ) with 26 –49 GiB of pinned host memory instead of 189 GiB (Appendix H). 
+
+# 2 Background: Conditional Memory Layers 
+
+We first describe conditional memory following Engram [1, Section 2], then distinguish the implementations in the two models studied here. 
+
+Hashed n-gram retrieval. Given a token sequence X = ( x1, . . . , x T ), Engram first compresses the vocabulary. A precomputed surjection P maps tokens with the same normalized text, such as case variants, to canonical IDs 
+
+x′ 
+
+> t
+
+= P(xt). At position t, it forms suffix n-grams gt,n = ( x′
+
+> t−n+1
+
+, . . . , x ′
+
+> t
+
+) for n = 2 , . . . , N . Since the space of all such n-grams is too large to parameterize directly, each order uses K hash heads to address tables and mitigate collisions. Head k uses a multiplicative–XOR hash φn,k to select a row in a table En,k of prime size pn,k :
+
+zt,n,k = φn,k (gt,n ), et,n,k = En,k [zt,n,k ] ∈ Rde . (1) The (N − 1) K retrieved vectors are concatenated into a memory vector et. We combine (n, k ) into a head index 
+
+j = 1 , . . . , J , where J = ( N − 1) K, and write the row retrieved by head j as et,j . One row access (t, j ) is a lookup .Its row ID, denoted r(t, j ), depends only on tokens, not on the hidden state. 2Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory 
+
+Context-dependent gating. Retrieved vectors do not themselves depend on the current hidden state and may be noisy because of collisions or ambiguity. Engram uses the hidden state as a query and the memory vector as the source of keys and values to compute a scalar gate. With a multi-branch backbone, the residual stream has M branches ( M = 4 
+
+in both models). All branches share the table and value projection WV , while branch m has its own key projection 
+
+W(m) 
+
+> K
+
+:
+
+k(m) 
+
+> t
+
+= W(m) 
+
+> K
+
+et, vt = WV et =
+
+> J
+
+X
+
+> j=1
+
+W(j) 
+
+> V
+
+et,j . (2) Writing ¯h(m) 
+
+> t
+
+= RMSNorm( h(m) 
+
+> t
+
+) and ¯k(m) 
+
+> t
+
+= RMSNorm( k(m) 
+
+> t
+
+), the original Engram gate and gated value are 
+
+α(m) 
+
+> t
+
+= σ ¯h(m)⊤ 
+
+> t
+
+¯k(m)
+
+> t
+
+√d
+
+!
+
+, u(m) 
+
+> t
+
+= α(m) 
+
+> t
+
+vt. (3) Here h(m) 
+
+> t
+
+∈ Rd is the input state of branch m, W(j) 
+
+> V
+
+is the column block of WV corresponding to head j, and σ is sigmoid. When memory and context disagree, the gate suppresses the retrieved contribution. Engram’s visualizations show gates opening for local patterns such as multi-token named entities and fixed phrases [1, Figure 7]. In the original Engram layer, the gated values subsequently pass through a short depthwise causal convolution. If ˜V
+
+denotes the sequence of gated values, the output is 
+
+Y = SiLU 
+
+
+
+Conv1D(RMSNorm( ˜V)) 
+
+
+
++ ˜V,
+
+with kernel width 4 and dilation N . This output is added to the backbone before the block’s attention and MoE. A retrieved row thus affects the layer through two paths: the key sets the scalar gate, and the value supplies the content written into the residual stream. 
+
+The two model implementations. DeepSeek-V4.1-Flash has Engram layers in blocks 2 and 15, as in Engram-27B. It uses N = 4 , K = 8 , hence J = 24 , with de = 256 . Vocabulary compression maps 129 ,280 token IDs to 99 ,092 
+
+canonical IDs; its backbone uses four-branch manifold-constrained hyper-connections (mHC) [10]. Qwen3.8-Flash-Next [2] has one PLE layer in block 2, before that block’s Gated DeltaNet. It uses N = 3 , K = 8 , J = 16 , and 
+
+de = 160 , hashes the original token IDs without vocabulary compression, and has a four-branch gated residual backbone. Both implementations apply a signed square root, sign( x)p|x|, to the scaled dot product before sigmoid in Equation (3). DeepSeek removes the short convolution and adds the gated value directly to each branch; Qwen retains a width-4,dilation-3 convolution. Table sizes and storage formats are given in Appendix B. 
+
+# 3 Where Quantization Loss Comes From 
+
+Quantizing the tables to one bit with TCQ, which gives level 1 of the ladder in Section 4, costs DeepSeek-V4.1-Flash 
+
+3.87 PopQA points, and the cost is uneven: 6.24 points on the least popular quartile of entities, but only 1.51 on the most popular (Appendix C.1). This section asks which lookups the loss comes from, why access frequency fails to find them, and whether they can be found before any high-precision data is read. Section 3.1 writes the distortion of a layer as a sum over lookups. Section 3.2 then makes three observations, from records of the gate and row of every lookup that the FP8 model makes on 4,000 PopQA questions and on English text (held-out documents and RACE passages; Figure 1). 
+
+3.1 Distortion of a Lookup 
+
+The quantization error δt,j = ˆ et,j − et,j of a retrieved row reaches the residual stream through both paths of Section 2: it shifts the gate of branch m by ∆α(m) 
+
+> t
+
+and the value by ∆vt = P 
+
+> j
+
+W(j) 
+
+> V
+
+δt,j , so the gated update changes by 
+
+∆u(m) 
+
+> t
+
+= ˆ α(m) 
+
+> t
+
+ˆvt − α(m) 
+
+> t
+
+vt = ˆ α(m) 
+
+> t
+
+∆vt
+
+| {z }
+
+> value error
+
++ ∆ α(m) 
+
+> t
+
+vt
+
+| {z }
+
+> gate error
+
+. (4) The gate error is negligible (Observation 1), so we keep only the value error, with ˆα(m) 
+
+> t
+
+≈ α(m) 
+
+> t
+
+. Treating the errors of different lookups as uncorrelated and isotropic (Appendix C.2), its expected energy separates over lookups: 
+
+E X
+
+> t,m
+
+α(m) 
+
+> t
+
+∆vt 
+
+> 22
+
+≈ X
+
+> t,j
+
+It,j εt,j , It,j = Gt τj ∥et,j ∥22, (5) 3Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory (a) Question: Who is the author of The Pianoplayers? entity Count Gate Who 522 0.096 is 9k 0.052 the 64k 0.043 author 4k 0.116 of 3k 0.056 
+
+The 
+
+> 532k 0.035
+
+Pian 
+
+> 15 0.203
+
+opl 
+
+> 00.246
+
+ayers 
+
+> 00.257
+
+?30.037 FP8: Anthony Burgess Quantized: Ellen Gilchrist 0 1 2–
+
+> 10 11 –
+> 100 101 –
+> 1k 1k –
+> 10k >10k
+> row access count (counting corpus)
+> 010 20 30
+> share (%)
+> rows >1k: 32% of lookups 3.8% of importance
+
+(b) 2-gram lookups, 4,000 questions  
+
+> lookups importance 10 −410 −2
+> row's typical gate energy 10 −4
+> 10 −2
+> gate energy
+> p90/p10: 4.3×
+
+(c) Same row, di ff erent contexts (block 15) 
+
+> gate energy ×10 ⁻³
+> 0.8 10.7 45.6
+
+…forget The key to a good holiday is detail ……few students have had a good idea to light ……pruned when there is a good and clear …
+
+> ABCCBA
+
+Figure 1: Importance follows the gate, not the access count (DeepSeek-V4.1-Flash). (a) A PopQA question that FP8 answers correctly and the quantized tables do not: the entity carries most of the gate, frequent function words little. (b) Rows are binned offline by access count; the lookups and importance (Equation (5)) of 4,000 PopQA questions are then tallied per bin (eight 2-gram heads of block 2). Frequent rows (over 1,000 accesses) serve a third of the lookups but carry under 4% of the importance. (c) Average gate energy of a row ( x; geometric mean over its lookups) against the gate energy of its individual lookups ( y), for rows looked up at least 20 times (block 15, RACE passages); dark dots: the 288 lookups of the row read for a good , A–C its lowest, median and highest; p90/p10: median ratio of a row’s 90th-to 10th-percentile gate energy. where εt,j = ∥δt,j ∥22/∥et,j ∥22 is the relative error of the lookup, Gt = P
+
+> m
+
+(α(m) 
+
+> t
+
+)2 is the gate energy at position t, and 
+
+τj = tr( W(j)⊤ 
+
+> V
+
+W(j) 
+
+> V
+
+)/d e is the gain of head j. We call It,j the importance of the lookup. Its head gain and row energy are fixed for a given head and row, but its gate energy depends on the context of each access. Equation (5) is a local proxy rather than a task loss (for Qwen it also ignores the short convolution); Section 5 tests it end to end. 
+
+3.2 Three Observations 
+
+Table 1: Where the loss comes from 
+
+(DeepSeek-V4.1-Flash). PopQA accuracy change (points) from FP8 ( 52 .39 ) when only the gates, only the values, or both use the quantized table. Quantized Bits Gates Values Both 1.06 +0 .08 −4.03 −3.87 
+
+2.13 +0 .15 −0.81 −0.88 
+
+3.19 +0 .13 −0.19 −0.15 
+
+Observation 1: The gate error is negligible; the loss comes from the value. The gate error in Equation (4) is small be-cause quantization barely moves the gate. In every memory layer of both models, gates computed from the 1-bit table corre-late with those computed from the FP8 table at 0.989 to 1.000 
+
+position by position, and the two gates agree on which lookups matter most: the top 10% of DeepSeek’s lookups by impor-tance under each gate overlap by 98 .1% in block 2 and 92 .8% 
+
+in block 15 (held-out English text; Appendix C.3). Accuracy agrees (Table 1). Computing only the gates from the quantized table leaves PopQA at FP8’s level at every depth, costing at most 0.22 points at 95% confidence (Appendix C.3), whereas quantizing only the values costs as much as quantizing both. 4Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory 
+
+Observation 2: Access frequency runs against importance. 
+
+With the gate error set aside, the cost of quantizing a lookup scales with its importance It,j in Equation (5). Access frequency, the usual proxy for how much a row matters, points the opposite way. In the PopQA question of Figure 1a, which FP8 answers correctly and the 1-bit table does not, the 2-gram rows read at The were seen about half a million times in our counting corpus ( 115 M RedPajama tokens), yet the gate there is only 0.035 ; the rows read at the three tokens of Pianoplayers were seen at most 15 times, yet receive the largest gates in the question ( 0.20 –0.26 ); counts are medians over the eight 2-gram heads of block 2, and gates are those of one branch. The pattern holds over 4,000 
+
+questions (Figure 1b). Among the lookups of the eight 2-gram heads of block 2, rows seen more than 1,000 times serve 
+
+32% but carry only 3.8% of the importance, whereas rows never seen in the counting corpus serve 14% and carry 23% ;over all 24 heads, the frequent rows serve 13% of the lookups and carry 2.0% . Gate and access count are negatively correlated in every layer, n-gram order, and text we measured: Spearman −0.40 for the 2-gram heads of block 2 on PopQA, and between −0.02 and −0.63 across layers, orders, and English, Chinese, and code text (Appendix C.4). Both factors of importance contribute: the gate alone lowers the importance share of rows seen more than 1,000 times from 32% to 11% , and their smaller norms lower it to 3.8% .Allocating precision by frequency fails accordingly: choosing lookups by the frequency of their rows is worse than choosing at random. Giving extra precision to the 41% of lookups with the most frequent rows, the share refined in the 1.50-bit setting of Section 5.2, removes only 26% of the error in Equation (5) that giving it to all lookups would remove, whereas a random 41% removes 41% (Figure 4 in Section 5.3). 
+
+Observation 3: Importance is concentrated in a few lookups, and context decides which. Importance is highly skewed across lookups. On held-out English text, the top 10% of lookups carry 48% of the importance in block 2 and 69% in block 15 ( 50% and 47% on RACE passages); on PopQA, the top 1% in block 15 alone carry 54% 
+
+(Appendix C.4). A small budget could thus remove much of the error, if it reached the right lookups. Statistics of their rows cannot find them, for two reasons. First, many of them read rare rows, for which there is too little data to estimate an expected gate: rows never seen in the counting corpus alone carry 23% of the importance of the 2-gram lookups (Figure 1b), and 12% over all heads. Second, the gate of the same row changes sharply with context (Figure 1c). In block 15, the row that a 2-gram head reads for a good has a gate energy of 45 .6 × 10 −3 in key to a good holiday 
+
+and 0.8 × 10 −3 in there is a good and clear reason , and its lookups spread by a factor of 4.4 between the 10th and 90th percentile, as those of a typical row do: across the rows looked up at least 20 times in RACE passages, the 90th-percentile lookup of a row has 4.3 times the gate energy of its 10th-percentile lookup in block 15, and 2.0 times in block 2 ( 8.8 and 2.1 on held-out English text; Appendix C.4). Row-level statistics of the gate are therefore no substitute for the gate itself. Per lookup, ranking by the current gate beats ranking by the row’s expected gate in every setting we test (Section 5.2). Together, the observations call for a scheme that reads a cheap 1-bit code for every lookup to obtain its gate (Obser-vation 1), ranks lookups by that gate rather than by statistics of their rows (Observations 2 and 3), and spends the remaining bits only on the lookups that rank highest. Section 4 develops GateRQ along these lines. 
+
+# 4 GateRQ 
+
+GateRQ has two parts (Figure 2): a ladder of residual codes, which lets a lookup’s precision be raised after it has been read (Section 4.1), and a rule that sets each lookup’s depth from its gate (Section 4.2). Appendix F describes our implementation. 
+
+4.1 Residual Ladder 
+
+GateRQ stores each row e as a ladder of up to L = 3 levels of 1-bit residual codes [11, 12], each level encoding the residual left by the levels before it: 
+
+rk = e − ˆe(k−1) , ˆe(k) = ˆ e(k−1) + akQ
+
+ rk
+
+ak
+
+
+
+, ˆe(0) = 0, (6) where Q is a 1-bit-per-element quantizer and ak is the RMS of rk, stored as one FP16 scale per row and level. A lookup that reads depth ℓ, the first ℓ levels, reconstructs ˆe(ℓ). Our default Q is TCQ [7] with QTIP’s trellis [8]; including its scale, a level costs 1 + 16 /d e bits per element ( 1.0625 on DeepSeek, 1.10 on Qwen). The construction works with any 
+
+1-bit quantizer; Section 5.2 substitutes integer and product codes. Level 1 alone is a usable reconstruction, so a lookup can read it, compute its gate (Observation 1), and only then decide how deep to go. The levels are stored separately: level 1 stays in GPU memory, and deeper levels live in host memory 5Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory GPU (level 1 resident) 
+
+of The  
+
+> frequent (count 532k) hash
+
+L1 key 
+
+h
+
+Gate 0.035 rank L1 L2 L3 
+
+> depth 1 : 1 .06 bits
+
+value × residual 
+
+The Pian  
+
+> entity (count 15) hash
+
+L1 key 
+
+h
+
+Gate 0.203 rank L1 L2 L3 
+
+> depth 3 : 3 .19 bits
+
+value × residual 
+
+Rank within a batch ˆI = Gt τ j ‖ˆe(1)      
+
+> t,j‖2/(1−ε1)
+> lookups of one batch, sorted by ˆ Iq3q2
+> The Pian of The
+> depth 3: top s3
+> depth 2: next depth 1: rest fixed bit budget
+
+Host memory (levels 2–3)     
+
+> L2 L3 fetched over PCIe (UVA) packed L2+L3 records, read only when selected
+
+Figure 2: The gate decides how deep each lookup reads. Every lookup reads level 1 (L1) from GPU memory and computes its gate from it. The importance estimate ˆI of Equation (9), which contains the gate, ranks the lookups of a batch: the top ones read level 3 and the next level 2 from host memory, and the rest stop at L1, so the mean bits per lookup stay fixed. Both lookups scale their values with the L1 gate that ranked them (blue line). Gates and row counts are those of Figure 1a; depths are illustrative; stacked L1 boxes are the rows of all hashed heads, and the ladder and the host record are shown for one head. and are read only for the lookups that need them. Storage grows with depth, to 2.13 and 3.19 bits per element for two and three levels, while the reconstruction error stays close to that of direct 2- and 3-bit codes (Appendix D). 
+
+4.2 Per-Lookup Depth Allocation Objective and read rule. Let A be the lookups in one forward pass of a layer, and let lookup (t, j ) read depth 
+
+ℓt,j ∈ { 1, . . . , L }. With bℓ the cumulative rate through level ℓ in bits per element and εℓ the mean relative error at that depth, Equation (5) gives 
+
+min  
+
+> {ℓt,j }
+
+X
+
+> (t,j )∈A
+
+It,j εℓt,j s.t. 1
+
+|A| 
+
+X
+
+> (t,j )∈A
+
+bℓt,j ≤ Bread , (7) where Bread is the average read rate per lookup. With a price μ ≥ 0 per bit, the problem decouples over lookups, and refining a lookup from level k − 1 to k is worthwhile when 
+
+It,j ∆εk > μ ∆bk ⇐⇒ It,j > μθ k, θk = ∆bk
+
+∆εk
+
+, (8) with ∆bk = bk − bk−1 and ∆εk = εk−1 − εk. When each level removes less error than the previous one, as in all our ladders, θk grows with k and the selected sets are nested: a lookup that reads level k also reads every level before it. This is the classical marginal-return rule of bit allocation [13], applied to lookups instead of table rows. 
+
+Importance from level 1. The rule needs It,j before any deeper level is read, so we estimate it from level 1: 
+
+ˆIt,j = Gtτj
+
+∥ˆe(1)  
+
+> t,j
+
+∥22
+
+1 − ε1
+
+, (9) where Gt is computed from the reconstructions ˆe(1)  
+
+> t,j
+
+at position t (Observation 1), τj is the precomputed head gain, and the last factor estimates the row energy ∥et,j ∥22 from ∥ˆe(1)  
+
+> t,j
+
+∥22, which is about a fraction 1 − ε1 of it. 
+
+Per-batch thresholds. A fixed price μ meets Equation (7) only on average over batches, so we use per-batch quantile thresholds instead: the top s2 fraction of a batch’s lookups by ˆI reads at least level 2 and the top s3 ≤ s2 reads level 3. 6Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory 
+
+Algorithm 1 One forward pass of a conditional-memory layer with GateRQ.                                                  
+
+> Require: Lookups Awith row IDs r(t, j ), branch states h(m)
+> t, fractions s2, s 3
+> 1: Decode level 1 of every lookup to obtain ˆe(1)
+> t,j .2: Compute keys k(m)
+> t=W(m)
+> Kˆe(1)
+> t, where ˆe(1)
+> tconcatenates the ˆe(1)
+> t,j .3: Compute gates α(m)
+> twith the model’s original gate; set Gt=P
+> m(α(m)
+> t)2.4: Compute ˆIt,j by Equation (9) and the quota thresholds q2≤q3.5: Set ℓt,j = 1 + [ ˆIt,j ≥q2] + [ ˆIt,j ≥q3].6: Read levels 2, . . . , ℓ t,j of selected lookups; reconstruct by Equation (6). 7: Compute the value vt=P
+> jW(j)
+> Vˆe(ℓt,j )
+> t,j .8: Inject u(m)
+> t=α(m)
+> tvtthrough the model’s original output path.
+
+The fractions are fixed in advance and give every batch the same read rate (Section 5.1, Appendix E). A lookup’s depth thus depends on the other lookups of its batch; when a batch holds a single token, its lookups share the gate energy Gt
+
+and are ranked by τj ∥ˆe(1)  
+
+> t,j
+
+∥22 alone. Algorithm 1 gives one forward pass: keys and gates come from level 1, so deeper levels refine only the value, and injection uses the same gates that ranked the lookups. 
+
+# 5 Experiments 
+
+5.1 Setup Models and benchmarks. We evaluate two conditional-memory models: DeepSeek-V4.1-Flash and Qwen3.8-Flash-Next, with row dimensions 256 and 160 , respectively (Section 2). Benchmarks cover factual question answering on PopQA [3], TriviaQA [14], and NQ-open [15], and Chinese multitask knowledge on CMMLU [16]. All evaluations use the full test sets, with 14 ,267 , 9,960 , 3,610 , and 11 ,582 questions, respectively. Appendix F.2 gives the protocol. 
+
+Baselines. We compare with the FP8 tables and uniform reconstruction using one, two, or three complete residual levels. We also evaluate three selection rules in the same setting: refine lookups by the row’s expected gate energy (prior ), by access frequency ( frequency ), or uniformly at random ( random ). Each rule uses the same ladder and per-level refinement fractions as GateRQ; all mixed configurations compute keys and injection gates from level 1, whereas uniform configurations use the full selected depth. These are controlled selection baselines, not separate external mixed-precision methods. 
+
+Implementation. Quantizers are calibrated on 65 ,536 rows per head, and access counts are collected from 1.15 × 10 8
+
+RedPajama tokens [17]. We use TCQ [7, 8], INT1 with an E4M3 scale per 32 elements, and PQ1 with 256 centroids per 8-dimensional subvector and a row scale [18]. We report logical bits per looked-up element, including scales, and evaluate two read budgets, 1.50 and 2.10 bits per lookup with the TCQ and PQ ladders. In every forward batch of a layer, a rule ranks the lookups by its score, and fixed fractions (s2, s 3) of the lookups read level 2 and level 3: 
+
+(41 .2% , 0) and (60% , 37 .65%) on DeepSeek, (36 .4% , 0) and (56% , 34 .9%) on Qwen. The budget fixes s2 at 1.50 bits; at 2.10 bits it leaves the split between the two deeper levels open, and we use one split for all rules and codecs. GateRQ and the three selection rules use the same fractions and therefore read the same bits per lookup; ties, which are frequent for access counts, are broken at random. The rows read in the runs give the realized rate, 1.500 and 2.100 bits per lookup in all TCQ runs; the INT ladder, whose levels cost more, reads more at the same fractions (Appendix E). 
+
+5.2 Main results 
+
+Table 2 gives the results with the TCQ ladder, and Figure 3 shows PopQA for all three codecs (four-task means for INT and PQ: Appendix G.1). At the same read budget, GateRQ has the best PopQA accuracy of the four rules in all 
+
+12 model–codec–budget settings, and all 36 paired comparisons with the other rules are significant, by 0.39 to 2.86 
+
+points (Appendix G.2). With TCQ, GateRQ is within 0.2 PopQA points of FP8 at 2.10 bits, which is not a significant difference, and 0.8–1.0 points below it at 1.50 bits; its four-task mean is within 0.3 points of FP8 at both budgets. Reading 1.50 /2.10 bits instead of the full two-/three-level ladder saves 0.63 –1.20 bits per element, with no statistically significant PopQA difference at these four working points; this does not establish equivalence. On the other tasks the differences are smaller: GateRQ is significantly better than a rule in 20 of 36 comparisons on TriviaQA, 21 on CMMLU, and one on NQ-open, and the only exception is Frequency on DeepSeek TriviaQA with TCQ at 2.10 bits (Appendix G.2). Entries above FP8 should not be read as consistent accuracy improvements. 7Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory Table 2: Results with the TCQ ladder. Accuracy ( %) on the four benchmarks and their mean, for the FP8 tables, uniform reconstruction with one to three levels, and GateRQ and the three selection rules at two read budgets, at which the four rules read the same bits per lookup. Read : bits used per looked-up element. Bold: best among the four rules. PopQA half-widths of the paired 95% intervals against FP8: 0.28 –0.47 points. Paired differences between the rules: Appendix G.2. 
+
+Method Read PopQA TriviaQA CMMLU NQ-open Avg. 
+
+DeepSeek-V4.1-Flash 
+
+FP8 8.25 52.39 82.78 89.48 32.71 64.34 Uniform, level 1 1.06 48.52 82.92 88.83 32.96 63.31 Uniform, levels 1–2 2.13 51.50 82.97 89.26 32.74 64.12 Uniform, levels 1–3 3.19 52.24 82.87 89.52 33.13 64.44 
+
+1.50 bits per lookup 
+
+Gate (GateRQ) 1.50 51.37 82.97 89.36 33.02 64.18 
+
+Prior 1.50 50.23 82.88 89.24 32.99 63.84 Random 1.50 49.75 83.02 89.11 32.83 63.68 Frequency 1.50 49.53 83.12 89.04 32.99 63.67 
+
+2.10 bits per lookup 
+
+Gate (GateRQ) 2.10 52.18 82.88 89.43 33.35 64.46 
+
+Prior 2.10 51.48 82.90 89.52 32.99 64.22 Random 2.10 50.75 83.01 89.30 32.99 64.02 Frequency 2.10 50.31 83.23 89.06 33.13 63.93 
+
+Qwen3.8-Flash-Next 
+
+FP8 8.00 39.55 75.44 88.80 32.94 59.18 Uniform, level 1 1.10 37.06 74.40 88.16 33.02 58.16 Uniform, levels 1–2 2.20 38.89 75.37 88.62 33.19 59.02 Uniform, levels 1–3 3.30 39.55 75.52 88.68 33.38 59.28 
+
+1.50 bits per lookup 
+
+Gate (GateRQ) 1.50 38.73 75.55 88.59 32.80 58.91 
+
+Prior 1.50 38.28 75.26 88.51 32.85 58.73 Random 1.50 37.94 74.85 88.42 32.77 58.50 Frequency 1.50 37.18 74.69 88.19 33.30 58.34 
+
+2.10 bits per lookup 
+
+Gate (GateRQ) 2.10 39.38 75.68 88.64 33.21 59.23 
+
+Prior 2.10 38.66 75.39 88.54 33.19 58.95 Random 2.10 38.32 75.18 88.52 33.07 58.77 Frequency 2.10 37.87 74.91 88.26 32.49 58.38 
+
+5.3 Ablation Which lookups to refine. Figure 4 compares four rules for choosing the lookups that read level 2: the estimated importance ˆI of Equation (9) (Gate), the same score with the gate replaced by the expected gate of the row (Prior), a random choice, and the access count of the row (Frequency). Under the error proxy of Equation (5), ranking by ˆI removes 
+
+93% of the error that refining every lookup would remove at the 1.50 -bit setting, where 41 .2% of the lookups read level 2, against 70% for Prior, 41% for Random, and 26% for Frequency. The measured PopQA accuracy of the TCQ runs gives the same order: the four rules recover 96% , 58% , 41% ,and 34% of the gap between level 1 and two full levels. The proxy lies inside the paired 95% interval of the measurement for Gate, Random, and Frequency, and overestimates Prior (58% , interval 47 –68% ). 0 25 50 75 100 
+
+> Lookups reading level 2 (%)
+> 025 50 75 100
+> Weighted error removed (%)
+> 1.50 bit Random 41% Freq 26% Prior 70%
+> Gate 93%
+
+Figure 4: Gate ranking removes the most error. 
+
+Weighted error of Equation (5) removed, relative to refining every lookup to level 2, against the share of lookups reading level 2 (offline proxy; PopQA, DeepSeek). Dashed line: the 1.50 -bit setting. 
+
+8Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory 46 48 50 52              
+
+> TCQ INT
+> DeepSeek PQ
+> 12336 38 40
+> 123123
+> Qwen
+> PopQA accuracy (%) Bits per lookup
+> GateRQ (ours) Prior Random Frequency Uniform FP8
+
+Figure 3: PopQA accuracy against bits per lookup. Rows: DeepSeek-V4.1-Flash and Qwen3.8-Flash-Next; columns: TCQ, INT, and PQ ladders. At each of the two read budgets, GateRQ and the three selection rules read the same bits per lookup ( 1.50 and 2.10 with TCQ and PQ; with INT, whose levels cost 1.25 bits each, 1.76 and 2.47 on DeepSeek and 1.70 and 2.39 on Qwen); uniform reads one to three full levels. Bits include scales; the dotted line is FP8 ( 8.25 bits on DeepSeek, 8.00 on Qwen). The y-axes are shared within each row. 2 3 4 50 
+
+> −1
+> −2
+> −3
+> −4
+> PopQA vs. FP8 (points)  FP8: 12.4 MiB →
+> 1.06 2.13 3.19 1.50 2.10
+
+PopQA against data loaded    
+
+> GateRQ (ours) Uniform 0250 500 FP8, GPU FP8, host
+> GateRQ, 1.50 bits GateRQ, 2.10 bits
+> 414 498 348 361
+
+1,024 tokens   
+
+> 01000 2000
+> 1,565 1,918 731 857
+
+4,096 tokens   
+
+> 02000 4000
+> 3,144 3,854 1,271 1,573
+
+8,192 tokens     
+
+> Loaded per 8,192-token forward (MiB per GPU) Time per layer, without wkv GEMMs ( μs)
+> GPU memory All-gather Threshold Host reads
+
+Figure 5: What a forward pass loads and what the table side costs (DeepSeek-V4.1-Flash, TP8, RTX PRO 6000). 
+
+Left: PopQA change from FP8 (paired 95% intervals; the TCQ runs of Table 2) against the table data one GPU loads in a forward pass of 8,192 tokens, which is proportional to the bits per lookup (labels). Uniform reads one to three full levels; points are offset horizontally for legibility. Right: time of the table side of one Engram layer in a pass of 1,024 ,
+
+4,096 and 8,192 tokens, per rank, split by where it goes. FP8 tables are in GPU memory or in pinned host memory; GateRQ reads the deeper records of each rank’s own heads from host memory. The wkv projection ( 7.4 ms at 8,192 
+
+tokens; −6% to +3% when split as in GateRQ) is not included. 
+
+5.4 Efficiency 
+
+Figure 5 shows what a forward pass loads and what the table side of an Engram layer costs. With GateRQ, a forward pass of 8,192 tokens loads 2.25 –3.15 MiB of table data per GPU instead of 12 .4 MiB, and the table side takes 1.3–1.6 ms instead of 3.1 ms with FP8 tables in GPU memory and 3.9 ms in host memory. The gap shrinks with fewer tokens: 
+
+0.35 –0.36 ms against 0.41 –0.50 ms at 1,024 tokens. These timings read the deeper records of each rank’s own heads; the serving runs behind Table 22 (Appendix H) use a simpler variant in which every rank reads the deeper records of all 9Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory heads ( 2.9–4.6 ms, identical outputs). In either case the table side is about 1% of a prefill step, so these differences do not show up in end-to-end throughput. Implementation details are given in Appendix F. 
+
+# 6 Conclusion 
+
+Quantizing conditional-memory tables comes down to deciding which lookups deserve more bits, and the answer is the gate, not access frequency: the gate scales each retrieved row and can be computed from a 1-bit code. GateRQ stores each row as a ladder of 1-bit residual codes and reads deeper levels only for the lookups that the gate ranks highest. Across DeepSeek-V4.1-Flash and Qwen3.8-Flash-Next and three codecs, it beats the other selection rules in all 36 
+
+paired PopQA comparisons at the same bits read per lookup, and with TCQ it is within 0.2 PopQA points of FP8 at 
+
+2.10 bits, while cutting DeepSeek’s table memory from 23 .6 to 3.0 GiB per GPU and raising vLLM throughput by 
+
+11% –31% over FP8 tables in GPU memory. 
+
+# References 
+
+[1] Xin Cheng, Rui Tian, Wangding Zeng, Damai Dai, Qinyu Chen, Bingxuan Wang, Zhenda Xie, Kezhao Huang, Xingkai Yu, Chengqi Deng, Shangyan Zhou, Chenggang Zhao, Zhewen Hao, Yukun Li, Han Zhang, Zhengyan Zhang, Yixuan Wei, M. Y. Xu, Huishuai Zhang, Dongyan Zhao, and Wenfeng Liang. Conditional memory via scalable lookup: A new axis of sparsity for large language models. arXiv preprint arXiv:2601.07372 , 2026. [2] Qwen Team. On the design of Qwen3.8-Next architecture: Evaluation, efficiency, and training stability. arXiv preprint arXiv:2608.30320 , 2026. [3] Alex Mallen, Akari Asai, Victor Zhong, Rajarshi Das, Daniel Khashabi, and Hannaneh Hajishirzi. When not to trust language models: Investigating effectiveness of parametric and non-parametric memories. In Proceedings of the 61st Annual Meeting of the Association for Computational Linguistics , 2023. [4] Antonio A. Ginart, Maxim Naumov, Dheevatsa Mudigere, Jiyan Yang, and James Zou. Mixed dimension embeddings with application to memory-efficient recommendation systems. In IEEE International Symposium on Information Theory (ISIT) , 2021. [5] Jie Amy Yang, Jianyu Huang, Jongsoo Park, Ping Tak Peter Tang, and Andrew Tulloch. Mixed-precision embedding using a cache. arXiv preprint arXiv:2010.11305 , 2020. [6] Shiwei Li, Huifeng Guo, Xing Tang, Ruiming Tang, Lu Hou, Ruixuan Li, and Rui Zhang. Embedding compression in recommender systems: A survey. ACM Computing Surveys , 56(5):130:1–130:21, 2024. [7] Michael W. Marcellin and Thomas R. Fischer. Trellis coded quantization of memoryless and Gauss-Markov sources. IEEE Transactions on Communications , 38(1):82–93, 1990. [8] Albert Tseng, Qingyao Sun, David Hou, and Christopher De Sa. QTIP: Quantization with trellises and incoherence processing. In Advances in Neural Information Processing Systems , 2024. [9] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with pagedattention. In 
+
+Proceedings of the 29th Symposium on Operating Systems Principles, SOSP 2023, Koblenz, Germany, October 23-26, 2023 , pages 611–626. ACM, 2023. doi: 10.1145/3600006.3613165. [10] Zhenda Xie, Yixuan Wei, Huanqi Cao, Chenggang Zhao, Chengqi Deng, Jiashi Li, Damai Dai, Huazuo Gao, Jiang Chang, Kuai Yu, Liang Zhao, Shangyan Zhou, Zhean Xu, Zhengyan Zhang, Wangding Zeng, Shengding Hu, Yuqing Wang, Jingyang Yuan, Lean Wang, and Wenfeng Liang. mHC: Manifold-constrained hyper-connections. 
+
+arXiv preprint arXiv:2512.24880 , 2025. [11] Biing-Hwang Juang and Augustine H. Gray, Jr. Multiple stage vector quantization for speech coding. In IEEE International Conference on Acoustics, Speech, and Signal Processing (ICASSP) , pages 597–600, 1982. [12] Yongjian Chen, Tao Guan, and Cheng Wang. Approximate nearest neighbor search by residual vector quantization. 
+
+Sensors , 10(12):11259–11273, 2010. [13] Yair Shoham and Allen Gersho. Efficient bit allocation for an arbitrary set of quantizers. IEEE Transactions on Acoustics, Speech, and Signal Processing , 36(9):1445–1453, 1988. [14] Mandar Joshi, Eunsol Choi, Daniel S. Weld, and Luke Zettlemoyer. TriviaQA: A large scale distantly supervised challenge dataset for reading comprehension. In Proceedings of the 55th Annual Meeting of the Association for Computational Linguistics , 2017. 10 Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory [15] Tom Kwiatkowski, Jennimaria Palomaki, Olivia Redfield, Michael Collins, Ankur Parikh, Chris Alberti, Danielle Epstein, Illia Polosukhin, Jacob Devlin, Kenton Lee, Kristina Toutanova, Llion Jones, Matthew Kelcey, Ming-Wei Chang, Andrew M. Dai, Jakob Uszkoreit, Quoc Le, and Slav Petrov. Natural questions: A benchmark for question answering research. Transactions of the Association for Computational Linguistics , 7:452–466, 2019. [16] Haonan Li, Yixuan Zhang, Fajri Koto, Yifei Yang, Hai Zhao, Yeyun Gong, Nan Duan, and Timothy Baldwin. CMMLU: Measuring massive multitask language understanding in Chinese. In Findings of the Association for Computational Linguistics: ACL 2024 , 2024. [17] Together Computer. RedPajama: An open source recipe to reproduce LLaMA training dataset. https: //github.com/togethercomputer/RedPajama-Data , April 2023. [18] Hervé Jégou, Matthijs Douze, and Cordelia Schmid. Product quantization for nearest neighbor search. IEEE Transactions on Pattern Analysis and Machine Intelligence , 33(1):117–128, 2011. [19] Wuyang Zhou, Yuxuan Gu, Giorgos Iacovides, Yuning Qiu, Qibin Zhao, and Danilo Mandic. Tensorizing Engram: Sharing latents across N-gram embeddings is beneficial in LLMs. arXiv preprint arXiv:2606.08347 , 2026. [20] Bowen Yang, Jingbo Zhou, Qinghong Miao, and Hua Wu. FactorEngram: Factorized N-gram memory with basis-level gating for language models. arXiv preprint arXiv:2609.35578 , 2026. [21] Yunao Zheng, Guoyang Xia, Xiaojie Wang, and Lei Ren. Lngram: N-gram conditional memory in latent space. 
+
+arXiv preprint arXiv:2605.24869 , 2026. [22] Tao Lin. A collision-free hot-tier extension for Engram-style conditional memory: A controlled study of training dynamics. arXiv preprint arXiv:2601.16531 , 2026. [23] Yutang Ma, Kecheng Huang, Xikun Jiang, and Zili Shao. TF-Engram: A train-free Engram with SSD-backed memory for large language models. arXiv preprint arXiv:2607.07388 , 2026. [24] Ruiyang Ma, Teng Ma, Zhiyuan Su, Hantian Zha, Xinpeng Zhao, Xuchun Shang, Xingrui Yi, Zheng Liu, Zhu Cao, An Wu, Zhichong Dou, Ziqian Liu, Daikang Kuang, and Guojie Luo. Pooling Engram conditional memory in large language models using CXL. In Proceedings of the 6th Workshop on Machine Learning and Systems , 2026. [25] Zhen Bi, Xueshu Chen, Yan Wang, Zhizhi Peng, Haosen Hong, Zhen Wang, Zhixuan Chu, Bingyu Zhu, and Jungang Lou. Memory is not always needed: Characterizing conditional memory in scientific reasoning. arXiv preprint arXiv:2608.23982 , 2026. [26] William H. R. Equitz and Thomas M. Cover. Successive refinement of information. IEEE Transactions on Information Theory , 37(2):269–275, 1991. [27] Leo Gao, Jonathan Tow, Baber Abbasi, Stella Biderman, Sid Black, Anthony DiPofi, Charles Foster, Laurence Golding, Jeffrey Hsu, Alain Le Noac’h, Haonan Li, Kyle McDonell, Niklas Muennighoff, Chris Ociepa, Jason Phang, Laria Reynolds, Hailey Schoelkopf, Aviya Skowron, Lintang Sutawika, Eric Tang, Anish Thite, Ben Wang, Kevin Wang, and Andy Zou. A framework for few-shot language model evaluation. Zenodo, 2024. 11 Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory 
+
+# A Related Work 
+
+Efficient Engram. Engram [1] keeps its tables off the backbone’s critical path: row IDs depend only on tokens, so the tables can sit in host memory and be prefetched. Follow-up work revisits how the tables are parameterized, stored, and used. 
+
+Different parameterizations, trained with the model. TN-gram replaces the hash tables with CP factors shared across 
+
+n-gram orders and matches Engram’s validation loss with 20–27% fewer memory parameters [19]. FactorEngram stores sparse coefficients over a shared dictionary and gates each dictionary vector separately [20], and Lngram addresses its tables with discrete codes learned from hidden states instead of token IDs [21]; both improve quality at the same parameter budget. Engram-Nine gives the most frequent n-grams collision-free rows and finds no improvement in loss at an equal parameter count [22], in line with our observation that frequency is a poor guide to where capacity matters. In that small model, trained on 82M tokens, the gate favors frequent n-grams, a preference that shrinks during training; in the production models we study, the relation is reversed (Section 3.2). All of these designs require training, and the largest model among them has 8B parameters. 
+
+Cheaper storage. TF-Engram builds phrase memories offline without training and serves them from a GPU–DRAM– SSD hierarchy, hiding SSD latency with predictive prefetching driven by an early-exit head [23]. Ma et al. [24] pool Engram tables in CXL memory shared by several hosts and reach near-DRAM end-to-end performance in SGLang. 
+
+Selective use. Bi et al. [25] find that conditional memory helps some inputs and hurts others in scientific reasoning, and route whole inputs and layers to or away from memory with task-specific input features. GateRQ is complementary to these lines. It compresses the tables of an existing checkpoint after training, without gradient updates, and sets the precision of each lookup from the model’s own gate. It reduces what a storage hierarchy must hold and transfer, it makes a finer-grained decision than input-level routing, and it could in principle be extended to the trained designs above that keep large tables and context gates. 
+
+# B Models and Tables 
+
+DeepSeek-V4.1-Flash holds 768 ,022 ,850 rows in two Engram layers (Table 3). In FP8, with an E8M0 scale per 32 
+
+elements, they take 202 .8 GB ( 188 .8 GiB), 39 .7% of the 510 .3 GB checkpoint. Qwen3.8-Flash-Next holds 320 ,001 ,536 
+
+rows in one PLE layer, 51 .2 GB in FP8 and 27 .6% of its 185 .5 GB checkpoint. Table 3: The conditional-memory layers of the two models.                              
+
+> DeepSeek-V4.1-Flash Qwen3.8-Flash-Next Memory layers Engram, blocks 2 and 15 PLE, block 2 Hash heads per layer 24 (eight each of 2-, 3-, 4-grams) 16 (eight each of 2-, 3-grams) Row dimension de256 160 Rows, all layers 768 ,022 ,850 320 ,001 ,536
+> FP8 table 202 .8GB, 8.25 bits per element 51 .2GB, 8.00 bits per element Share of the checkpoint 39 .7% of 510 .3GB 27 .6% of 185 .5GB Branches M44
+
+Zeroing the tables. Table 4 shows how much of the models’ accuracy the tables carry. Setting every row to zero costs DeepSeek 36 .76 PopQA points, about 70% of its accuracy, and Qwen 12 .90 points, about 33% ; on the other three benchmarks it costs 8.1–14 .4 points and 4.5–9.7 points, respectively. Table 4: Zeroing the tables. Change from FP8 in points when every row of the tables is set to zero; PopQA with the paired 95% interval over questions.              
+
+> PopQA TriviaQA CMMLU NQ-open DeepSeek-V4.1-Flash −36 .76 [ −37 .60 ,−35 .96] −14 .37 −8.12 −9.34
+> Qwen3.8-Flash-Next −12 .90 [ −13 .58 ,−12 .22] −9.74 −4.51 −5.18
+
+12 Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory 
+
+# C Supporting Analyses for Section 3 
+
+This appendix gives the measurements behind the observations of Section 3. Its records come from the FP8 models: for every lookup they hold the row, the gate of its position, and the access count of the row in the counting corpus (1.15 × 10 8 RedPajama tokens). Five sets of positions are used: held-out English documents (about 0.7 million positions), Chinese ( 0.12 million) and code ( 0.08 million) documents, RACE passages ( 677 ,076 positions in 1,994 
+
+passages), and the prompts of 4,000 PopQA questions ( 1,279 ,844 positions; a prompt holds the question and its 15 
+
+few-shot examples). 
+
+C.1 Loss by Subject Popularity 
+
+PopQA gives the popularity of each question’s subject, the monthly page views of its Wikipedia page. Table 5 splits the 
+
+14 ,267 questions into four quartiles by this number and shows the accuracy of FP8 and the change when only level 1 is used (Figure 6a). On DeepSeek the loss falls steadily from 6.24 points on the rarest quartile to 1.51 on the most popular. On Qwen it does not: the loss is largest on the second quartile ( 3.67 points), which also has the lowest FP8 accuracy (26 .85% ), and exceeds the loss on the rarest quartile ( 2.95 ), so the loss is spread over the three less popular quartiles. In both models the most popular quartile loses least. Table 5: PopQA with level 1 only, by popularity of the subject. FP8 accuracy and the change when only level 1 is read, with the paired 95% interval over questions (quartiles of the subject’s monthly Wikipedia page views).                                                        
+
+> DeepSeek-V4.1-Flash Qwen3.8-Flash-Next Quartile Page views Questions FP8 Level 1 95% interval FP8 Level 1 95% interval Rarest 2–235 3,559 42.23 −6.24 [−7.31 ,−5.17] 29.53 −2.95 [−3.79 ,−2.11]
+> Second 235–975 3,572 44.15 −4.59 [−5.57 ,−3.58] 26.85 −3.67 [−4.59 ,−2.72]
+> Third 975–5,784 3,569 51.67 −3.14 [−4.09 ,−2.19] 36.34 −2.63 [−3.56 ,−1.71]
+> Most popular >5,784 3,567 71.49 −1.51 [−2.27 ,−0.76] 65.49 −0.73 [−1.46 ,0.00] rarest 2nd 3rd most popular
+> subject popularity quartile
+> 0246
+> PopQA loss vs. FP8 (points)  (a) 1-bit loss by popularity
+> DeepSeek-V4.1 Qwen3.8 012–
+> 10 11 –
+> 100 101 –
+> 1k 1k –
+> 10k >10k
+> access count of the row
+> 0.00 0.05 0.10 0.15
+> mean gate (open branch)
+> r = 1.000
+> (b) Gate from level 1
+> FP8 table level 1 (1-bit TCQ)
+
+Figure 6: Loss by popularity, and the gate from level 1. (a) PopQA accuracy lost when only level 1 (1-bit TCQ) is read, by quartile of subject popularity, with paired 95% intervals. (b) DeepSeek, block 2, 2-gram heads, held-out English text: mean gate of the open branch by access count of the row, computed from the FP8 table (line) and from level 1 (dots); r is the correlation over positions (Appendix C.3). 
+
+C.2 Assumptions of Equation (5) 
+
+Equation (5) treats the error of a row as isotropic after the value projection, so that it contributes τj ∥δ∥22 to the value, and the errors of different lookups as uncorrelated. We test the first assumption on the checkpoints; the second is tested end to end by the predictions of Appendix G.3. 13 Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory 
+
+Rows. The rows of the DeepSeek tables are close to independent Gaussian vectors: the ratio of a row’s largest absolute value to its RMS has median 3.005 , the value for a 256 -dimensional Gaussian, and the standard deviations of the dimensions differ by at most 5% . The Qwen tables behave alike. 
+
+Value projection. Table 6 gives statistics of the Gram matrix W(j)⊤ 
+
+> V
+
+W(j) 
+
+> V
+
+, averaged over the eight heads of each order. Its effective rank is 230 –252 out of 256 on DeepSeek and 154 out of 160 on Qwen, so errors reach the value nearly isotropically, and weighting a row error by the projection raises it by only about 1% . The gain τj falls with the order: the same row error matters 2.3 times (block 2) and 2.9 times (block 15) more in a 2-gram head than in a 4-gram head, which is why the importance carries τj .
+
+Key projection. Weighted by the channel weights of the gate, the key part of the projection is almost rank one (effective rank 1.2–2.4 on DeepSeek, 52 .5 on Qwen; the ten leading directions hold 98 –100% of its energy on DeepSeek). The gate thus reads a few directions of the row, and the key-weighted error of the quantized rows is only 
+
+0.17 –0.26 times their unweighted error, which helps to explain why the gate error is small (Observation 1). Table 6: Value and key projections of DeepSeek’s heads. Means over the eight heads of each order. τ : gain of the head, the trace of W⊤ 
+
+> V
+
+WV over de. Effective rank of the value Gram matrix (out of 256 ) and of the gate-weighted key Gram matrix; energy of the key Gram matrix in its ten leading directions.                              
+
+> Block Order τValue rank Key rank Key top-10 energy (%) 222.87 244 1.56 99.7 31.48 243 1.24 99.7 41.25 242 1.24 99.9 15 23.60 252 2.35 98.5 31.85 241 1.36 98.2 41.26 230 1.25 97.8
+
+C.3 Gates Computed from Level 1 
+
+Observation 1 compares the gates computed from level 1 with those computed from the FP8 table, on records of held-out text, and measures the accuracy that follows. 
+
+Gate values. Table 7 gives the correlation over positions. On DeepSeek it is 0.9996 –0.9998 in block 2 and 0.989 –
+
+0.990 in block 15; the level-1 gate energy is 2–5% above the FP8 one on average. On Qwen the correlation of the gate energy is 0.990 –0.995 . A scale on the key weights, fitted to align the level-1 gate of the open branch with the FP8 gate, is between 1.00 and 1.03 in all six DeepSeek cases, so there is no systematic bias to calibrate away. Table 7: Gates from level 1 against gates from FP8. DeepSeek: correlation over positions of the gate of the open branch, and ratio of its mean squared gate (level 1 over FP8). Qwen: correlation of the gate energy, and overlap of the top 28% of positions by gate energy under the two gates.                           
+
+> DeepSeek, block 2 DeepSeek, block 15 Qwen Text Correlation Ratio Correlation Ratio Correlation Overlap (%) English 0.9998 1.025 0.9893 1.017 0.9896 95.9 Chinese 0.9996 1.026 0.9899 1.029 0.9925 95.9 Code 0.9998 1.022 0.9901 1.049 0.9947 98.0
+
+Selected lookups. What matters for allocation is which lookups the two gates select. On DeepSeek, we rank the lookups of all 24 heads by the importance of Equation (5), once with the level-1 gate and once with the FP8 gate, on held-out English text, and compare the sets that receive a deeper read (Table 8). The lookups that the level-1 gate selects carry 99 .2% (block 15, top 10% ) to 99 .99% (block 2, top 41 .2% ) of the importance carried by those that the FP8 gate selects. The overlaps were computed offline on the English records of Table 7. 
+
+Accuracy with quantized gates or values. Table 9 gives the intervals behind Table 1. In the gates only configuration, the model serves level k of the ladder, so keys and gates come from it, and every lookup reads its value from the FP8 table; in the values only configuration it serves FP8, and every lookup reads its value from level k. With only the gates 14 Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory Table 8: Agreement of the lookups selected under the level-1 and FP8 gates (DeepSeek, held-out English text). Share (%) of the top lookups by importance, over all 24 heads, that both gates select.            
+
+> Top 10% Top 23 .5% Top 41 .2%
+> Block 2 98.1 98.8 99.3 Block 15 92.8 94.6 96.2
+
+quantized, PopQA stays at the level of FP8 at every depth (changes of +0 .08 to +0 .15 points, and no interval end below 
+
+−0.22 ). With only the values quantized, the loss is that of quantizing both: the difference between the two is −0.16 ,
+
++0 .08 , and −0.04 points at the three depths, and every interval contains zero. The predictions that we registered before the runs, 0 for the gates and −4.19 , −1.01 , and −0.27 for the values, are within 0.2 points of the measurements. Table 9: PopQA when only the gates, only the values, or both come from the quantized table (DeepSeek). Change from FP8 ( 52 .39 ) in points with the paired 95% interval over 14 ,267 questions; the last column is the prediction registered for the values-only runs.                          
+
+> Bits Gates only Values only Both Predicted (values) 1.06 +0 .08 [ −0.22 ,+0 .37] −4.03 [ −4.51 ,−3.55] −3.87 [ −4.35 ,−3.40] −4.19
+> 2.13 +0 .15 [ −0.14 ,+0 .43] −0.81 [ −1.17 ,−0.44] −0.88 [ −1.24 ,−0.52] −1.01
+> 3.19 +0 .13 [ −0.16 ,+0 .42] −0.19 [ −0.51 ,+0 .13] −0.15 [ −0.47 ,+0 .17] −0.27
+
+C.4 Access Frequency, Gate, and Importance Access counts. The counting corpus is skewed. For a 2-gram head, half of the accesses fall on about 52 ,000 rows (0.33% of the rows), and half of the rows are never accessed; for a 3-gram head, half of the accesses fall on 1.56 million rows, and for a 4-gram head on 3.98 million rows ( 25% of the rows). 
+
+Frequent rows carry little importance. Table 10 bins the lookups of the 2-gram heads by the access count of their row. On held-out English text, rows seen more than 1,000 times serve 32% of the lookups and carry 4.5% (block 2) and 
+
+1.9% (block 15) of the importance, whereas rows seen at most 100 times serve 42% of the lookups and carry 79% and 
+
+88% . On PopQA the gap is wider: rows never seen in the counting corpus serve 14% of the lookups and carry 23% 
+
+of the importance, and rows seen more than 1,000 times serve 32% and carry 3.8% ; if the lookups were weighted by their gate energy alone, those rows would carry 10 .9% , so the gate lowers their share from 32% to 11% and the smaller norms of the rows to 3.8% . Over all 24 heads of block 2, rows never seen serve 6.3% of the lookups and carry 12% of the importance, and rows seen more than 1,000 times serve 13% and carry 2.0% . Knowledge questions read rarer rows than English text does, and Chinese text reads them far more often: 43% of the lookups of 2-gram heads on Chinese text fall on rows that never occur in the (mostly English) counting corpus. Table 10: Lookups and importance by access count of the row (2-gram heads of DeepSeek; percentage of the lookups and of the importance of Equation (5) in each bin).                                                    
+
+> English, block 2 English, block 15 PopQA, block 2 Access count Lookups Importance Lookups Importance Lookups Importance never seen 4.2 15.0 4.2 19.5 14.2 22.7 13.1 9.3 3.2 12.1 9.1 12.3 2–10 11.6 25.1 11.5 29.5 13.7 22.9 11–100 23.0 30.0 23.0 26.6 15.9 24.3 101–1,000 26.1 16.1 26.1 10.4 15.2 13.9 1,001–10,000 18.5 3.6 18.5 1.7 26.2 3.4
+> >10 ,000 13.5 0.9 13.5 0.3 5.6 0.4
+
+Gate and access count. Table 11 gives the Spearman correlation between the gate and the access count of the row. It is negative in all 18 combinations of layer, order, and corpus, but its size varies from −0.63 to −0.02 : it is strongest for 
+
+2-gram heads and for code, and weak for 4-gram heads and for Chinese. Rows seen often also have smaller norms: the Spearman correlation of the row RMS with the access count is −0.45 for 2-gram heads, between −0.27 and −0.32 
+
+15 Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory for 3-gram heads, and about −0.1 for 4-gram heads, so both factors of the importance (gate and row norm) fall with frequency. Table 11: Spearman correlation between the gate and the access count of the row (DeepSeek; the gate is averaged over the four branches; mean over the eight heads of each n-gram order).                              
+
+> Text Block 2-gram 3-gram 4-gram English 2−0.51 −0.26 −0.11
+> 15 −0.40 −0.22 −0.09
+> Chinese 2−0.19 −0.04 −0.02
+> 15 −0.18 −0.04 −0.02
+> Code 2−0.63 −0.36 −0.16
+> 15 −0.53 −0.33 −0.15
+> PopQA questions 2−0.40 ––
+
+Concentration and context. Table 12 gives the share of the importance carried by the top 1, 5, 10 , and 20% of the lookups. The concentration is high in all three corpora and in both blocks, and highest in block 15 on PopQA, where the top 1% alone carry 54% . The last two columns concern the gate of a single row. The identity of a row explains much of the variance of its log gate energy (the share η2 among rows looked up at least five times is 0.67 –0.98 ), so an estimate of a row’s gate would help where it can be made. But it can be made only from the row’s own lookups: rows looked up at least 20 times account for only 9% of the lookups of held-out English text ( 14% on RACE, 68% on PopQA, where prompts repeat), and even these rows spread: the median ratio between the 90 th and 10 th percentile of the gate energy of a row’s lookups is 2.0–2.1 in block 2 and 4.3–8.8 in block 15 on the two English corpora. Table 12: Concentration of importance, and spread of the gate of a row (DeepSeek). Share (%) of the importance of Equation (5) carried by the top 1, 5, 10 , and 20% of the lookups, over all 24 heads. η2: share of the variance of the log gate energy explained by the row (rows looked up at least five times). p90/p10: median over rows looked up at least 20 times of the ratio between the 90 th and 10 th percentile of the gate energy of their lookups, with the quartiles in parentheses.                                               
+
+> Text Block Top 1% Top 5% Top 10% Top 20% η2p90/p10 Held-out English 211 32 48 69 0.92 2.1 (1.6–2.7) 15 25 53 69 84 0.67 8.8 (4.6–15.3) RACE passages 212 34 50 69 0.92 2.0 (1.7–2.4) 15 12 32 47 66 0.71 4.3 (3.1–6.4) PopQA prompts 210 30 45 65 0.98 1.2 (1.1–1.4) 15 54 74 84 92 0.95 2.0 (1.5–2.8)
+
+# D Residual Ladder 
+
+Quantizers. Each code quantizes one level at a time, and a level k > 1 encodes the residual that the earlier levels leave, with the same quantizer. TCQ [7] uses QTIP’s bitshift trellis [8] with a 16 -bit state, the computed 3INST codebook, tail biting, and one FP16 scale per row. PQ [18] divides a row by its FP16 norm, cuts it into de/8 sub-vectors of eight dimensions, and codes each with one of 256 codewords (an 8-bit index, one bit per element). INT rounds to nearest within groups of 32 elements that share an E4M3 scale (at one bit the values are ±s/ 2); the scale is chosen by a search over clipping values that minimizes the mean squared error, and the tensor-level coefficient is a power of two. We apply no rotation: the rows are already close to independent Gaussian vectors (Appendix C.2), and a rotation brought no gain. vLLM reads DeepSeek’s tables only as FP8 with E8M0 scales, so every level table of DeepSeek is re-encoded in this format, which is exact for INT and adds 0.063 –0.065 percentage points to the relative error of PQ and TCQ. 
+
+Error per level. Table 13 gives the relative error εk = ∥e − ˆe(k)∥22/∥e∥22 after each level. The first level of TCQ leaves 26 .9% of the energy on DeepSeek, the second 7.2% , the third 1.9% . Every level removes less error than the one before it, so the prices θk = ∆ bk/∆εk of Equation (8) grow with k (Table 14) and the sets of lookups that read each level are nested. With the TCQ ladder on DeepSeek, a lookup is worth refining from level 1 to level 2 when its importance exceeds 5.4μ, and from level 2 to level 3 when it exceeds 20 .1μ. The errors and the prices of the two models are close. 16 Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory Table 13: Relative error of the ladder after each level (%). Bits per level include the scale.                                   
+
+> Bits per level DeepSeek Qwen Code DeepSeek Qwen Level 1 Level 2 Level 3 Level 1 Level 2 Level 3 TCQ 1.0625 1.10 26.9 7.2 1.9 27.2 7.4 2.0 PQ 1.0625 1.10 32.2 10.6 3.7 32.1 10.4 3.5 INT 1.25 1.25 35.6 12.3 5.6 35.6 12.2 5.4
+
+Table 14: Price of a level , θk = ∆ bk/∆εk in bits per unit of relative error, from Table 13.                  
+
+> DeepSeek Qwen Code θ2θ3θ2θ3
+> TCQ 5.4 20.1 5.6 20.4 PQ 4.9 15.4 5.1 16.0 INT 5.4 18.6 5.4 18.2
+
+Ladder and direct codes. A ladder costs little against a code of the same depth. On DeepSeek, two levels of TCQ leave 7.2% at 2.13 bits, against 6.86% at 2.06 bits for a direct two-bit code, and three levels leave 1.9% at 3.19 bits, against 1.77% at 3.06 bits for a direct three-bit code; two levels of PQ leave 10 .6% against 9.72% , and two levels of INT 12 .3% at 2.50 bits against 10 .76% at 2.25 bits. For a Gaussian source the distortion–rate bound is 2−2R, which is 
+
+25% , 6.25% , and 1.56% at R = 1 , 2, and 3 bits per element before scales; the TCQ ladder is 0.3, 0.6, and 0.9 dB above it. Gaussian sources can in principle be refined without loss [26], so the gap of the ladder to the direct code comes from the quantizers and not from the nesting. 
+
+# E Read Budgets and Bit Accounting 
+
+Bits per lookup. We report logical bits per looked-up element: the bits that the chosen depths require, including the scale of every level read. A level of the TCQ and PQ ladders costs 1 + 16 /d e bits per element, one bit plus a 16-bit scale per row, which is 1.0625 on DeepSeek ( de = 256 ) and 1.10 on Qwen ( de = 160 ). A level of the INT ladder costs 
+
+1.25 bits, since it carries an E4M3 scale per 32 elements. The bytes physically transferred can exceed the logical rate (Appendix F). 
+
+Rate of a read plan. If every level costs b1 bits, a plan in which a fraction s2 of the lookups reads at least level 2 and a fraction s3 ≤ s2 reads level 3 costs b1(1 + s2 + s3) bits per lookup. The fractions of Section 5.1 give 
+
+1.0625 (1 + 0 .4118) = 1 .50 and 1.0625 (1 + 0 .60 + 0 .3765) = 2 .10 bits on DeepSeek, and 1.10 (1 + 0 .3636) = 1 .50 
+
+and 1.10 (1 + 0 .56 + 0 .349) = 2 .10 bits on Qwen. The INT ladder, with b1 = 1 .25 , reads 1.76 and 2.47 bits on DeepSeek and 1.70 and 2.39 on Qwen (Table 15). The 1.50 -bit setting fixes s2 at 0.4118 ; the 2.10 -bit setting leaves the split between the two deeper levels open, and we use one split, the same for all rules, codes, and tasks. Table 15: Read plans and the bits per lookup that the accuracy runs report for them (identical for the four rules in every setting).                                  
+
+> Fractions Bits per lookup Model Setting s2s3TCQ PQ INT DeepSeek 1.50 bits 0.4118 01.500 1.500 1.765 2.10 bits 0.60 0.3765 2.100 2.100 2.471
+> Qwen 1.50 bits 0.3636 01.500 1.500 1.705 2.10 bits 0.56 0.349 2.100 2.100 2.386
+
+Bits stored. The accuracy tables report the bits read per lookup. GateRQ keeps every level that a lookup may read: two levels ( 2.13 bits on DeepSeek) in the 1.50 -bit setting and three ( 3.19 bits) in the 2.10 -bit setting. A rule that depends only on the row, Prior and Frequency, needs the deeper levels only for the rows that it can select, which is less. The Random rule that we evaluate redraws its choice for every lookup, so it needs the full ladder like GateRQ. 17 Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory 
+
+# F Implementation and Evaluation 
+
+F.1 Native Implementation 
+
+We implement GateRQ for DeepSeek-V4.1-Flash as a patch of vLLM 0.30 [9] that replaces its Engram layer and is loaded when the module is imported, so the vLLM installation stays unmodified. Level 1 of every row (the 1-bit code and its FP16 scale, 34 bytes) stays in GPU memory, 3.04 GiB per GPU. Levels 2 and 3 are packed into fixed-size records of 36 or 68 bytes and kept in one pinned host copy per node, which the eight ranks share through /dev/shm :
+
+25 .8 GiB at 1.50 bits and 48 .6 GiB at 2.10 bits, against 188 .7 GiB for FP8 tables offloaded to host memory. Only DeepSeek has a native implementation; the accuracy results of both models come from an emulation of the same read rule inside vLLM (Appendix F.2). In a forward pass, the ranks look up the level-1 codes of their heads and all-gather them ( 36 bytes per lookup instead of the 512 bytes of a bf16 row), decode them, and compute the gates and the importance estimate of Equation (9). One Triton kernel computes the quantile thresholds of the batch for up to 16 ,384 lookups per layer, and larger batches use a sort. Each rank then copies the records of the selected lookups of its own heads from host memory into a fixed-size GPU buffer, and the ranks all-gather these buffers; fixed-size buffers with masks keep the path compatible with CUDA Graphs. The fused key and value projection is split without copying, so that deeper levels refine only the value (Algorithm 1), and every rank decodes the residuals of all heads, so no all-reduce is needed. The serving path is synchronous, and the bytes physically transferred depend on packing and alignment, so they can exceed the logical read rate. Table 16 times the table side of one layer on one RTX PRO 6000 of a TP8 node, with cold host reads. It includes the all-gathers, the decoding, the thresholds, and the host reads; the projections, the gates, and the output are the same in all rows and are not counted. A host read costs about 20 ns per record whatever its size between 32 and 128 bytes, and level-1 codes make the all-gather 12 .7 times cheaper than for bf16 rows. At 8,192 tokens, reading the records of each rank’s own heads takes 3.0 (1.50 bits) and 2.5 (2.10 bits) times less time than FP8 in host memory, and 2.5 and 2.0
+
+times less than FP8 in GPU memory (Figure 5). The exchange has a fixed latency, so below about 300 –500 tokens it is slower, and it is meant for prefill blocks. The throughput of Appendix H was measured with a simpler variant in which every rank reads the records of all heads, with identical outputs (rows all heads per rank ). In an 8,192 -token prefill block of about 0.64 s, the table side of the two layers takes 0.4% to 1.4% of the time in the FP8 and GateRQ rows, so these differences do not show in end-to-end throughput. Table 16: Table-side time of one layer (μs per rank, RTX PRO 6000, TP8, cold host reads). Uniform rows keep the listed levels in GPU memory. GateRQ rows: each rank reads the records of its own heads (the variant of Figure 5); all heads per rank : every rank reads the records of all heads (the variant of the throughput runs). Operator-level timings of one node; the all-gather is not overlapped with computation.                               
+
+> Tokens per forward pass Table configuration 1,024 4,096 8,192
+> FP8 in GPU memory 414 1,565 3,144 FP8 in host memory 498 1,918 3,854 Uniform, level 1 104 207 350 Uniform, levels 1–2 113 325 603 Uniform, levels 1–3 150 461 884 GateRQ, 1.50 bits 348 731 1,271 GateRQ, 2.10 bits 361 857 1,573 GateRQ, 1.50 bits, all heads per rank 446 1,287 2,866 GateRQ, 2.10 bits, all heads per rank 549 1,691 4,565
+
+F.2 Evaluation Protocol 
+
+We evaluate on the four benchmarks of Table 17, each in full, with the LM Evaluation Harness [27] 0.4.13 as a client of a vLLM service: the model’s chat template with thinking mode off, few-shot examples as earlier turns of the conversation, greedy decoding, and the harness’s default seeds. The four tasks run at the same time, each with 32 concurrent requests of up to 8 prompts, and the prompts are identical across configurations. DeepSeek runs on 8 RTX PRO 6000 GPUs (TP8) and Qwen on 4 (TP4), with a maximum length of 131 ,072 tokens, in eager mode. The accuracy runs serve the model whose tables hold level 1, and a hook acts in every Engram forward pass: it computes the gates from the served rows, gives every lookup a depth by the rule of the configuration and the quotas of the batch 18 Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory Table 17: Benchmarks and scoring. TriviaQA has 17 ,944 records of 9,960 questions; CMMLU has 67 subjects.                    
+
+> Benchmark Questions Score Shots PopQA [3] 14 ,267 a possible answer occurs in the first line of the reply 15 TriviaQA [14] 9,960 exact match 5NQ-open [15] 3,610 exact match 5CMMLU [16] 11 ,582 accuracy of the answer letter, by log-likelihood 5
+
+(Appendix E), reads the selected rows from tables that hold level k, and replaces the shared value of the positions by the projection of the mixed rows, while keys, and thus gates, stay those of level 1. At the first forward pass of each layer the hook checks its output against that of the model’s kernel, and it counts the rows read per level. The rules rank the lookups of a batch by ˆI of Equation (9) (Gate); by the same score with the gate replaced by the expected gate energy of the row (Prior), tabulated per head and per access-count bin on held-out text; by the access count of the row (Frequency); or by a random number (Random). Ties are broken at random, and Random draws afresh for every lookup. A forward pass holds at most 4,096 tokens on DeepSeek ( 3.9 thousand on average) and 7.7 thousand on average on Qwen, so the lookups of many requests share the quotas of one batch. Differences between configurations are paired by question. We report 95% percentile intervals of a paired bootstrap over questions, with 10 ,000 resamples ( 4,000 for the comparisons by popularity quartile); TriviaQA, whose 17 ,944 
+
+records come from 9,960 questions, is resampled by question. Each configuration was run once, so the intervals cover the sampling of questions, not the variation between runs. The fraction of the gap recovered in Section 5.3 is 
+
+(rule − level 1) /(levels 1–2 − level 1) in PopQA accuracy, with its interval from the same resamples. The offline proxy of Section 5.3 computes the importance-weighted error ¯ε = P It,j εℓt,j / P It,j of a read plan on the records of PopQA prompts and converts it into a predicted PopQA loss by a¯ε + b¯ε3. The coefficients of each model were fitted once to earlier end-to-end runs (uniform codes, mixtures of rows, halved sets of hash heads, and the zero table); the leave-one-out error on the quantized runs is 0.24 points on DeepSeek and 0.09 on Qwen. We wrote the predicted change of every configuration to a file before each queue of runs; Appendix G.3 compares the predictions with the measurements. 
+
+# G Extended Results 
+
+G.1 INT and PQ Ladders 
+
+Table 18 gives PopQA and the mean of the four tasks for the INT and PQ ladders; the TCQ ladder is in Table 2. In all 12 settings (two models, three codes, and two read budgets), GateRQ has the best PopQA accuracy and the best four-task average of the four rules. 
+
+G.2 Gate Against the Selection Rules PopQA. Table 19 gives the paired differences behind Table 2 and Figure 3, for all three codes. GateRQ beats Prior, Random, and Frequency in all 36 comparisons, by 0.39 to 2.86 points, and all intervals exclude zero. Reading the next level of the uniform ladder instead of using GateRQ is better by 0.34 –0.36 points in 3 of the 12 settings (Qwen with INT at both budgets and with PQ at 1.50 bits), at 0.70 –1.36 bits more per lookup, and not significantly different in the other nine. 
+
+Other tasks. Table 20 counts, for each task, how often GateRQ is significantly better than, not significantly different from, or significantly worse than a rule over the 12 settings. On TriviaQA and CMMLU, GateRQ is significantly better in 20 and 21 of the 36 comparisons; Frequency is significantly worse than GateRQ in all 12 settings on CMMLU. On NQ-open the rules are hard to separate: GateRQ is significantly better in one comparison. The one significant exception is TriviaQA with TCQ at 2.10 bits on DeepSeek, where Frequency is 0.35 points better. 
+
+G.3 Registered Predictions 
+
+Table 21 lists the predictions of the offline proxy for the change in PopQA accuracy, written to files before the runs, next to the measurements. 57 of the 66 predictions lie within 0.4 points of the measurement: 21 of 22 for TCQ, and 18 
+
+19 Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory Table 18: Results with the INT and PQ ladders. As Table 2, with PopQA and the mean of the four tasks. INT : every level an INT1 code (groups of 32 with E4M3 scales, 1.25 bits) at the same read shares as TCQ, so each lookup reads 
+
+1.18 × (DeepSeek) and 1.14 × (Qwen) the bits of TCQ. PQ : every level a PQ code ( 8-dimensional sub-vectors, 256 
+
+codewords, and a per-row norm; 1.06 bits on DeepSeek, 1.10 on Qwen) at the same read shares and bits per lookup as TCQ. The PopQA half-widths of the paired 95% intervals against FP8 are 0.32 –0.52 points for INT and 0.30 –0.51 for PQ.                                                                                                                                                                    
+
+> INT PQ Method Read PopQA Avg. Read PopQA Avg.
+> DeepSeek-V4.1-Flash
+> FP8 8.25 52.39 64.34 8.25 52.39 64.34 Uniform, level 1 1.25 46.79 62.35 1.06 46.81 62.17 Uniform, levels 1–2 2.50 50.56 63.58 2.13 51.39 63.88 Uniform, levels 1–3 3.75 51.85 64.12 3.19 51.87 64.36
+> INT: 1.76 , PQ: 1.50 bits per lookup
+> Gate (GateRQ) 1.76 50.52 63.64 1.50 51.35 63.87
+> Prior 1.76 49.33 63.19 1.50 50.25 63.54 Random 1.76 48.71 62.97 1.50 49.16 63.03 Frequency 1.76 48.34 62.88 1.50 48.49 62.95
+> INT: 2.47 , PQ: 2.10 bits per lookup
+> Gate (GateRQ) 2.47 51.61 63.99 2.10 52.07 64.29
+> Prior 2.47 50.50 63.67 2.10 51.05 63.89 Random 2.47 49.84 63.40 2.10 50.41 63.67 Frequency 2.47 49.44 63.21 2.10 49.72 63.37
+> Qwen3.8-Flash-Next
+> FP8 8.00 39.55 59.18 8.00 39.55 59.18 Uniform, level 1 1.25 35.80 57.69 1.10 36.59 58.00 Uniform, levels 1–2 2.50 38.28 58.87 2.20 38.63 58.90 Uniform, levels 1–3 3.75 39.26 59.11 3.30 39.31 59.06
+> INT: 1.70 , PQ: 1.50 bits per lookup
+> Gate (GateRQ) 1.70 37.91 58.71 1.50 38.29 58.76
+> Prior 1.70 37.32 58.39 1.50 37.90 58.63 Random 1.70 36.85 58.15 1.50 37.16 58.32 Frequency 1.70 36.48 57.87 1.50 36.73 58.06
+> INT: 2.39 , PQ: 2.10 bits per lookup
+> Gate (GateRQ) 2.39 38.89 59.06 2.10 39.28 59.07
+> Prior 2.39 38.30 58.76 2.10 38.56 58.85 Random 2.39 37.61 58.45 2.10 38.05 58.59 Frequency 2.39 37.02 58.21 2.10 37.47 58.31
+
+of 22 for each of INT and PQ, whose largest deviations are 0.66 and 0.67 points. The proxy predicts the order of the four rules correctly in all 12 settings. It errs conservatively on DeepSeek, where the measured change is on average 
+
+0.22 points less negative than predicted, and by 0.09 points the other way on Qwen; five of the nine deviations above 
+
+0.4 are for Frequency. 
+
+# H Serving Throughput 
+
+Table 22 reports native synchronous serving on 8 RTX PRO 6000 GPUs. Compared with FP8 tables in GPU memory, GateRQ reduces table memory from 23 .6 to 3.04 GiB per GPU, enlarges the KV-cache capacity by about 8.1×
+
+(as reported by vLLM), and improves long-context throughput by 11% –31% . Compared with FP8 host offloading, throughput is similar at 1.50 –2.10 bits per lookup while pinned host memory falls from 188 .7 to 25 .8–48 .6 GiB. The gain over GPU-resident FP8 is from the larger KV cache, not from reading fewer bits: level 1 alone and the two GateRQ budgets sit on the same throughput plateau as FP8 host offloading. These are workload-specific measurements from single runs. Native four-task accuracy remains to be cross-checked against the accuracy runs. 20 Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory Table 19: PopQA: GateRQ against the selection rules, and against reading the next level of the uniform ladder. 
+
+Paired differences in points with 95% intervals. Columns 3–5: GateRQ minus the rule (positive: GateRQ is better). Column 6: uniform levels 1–2 (at 1.50 bits) or 1–3 (at 2.10 bits) minus GateRQ (positive: the uniform read is better). Bold: the interval excludes 0. Last column: bits per lookup that GateRQ reads fewer than the uniform read.                                                                                                                               
+
+> Setting Bits Prior Random Frequency Uniform Saved DeepSeek TCQ 1.50 1.14 [0 .76 ,1.51] 1.62 [1 .22 ,2.03] 1.84 [1 .44 ,2.23] +0 .13 [ −0.18 ,+0 .44] 0.63 DeepSeek TCQ 2.10 0.70 [0 .34 ,1.07] 1.43 [1 .05 ,1.82] 1.87 [1 .46 ,2.29] +0 .06 [ −0.27 ,+0 .37] 1.09 DeepSeek INT 1.50 1.18 [0 .80 ,1.58] 1.81 [1 .37 ,2.24] 2.17 [1 .75 ,2.60] +0 .04 [ −0.29 ,+0 .37] 0.74 DeepSeek INT 2.10 1.11 [0 .72 ,1.50] 1.77 [1 .34 ,2.19] 2.17 [1 .75 ,2.60] +0 .24 [ −0.07 ,+0 .55] 1.28 DeepSeek PQ 1.50 1.10 [0 .71 ,1.49] 2.19 [1 .77 ,2.61] 2.86 [2 .44 ,3.29] +0 .04 [ −0.27 ,+0 .36] 0.63 DeepSeek PQ 2.10 1.02 [0 .65 ,1.39] 1.66 [1 .25 ,2.07] 2.35 [1 .93 ,2.77] −0.20 [ −0.51 ,+0 .11] 1.09 Qwen TCQ 1.50 0.44 [0 .13 ,0.76] 0.79 [0 .43 ,1.14] 1.55 [1 .17 ,1.91] +0 .16 [ −0.11 ,+0 .43] 0.70 Qwen TCQ 2.10 0.71 [0 .39 ,1.04] 1.06 [0 .70 ,1.40] 1.51 [1 .14 ,1.87] +0 .18 [ −0.10 ,+0 .44] 1.20 Qwen INT 1.50 0.59 [0 .26 ,0.91] 1.06 [0 .67 ,1.45] 1.43 [1 .02 ,1.84] +0 .36 [+0 .09 ,+0 .64] 0.80 Qwen INT 2.10 0.60 [0 .26 ,0.93] 1.28 [0 .90 ,1.68] 1.88 [1 .47 ,2.28] +0 .36 [+0 .10 ,+0 .64] 1.36 Qwen PQ 1.50 0.39 [0 .06 ,0.72] 1.14 [0 .75 ,1.51] 1.56 [1 .17 ,1.96] +0 .34 [+0 .06 ,+0 .62] 0.70 Qwen PQ 2.10 0.72 [0 .39 ,1.06] 1.23 [0 .86 ,1.59] 1.81 [1 .43 ,2.19] +0 .04 [ −0.23 ,+0 .29] 1.20
+
+Table 20: GateRQ against each rule on the four tasks. Over the 12 settings: number of comparisons in which GateRQ is significantly better / not significantly different / significantly worse (paired 95% intervals). Last column: mean advantage of GateRQ over the 36 comparisons, in points. 
+
+Task Prior Random Frequency All Mean PopQA 12/0/0 12/0/0 12/0/0 36/0/0 +1 .38 
+
+TriviaQA 5/7/0 8/4/0 7/4/1 20/15/1 +0 .33 
+
+CMMLU 1/11/0 8/4/0 12/0/0 21/15/0 +0 .26 
+
+NQ-open 0/12/0 0/12/0 1/11/0 1/35/0 +0 .16 
+
+Both workloads use 32 K input tokens; they differ in the output length ( 1K and 2K tokens) and in the number of concurrent requests ( 64 and 128 ). Every cell is one vllm bench serve run with its own random prompts, so the prefix cache is not hit. The rows ran on three nodes of the same type; the 1.50 -bit setting, which ran on all three, differs by at most 0.4% and 0.8% between them at the two workloads. 21 Let the Gate Decide: Per-Lookup Precision for Quantized Conditional Memory Table 21: Predicted and measured PopQA change from FP8 (points). For each code, the prediction of the offline proxy, registered before the run, and the measurement. 
+
+TCQ INT PQ Configuration Predicted Measured Predicted Measured Predicted Measured 
+
+DeepSeek-V4.1-Flash 
+
+Uniform, level 1 −4.19 −3.87 −5.99 −5.59 −5.25 −5.58 
+
+Uniform, levels 1–2 −1.01 −0.88 −1.76 −1.83 −1.50 −1.00 
+
+Uniform, levels 1–3 −0.27 −0.15 −0.79 −0.54 −0.51 −0.51 
+
+1.50 bits per lookup 
+
+Gate −1.20 −1.02 −1.99 −1.87 −1.71 −1.04 
+
+Prior −1.87 −2.15 −2.85 −3.06 −2.48 −2.14 
+
+Random −2.77 −2.64 −4.03 −3.68 −3.53 −3.23 
+
+Frequency −3.27 −2.85 −4.71 −4.04 −4.13 −3.90 
+
+2.10 bits per lookup 
+
+Gate −0.40 −0.20 −0.95 −0.78 −0.66 −0.32 
+
+Prior −0.99 −0.90 −1.68 −1.89 −1.36 −1.34 
+
+Random −1.87 −1.63 −2.82 −2.54 −2.42 −1.98 
+
+Frequency −2.43 −2.07 −3.56 −2.95 −3.09 −2.66 
+
+Qwen3.8-Flash-Next 
+
+Uniform, level 1 −2.47 −2.50 −3.43 −3.76 −2.99 −2.96 
+
+Uniform, levels 1–2 −0.62 −0.67 −1.05 −1.28 −0.88 −0.92 
+
+Uniform, levels 1–3 −0.17 0.00 −0.44 −0.29 −0.29 −0.24 
+
+1.50 bits per lookup 
+
+Gate −0.79 −0.83 −1.32 −1.64 −1.11 −1.26 
+
+Prior −1.33 −1.27 −2.01 −2.23 −1.69 −1.65 
+
+Random −1.77 −1.61 −2.54 −2.70 −2.18 −2.40 
+
+Frequency −2.00 −2.38 −2.81 −3.07 −2.44 −2.82 
+
+2.10 bits per lookup 
+
+Gate −0.28 −0.18 −0.65 −0.66 −0.44 −0.27 
+
+Prior −0.82 −0.89 −1.35 −1.25 −1.07 −1.00 
+
+Random −1.24 −1.23 −1.84 −1.94 −1.54 −1.51 
+
+Frequency −1.36 −1.68 −1.99 −2.54 −1.69 −2.08 
+
+Table 22: Native DeepSeek serving on RTX PRO 6000 (TP8). GPU: table GiB per GPU; Host: pinned GiB per node; throughput: output tok/s at 64 concurrent requests with 1K output tokens and at 128 concurrent requests with 2K output tokens ( 32 K input tokens in both). Uniform rows keep the listed levels in GPU memory. 
+
+Throughput Table configuration GPU Host 64 requests 128 requests FP8 in GPU memory 23.6 0 228.3 349.6 FP8 host offloading 0 188.7 253.3 460.1 Uniform, level 1 3.04 0 256.0 464.5 Uniform, levels 1–2 6.1 0 256.8 464.0 Uniform, levels 1–3 9.1 0 256.4 465.0 GateRQ, 1.50-bit setting 3.04 25.8 254.0 458.6 GateRQ, 2.10-bit setting 3.04 48.6 254.6 458.1 
+
+22
