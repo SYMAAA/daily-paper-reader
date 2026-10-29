@@ -1,6 +1,9 @@
 * <a class="dpr-sidebar-root-link" href="#/">首页</a>
 * <a class="dpr-sidebar-root-link dpr-sidebar-noactive-link" href="javascript:void(0)" data-dpr-hash="#/tutorial/README">使用教程</a>
 * Daily Papers
+  * 2026-10-29 <!--dpr-date:20261029-->
+    * 精读区
+      * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202610/29/2610.36327v1-training-free-inference-acceleration-for-video-large-language-models-methods-trade-offs-and-evaluation" data-sidebar-item="{&quot;title&quot;: &quot;Training-Free Inference Acceleration for Video Large Language Models: Methods, Trade-offs, and Evaluation&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2610.36327v1-training-free-inference-acceleration-for-video-large-language-models-methods-trade-offs-and-evaluation&quot;, &quot;score&quot;: &quot;8.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;el&quot;}], &quot;evidence&quot;: &quot;综述视频大模型免训练推理加速，涵盖训练后量化与视觉token压缩&quot;}">Training-Free Inference Acceleration for Video Large Language Models: Methods, Trade-offs, and Evaluation</a>
   * 2026-10-28 <!--dpr-date:20261028-->
     * 精读区
       * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202610/28/2610.35955v1-rescom-activation-residual-compensation-for-large-language-model-quantization" data-sidebar-item="{&quot;title&quot;: &quot;ResCom: Activation Residual Compensation for Large Language Model Quantization&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2610.35955v1-rescom-activation-residual-compensation-for-large-language-model-quantization&quot;, &quot;score&quot;: &quot;8.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;el&quot;}], &quot;evidence&quot;: &quot;用低秩修正重建 LLM 层中的激活量化残差误差&quot;}">ResCom: Activation Residual Compensation for Large Language Model Quantization</a>

@@ -1,0 +1,3146 @@
+Training-Free Inference Acceleration for Video Large Language Models:
+Methods, Trade-offs, and Evaluation
+Yuqi Li1,2,*, Chuanyue Yan3,*, Neil Rodrigues1, Xianglong Wang1
+Xiaoqin Feng1, Junming Liu4, Xi Xiao5, Zhongwei Cheng1
+Wei Li1, Lin Chen1, Yingli Tian2,†
+1Wyze Labs, Inc. 2The City University of New York
+3Wuhan Institute of Technology 4University of Melbourne
+5University of Alabama at Birmingham
+*Equal contribution.
+†Corresponding author.
+Abstract
+Video Large Language Models (VLMs) have
+demonstrated strong capabilities in video un-
+derstanding and reasoning, but processing long
+visual sequences incurs substantial computa-
+tional, latency, and memory overhead. This
+survey examines training-free inference accel-
+eration, focusing on reducing inference costs
+while preserving task-relevant spatiotempo-
+ral evidence. We organize existing methods
+by their intervention stages in the inference
+pipeline, covering input, visual encoding, pro-
+jector, prefill, and decoding. Post-training quan-
+tization (PTQ) is discussed separately as a
+cross-stage extension with varying calibration
+requirements. We analyze how intervention
+position affects evidence preservation and com-
+putational savings, and why local efficiency im-
+provements may not translate into end-to-end
+acceleration. We complement this analysis with
+quantitative evidence from prior studies and our
+own experiments under a shared evaluation set-
+ting to assess accuracy–latency trade-offs.
+1
+Introduction
+VLMs extend language-model reasoning to video
+by integrating encoded visual representations with
+textual queries, as illustrated in Fig. 1. Processing
+more frames or higher-resolution inputs increases
+visual encoding and multimodal context process-
+ing costs (Maaz et al., 2024; Zhang et al., 2025a;
+Wang et al., 2025c; Bai et al., 2025b; Yuan et al.,
+2025b; Li et al., 2025b; Zhang et al., 2026c). How-
+ever, video redundancy is non-uniform: brief ac-
+tions may provide critical evidence, while visually
+similar frames may contain different task-relevant
+information (Ye et al., 2025a; Wang et al., 2025d;
+Tang et al., 2025; Zhang et al., 2025d). Efficient
+VLM inference must therefore reduce redundant
+computation while preserving the spatiotemporal
+evidence required for reliable video understanding
+(Wang et al., 2026a; Zhang et al., 2026c).
+Vision Encoder
+Projector
+Tokenizer
+Embedding Layer
+Prefill
+Decoding Step
+t₀ → t₁ → t₂ → ⋯→ tN
+Large Language Model
+She enters the apartment 
+and looks around.
+C
+What does the 
+woman do after 
+arriving home?
+visual embeddings
+text embeddings
+Figure 1: General architecture and inference pipeline
+of a VLM, comprising a vision encoder, a projector
+connecting visual and language representations, and an
+LLM with prefill and decoding stages.
+Training-free acceleration seeks to reduce VLM
+inference costs without training dedicated accel-
+eration modules. These methods operate across
+the inference pipeline: input-stage methods reduce
+frames or spatial resolution (Zhu et al., 2026; Shi
+et al., 2026); encoding-stage methods merge or
+reuse visual features (Wang et al., 2026d; Wu et al.,
+2026b); projector- and prefill-stage methods re-
+duce visual-token or KV-cache overhead (Ma et al.,
+2026c; Li et al., 2026a); and decoding-stage meth-
+ods reduce KV-cache access or generation over-
+head (Zeng et al., 2026; Kong et al., 2026). In-
+tervention position affects both computational sav-
+ings and available information: earlier stages can
+avoid more downstream computation, whereas later
+1
+arXiv:2610.36327v1  [cs.CV]  26 Oct 2026
+
+
+stages exploit richer representations. However, lo-
+cal savings do not necessarily translate into end-to-
+end acceleration.
+Existing surveys have examined multimodal ef-
+ficiency from complementary perspectives. Some
+provide broad reviews of efficient MLLM/LVLM
+architectures and inference strategies (Jin et al.,
+2025; Pathak and Han, 2026; Zhang et al., 2026c),
+while others focus on multimodal token compres-
+sion or organize compression along the inference
+lifecycle (Shao et al., 2025; Yao et al., 2026; Wu
+et al., 2026a).
+Recent work has also surveyed
+training-free long-video understanding (Liu et al.,
+2025a). However, the combined effects of interven-
+tion position on spatiotemporal evidence preserva-
+tion and realized inference efficiency remain less
+explored in training-free VLM acceleration.
+To address these gaps, we examine where
+training-free acceleration intervenes, how its bene-
+fits and limitations vary across stages, and whether
+local savings translate into end-to-end gains. Our
+contributions are threefold: (1) we present a stage-
+wise taxonomy of training-free VLM acceleration,
+covering input, visual encoding, projector, pre-
+fill, and decoding, with PTQ discussed separately
+as a cross-stage extension; (2) we analyze how
+intervention position affects the preservation of
+task-relevant spatiotemporal evidence and poten-
+tial computational savings; and (3) we synthesize
+evidence from prior studies and conduct experi-
+ments under a shared backbone and input protocol,
+introducing Quality–Latency Balance (QLB) as a
+baseline-normalized indicator of accuracy–latency
+performance.
+2
+Preliminaries
+2.1
+VLMs for Video Understanding
+Video understanding requires reasoning over tem-
+porally distributed evidence, including object
+states, actions, event order, and long-range depen-
+dencies. Unlike static images, relevant evidence
+may span multiple frames and depend on their tem-
+poral relationships (Meng et al., 2026; An et al.,
+2026). VLMs encode such spatiotemporal informa-
+tion for language-model reasoning (Nguyen et al.,
+2024).
+As illustrated in Fig. 1, a typical VLM consists
+of a vision encoder, a projector, and a large lan-
+guage model (LLM). Given a video V and query T ,
+input processing produces V′ = S(V), followed by
+Xv = Eϕ(V′) and Hv = Pθ(Xv) ∈RNv×d. Let
+Ht denote the embedded query tokens. In this sim-
+plified pipeline, the LLM receives C = [Hv; Ht].
+During prefill, the LLM processes this context, con-
+structs the KV cache, and produces the first out-
+put token. Autoregressive decoding then accesses
+and updates the cache to generate subsequent to-
+kens. Importantly, token compression after visual
+encoding can reduce LLM computation but cannot
+recover the encoding cost already incurred.
+2.2
+Why Training-Free
+Rapidly evolving VLM architectures make it costly
+to retrain and maintain backbone-specific accel-
+eration modules (Wang et al., 2024b; Bai et al.,
+2025b,a). Training-free methods avoid such re-
+training and can be more readily applied to ex-
+isting models (Yang et al., 2025a; Zhang et al.,
+2025b). In this survey, training-free acceleration1
+refers to methods that require no additional train-
+ing or fine-tuning to obtain their acceleration ca-
+pability. Frozen auxiliary models are permitted,
+but their runtime overhead must be accounted for.
+Methods requiring acceleration-specific training
+are excluded from our core scope.
+3
+Taxonomy
+As shown in Fig. 2, we organize training-free VLM
+acceleration methods by their intervention stages in
+the inference pipeline: Input (Sec. 3.1), Encoding
+(Sec. 3.2), Projector (Sec. 3.3), Prefill (Sec. 3.4),
+and Decoding (Sec. 3.5). This stage-wise organi-
+zation highlights differences in computational sav-
+ings and information availability. We additionally
+review PTQ (Sec. 3.6) as a cross-stage extension,
+distinguishing its calibration-dependent techniques
+from the core training-free methods.
+3.1
+Input Stage
+Input-stage methods reduce or adapt visual content
+before encoding, potentially saving both visual en-
+coding and downstream computation. They mainly
+operate through keyframe selection (Sec. 3.1.1) and
+spatial adaptation (Sec. 3.1.2).
+3.1.1
+Keyframe Selection
+Reducing the frame budget lowers visual process-
+ing costs but also limits downstream reasoning to
+the retained temporal evidence. Existing methods
+differ in whether selection is guided by the query.
+1See Appendix B for a detailed discussion of its scope and
+boundaries.
+2
+
+
+Training-Free Inference Acceleration for VLMs
+PTQ
+Projector
+Stage
+Input
+Stage
+Keyframe Selection
+Encoding
+Stage
+Spatial Adaptation
+Efficient Encoding
+Token Selection
+Token Aggregation
+Prefill
+Stage
+Token Selection
+Token Aggregation
+KV Cache Selection
+KV Cache Aggregation
+Decoding
+Stage
+Speculative Decoding
+KV Cache Retrieval
+KV Cache Selection
+Weight-Only 
+Quantization
+Weight-Activation 
+Quantization
+KV Cache Quantization
+Query-aware: AKS (Tang et al., 2025); BOLT (Liu et al., 2025b); MDP
+3 (Sun et al., 2025c); VideoTree (Wang
+et al., 2025d); Q-Frame-QFS (Zhang et al., 2025c); F2C (Sun et al., 2025b); FOCUS (Zhu et al., 2026)
+Query-agnostic: KTV-I (Song et al., 2026); MaxInfo (Li et al., 2026b);MEDR (Pu et al., 2026);
+Q-Frame-MRA (Zhang et al., 2025c); F2C (Sun et al., 2025b)
+EarlyTom-I (Wang et al., 2026a); ST-Merge (Chen et al., 2026a); STC-Cacher (Wang et al., 2026d)
+Attention-aware: VisionZip (Yang et al., 2025b); LLaVA-PruMerge (Shang et al., 2025); EarlyTom-II (Wang
+et al., 2026a); KTV-II (Song et al., 2026); StreamingTOM-CTR (Chen et al., 2026b); Unified-Outer (Du et al.,
+2026); FlashVID-Outer (Fan et al., 2026)
+Attention-agnostic: ReTaKe-DPSelect (Wang et al., 2024c); VidCom
+2 (Liu et al., 2025c); DivPrune (Alvar
+et al., 2025); V-CAST (Lin et al., 2026); MMG-Vid (Ma et al., 2026b); G-Prune (Jiang et al., 2025); STC-
+Pruner (Wang et al., 2026d); FastVID (Shen et al., 2026a)
+AIM-I (Zhong et al., 2025); DyCoke-TTM (Tao et al., 2025a); PruneVid-I (Huang et al., 2025b); Vi-
+sionZip (Yang et al., 2025b); LLaVA-PruMerge (Shang et al., 2025); HoliTom-Outer (Shao et al., 2026);
+Unified-Outer (Du et al., 2026); FlashVID-Outer (Fan et al., 2026); SlowFast-LLaVA (Xu et al., 2024)
+Attention-Based: FastV (Chen et al., 2024); PyramidDrop (Xing et al., 2024); G-Search (Zhao et al., 2025);
+AIM-II (Zhong et al., 2025); AdaTP (Sun et al., 2025a); PruneVid-II (Huang et al., 2025b); PriorTR (Chen
+et al., 2026d); FrameFusion (Fu et al., 2025b); SparseVLM (Zhang et al., 2024); ZipVL-Attention (He et al.,
+2024)
+Similarity-Based: DART (Wen et al., 2025); SAINT (Jeddi et al., 2025)
+SparseVLM (Zhang et al., 2024); STTM (Hyun et al., 2025); FrameFusion (Fu et al., 2025b); PACT (Dhouib
+et al., 2025); Unified-Inner (Du et al., 2026); HoliTom-Inner (Shao et al., 2026)
+ReTaKe-PivotKV (Wang et al., 2024c); AirCache (Huang et al., 2025a); ZipVL-Cache Construction (He
+et al., 2024); InfiniPot-V (Kim et al., 2026); StreamMem (Yang et al., 2025c); LOOK-M (Wan et al., 2024);
+MEDA (Wan et al., 2025); LiveVLM-VSB (Ning et al., 2025)
+LOOK-M (Wan et al., 2024); MEDA (Wan et al., 2025); StreamMem (Yang et al., 2025c)
+SpecVLM (Ji et al., 2025); Sparse-to-Dense (Zhang et al., 2025e); ParallelVLM (Kong et al., 2026); LVSpec (Ji
+et al., 2026)
+METok (Wang et al., 2025a); DyCoke-II (Tao et al., 2025a); VisCache (Wang et al., 2026c)
+SparseVILA (Khaki et al., 2025); ReKV (Di et al., 2025); LiveVLM-PaR (Ning et al., 2025); StreamingTOM-
+OQM (Chen et al., 2026b)
+VLMQ (Xue et al., 2025); MBQ (Li et al., 2025a); VLM-PTQ (Deng and Huang, 2026); QIG (Xiang et al.,
+2026)
+Q-VLM (Wang et al., 2024a); MBQ (Li et al., 2025a); QIG (Xiang et al., 2026); MASQuant (Hu et al., 2026b)
+CalibQuant (Han et al., 2025); VidKV (Tao et al., 2025b); Dynamic KV Cache Quantization (Fan and Chen,
+2026)
+Figure 2: Stage-wise taxonomy of training-free VLM inference acceleration with representative methods. PTQ is
+included as a related cross-stage extension.
+Query-Agnostic. Uniform sampling provides a
+fixed-frame baseline (Lin et al., 2024a; Li et al.,
+2024b,c).
+The first stage of KTV uses feature
+clustering (Song et al., 2026), MaxInfo employs
+maximum-volume selection (Li et al., 2026b), and
+MEDR integrates visual, motion, and text-derived
+event cues (Pu et al., 2026). These methods sup-
+port cross-query reuse but may overlook question-
+specific evidence.
+Query-Aware. To better capture task-relevant evi-
+dence, BOLT exploits query similarity (Liu et al.,
+2025b), AKS balances relevance and temporal cov-
+erage (Tang et al., 2025), and MDP3 considers
+diversity and temporal order (Sun et al., 2025c).
+The QFS component of Q-Frame employs query-
+guided sampling (Zhang et al., 2025c), while QCA
+combines relevance with content diversity (Peng
+et al., 2026). VideoTree uses hierarchical retrieval
+(Wang et al., 2025d), whereas FOCUS adaptively
+explores promising temporal regions (Zhu et al.,
+2026).
+Greater query relevance may therefore
+come with additional scoring or search costs, poten-
+tially offsetting the savings from processing fewer
+frames.
+3.1.2
+Spatial Adaptation
+Beyond temporal selection, resolution adjustment
+and region-focused processing offer another way to
+reduce visual computation. Free VLM employs
+prompt-guided cropping (Han et al., 2024), Q-
+Frame’s MRA component allocates resolution by
+query relevance (Zhang et al., 2025c), and F2C bal-
+ances resolution and clip length (Sun et al., 2025b).
+LENS further combines spatial zoom-in with tem-
+3
+
+
+poral zoom-out (Zhang et al., 2026a). Reducing
+spatial computation, however, may obscure fine-
+grained evidence or remove context needed for ac-
+curate reasoning.
+3.2
+Encoding Stage
+Encoding-stage methods reduce visual computa-
+tion by merging or reusing intermediate features.
+The first stage of EarlyTom merges temporally re-
+dundant features in shallow encoder layers (Wang
+et al., 2026a), ST-Merge performs spatiotempo-
+ral token merging (Chen et al., 2026a), and STC-
+Cacher reuses stable features while selectively
+updating dynamic content (Wang et al., 2026d).
+Early merging reduces subsequent encoding costs
+but may obscure subtle motion, whereas caching
+avoids repeated computation at the risk of stale
+features and additional matching overhead.
+3.3
+Projector Stage
+Projector-stage methods compress visual tokens af-
+ter encoding but before LLM processing, reducing
+prefill costs without saving the encoding compu-
+tation already incurred. They mainly employ to-
+ken selection (Sec. 3.3.1) and token aggregation
+(Sec. 3.3.2).
+3.3.1
+Token Selection
+Selecting fewer visual tokens reduces LLM context
+length but limits the evidence available for reason-
+ing. Existing approaches differ in whether they
+use attention or feature-derived signals to estimate
+token importance.
+Attention-Aware. The second stage of EarlyTom
+uses encoder attention for spatial selection (Wang
+et al., 2026a), while KTV’s second stage com-
+bines [CLS] attention with intra-frame similarity
+(Song et al., 2026). VisionZip retains dominant
+and contextual tokens (Yang et al., 2025b), whereas
+LLaVA-PruMerge combines attention-based selec-
+tion with feature merging (Shang et al., 2025). The
+CTR component of StreamingTOM selects tokens
+using temporal changes and visual saliency (Chen
+et al., 2026b). Such attention cues, however, may
+not align with query-specific evidence.
+Attention-Agnostic. ReTaKe-DPSelect exploits
+temporal differences (Wang et al., 2024c), while
+STC-Pruner evaluates spatiotemporal token nov-
+elty (Wang et al., 2026d). VidCom2 uses frame and
+token-level uniqueness (Liu et al., 2025c), whereas
+V-CAST allocates temporal budgets based on cur-
+vature and preserves representative spatial tokens
+(Lin et al., 2026). These feature-based criteria can
+improve coverage but may retain content unrelated
+to the query.
+3.3.2
+Token Aggregation
+To retain more information from redundant tokens,
+aggregation merges similar representations rather
+than discarding them. AIM performs similarity-
+based merging (Zhong et al., 2025), PruneVid com-
+bines temporally static and spatially similar tokens
+(Huang et al., 2025b), and HoliTom employs global
+temporal segmentation followed by spatiotempo-
+ral merging (Shao et al., 2026). While merging
+can preserve information lost by hard selection, it
+may blur fine-grained distinctions and introduce
+additional processing overhead.
+3.4
+Prefill Stage
+Prefill-stage methods exploit intermediate LLM
+representations to reduce subsequent computation
+or KV cache storage. We categorize them into
+token selection (Sec. 3.4.1), token aggregation
+(Sec. 3.4.2), KV cache selection (Sec. 3.4.3), and
+KV cache aggregation (Sec. 3.4.4).
+3.4.1
+Token Selection
+Pruning visual tokens within the LLM reduces com-
+putation in subsequent layers, although earlier lay-
+ers must still process the original sequence. Meth-
+ods mainly use attention-based or similarity-based
+signals.
+Attention-Based.
+FastV and the second stage
+of PruneVid remove low-attention tokens (Chen
+et al., 2024; Huang et al., 2025b), while AIM’s
+second stage propagates token importance through
+attention (Zhong et al., 2025). AdaTP corrects
+global and local attention biases (Sun et al., 2025a),
+whereas PriorTR separates instruction relevance
+from model-induced attention priors (Chen et al.,
+2026d). Attention offers task-sensitive guidance,
+but biased scores may discard critical visual evi-
+dence.
+Similarity-Based. DART removes tokens redun-
+dant with selected pivots (Wen et al., 2025), while
+SAINT applies similarity-aware pruning (Jeddi
+et al., 2025). Such criteria reduce reliance on atten-
+tion scores, although similar features may encode
+distinct events.
+3.4.2
+Token Aggregation
+Rather than discarding visual tokens, aggregation
+merges redundant representations to retain part of
+their information. STTM performs multi-granular
+4
+
+
+spatiotemporal merging (Hyun et al., 2025), while
+HoliTom’s inner stage combines attention and sim-
+ilarity (Shao et al., 2026). Unified introduces text-
+aware merging within the LLM (Du et al., 2026),
+whereas FrameFusion and PACT combine merging
+with pruning (Fu et al., 2025b; Dhouib et al., 2025).
+Merging can preserve contextual information, but
+may blur subtle event distinctions and incur addi-
+tional processing overhead.
+3.4.3
+KV Cache Selection
+Beyond token reduction, KV cache selection limits
+the states retained for subsequent attention. Re-
+TaKe’s PivotKV retains representative frame states
+during chunked prefill (Wang et al., 2024c), while
+InfiniPot-V and StreamMem maintain bounded his-
+torical memories through selective retention (Kim
+et al., 2026; Yang et al., 2025c). This reduces cache
+pressure but risks losing historical evidence needed
+by later queries.
+3.4.4
+KV Cache Aggregation
+To mitigate information loss from KV eviction,
+LOOK-M merges selected cache states (Wan et al.,
+2024), while MEDA combines KV merging with
+layer-adaptive cache allocation (Wan et al., 2025).
+StreamMem further maintains frame-level sum-
+maries alongside salient states (Yang et al., 2025c).
+These compact representations reduce persistent
+memory costs, but cannot recover the prefill com-
+putation already incurred and may introduce addi-
+tional merging overhead.
+3.5
+Decoding Stage
+Autoregressive decoding repeatedly accesses accu-
+mulated KV states, making time per output token
+(TPOT) sensitive to long visual contexts. Training-
+free methods mainly employ speculative decoding
+(Sec. 3.5.1), KV cache selection (Sec. 3.5.2), and
+KV cache retrieval (Sec. 3.5.3).
+3.5.1
+Speculative Decoding
+Speculative decoding (SD)2 accelerates genera-
+tion through draft-and-verify execution (Leviathan
+et al., 2023; Chen et al., 2023). SpecVLM reduces
+drafting costs through verifier-guided visual prun-
+ing (Ji et al., 2025), while Sparse-to-Dense (StD)
+combines sparse drafting with dense verification
+(Zhang et al., 2025e). ParallelVLM overlaps draft-
+ing and verification (Kong et al., 2026), whereas
+2Appendix D provides a detailed workload-aware analysis
+of speculative decoding.
+LVSpec relaxes verification to increase token accep-
+tance (Ji et al., 2026). Speedup depends on drafting
+cost, acceptance, and verification overhead, while
+relaxed verification may sacrifice exact output fi-
+delity.
+3.5.2
+KV Cache Selection
+Reducing the visual KV states accessed during gen-
+eration can lower repeated attention costs (Tu et al.,
+2025). METok removes redundant visual KV states
+during decoding (Wang et al., 2025a), while the
+second stage of DyCoke dynamically updates the
+active cache according to generation-time attention
+(Tao et al., 2025a). Such selection reduces cache
+access but may discard evidence needed by subse-
+quent tokens.
+3.5.3
+KV Cache Retrieval
+Rather than permanently discarding historical
+states, retrieval preserves broader video context
+for selective access. SparseVILA uses query-aware
+visual KV access (Khaki et al., 2025), while ReKV
+retrieves relevant states from stored video history
+(Di et al., 2025). LiveVLM’s PaR enables page-
+level retrieval (Ning et al., 2025), whereas Stream-
+ingTOM’s OQM retrieves and dequantizes selected
+KV groups (Chen et al., 2026b). Such access pre-
+serves long-range evidence but adds retrieval over-
+head, with latency benefits depending on when
+states are loaded.
+3.6
+Post-Training Quantization
+Post-training quantization (PTQ) reduces the pre-
+cision of weights, activations, or KV states to
+lower memory demands and potentially acceler-
+ate inference. As a cross-stage extension, PTQ
+may involve calibration or optimization beyond the
+core training-free scope. We categorize methods
+into weight-only quantization (Sec. 3.6.1), weight-
+activation quantization (Sec. 3.6.2), and KV cache
+quantization (Sec. 3.6.3).
+3.6.1
+Weight-Only Quantization
+Quantizing weights reduces model storage and
+memory traffic while retaining higher-precision ac-
+tivations. VLMQ incorporates token importance
+into Hessian-based quantization (Xue et al., 2025),
+while VLM-PTQ introduces modality-aware chan-
+nel importance into weight compensation (Deng
+and Huang, 2026). MBQ balances vision and lan-
+guage sensitivities during calibration (Li et al.,
+2025a), whereas QIG estimates fine-grained token
+sensitivity using integrated gradients (Xiang et al.,
+5
+
+
+Method
+Stage
+Video-MME
+EgoSchema
+LongVideoBench
+MVBench
+QLBTTFT ↑
+Acc.↑
+TTFT↓
+Acc.↑
+TTFT↓
+Acc.↑
+TTFT↓
+Acc.↑
+TTFT↓
+Full input
+–
+58.48
+294
+64.20
+298
+55.20
+301
+58.39
+294
+100.0
+Curv. merge
+Proj.
+57.89
+236
+64.60
+239
+54.76
+240
+58.03
+236
+110.6
+PriorTR
+Pref.
+57.70
+294
+63.00
+296
+54.27
+291
+57.89
+255
+100.7
+EarlyTom
+Enc.+Proj.
+57.85
+160
+62.80
+163
+54.00
+160
+56.08
+161
+126.6
+FrameFusion
+Pref.
+57.85
+342
+63.40
+386
+54.93
+337
+58.39
+275
+93.3
+VidCom2
+Proj.
+57.48
+169
+64.20
+173
+53.84
+169
+56.29
+169
+124.8
+FastVID
+Proj.
+56.78
+187
+64.60
+183
+53.20
+189
+56.50
+169
+121.2
+HoliTom
+Proj.+Pref.
+56.70
+214
+64.00
+219
+52.68
+220
+57.47
+234
+111.8
+AIM
+Proj.+Pref.
+56.78
+258
+63.20
+272
+52.32
+271
+56.24
+255
+102.4
+Table 1: Quality–latency comparison. Stage denotes the compression location: Enc. (Encoding), Proj. (Projector),
+and Pref. (Prefill). Accuracy is in % and TTFT in ms. Higher accuracy and QLB are better; lower TTFT is better.
+2026). Lower-bit weights reduce memory pressure,
+but realized speedups depend on kernel support and
+dequantization costs.
+3.6.2
+Weight-Activation Quantization
+Further
+quantizing
+activations
+enables
+low-
+precision computation but increases sensitivity to
+quantization errors. Q-VLM considers cross-layer
+dependencies during quantization search (Wang
+et al., 2024a), while MBQ balances modality-
+specific sensitivities (Li et al., 2025a) and QIG
+models token-level interactions (Xiang et al., 2026).
+MASQuant introduces modality-aware smoothing
+and cross-modal compensation (Hu et al., 2026b).
+The computational benefits depend on efficient low-
+precision execution and sufficient accuracy reten-
+tion.
+3.6.3
+KV Cache Quantization
+Reducing KV precision lowers cache memory and
+bandwidth demands, particularly for long visual
+contexts. CalibQuant uses calibration and post-
+scaling for 1-bit visual KV quantization (Han et al.,
+2025), while VidKV applies distinct low-bit strate-
+gies to key and value caches in VLMs (Tao et al.,
+2025b). Dynamic KV Cache Quantization adapts
+quantization parameters to runtime KV distribu-
+tions (Fan and Chen, 2026). Smaller caches, how-
+ever, do not guarantee lower latency when quanti-
+zation and dequantization overhead is considered.
+4
+Evaluation
+Differences in model backbones, input budgets,
+hardware, and measurement protocols limit direct
+cross-study comparisons. We therefore combine
+our controlled experiments with results reported
+in prior studies, prioritizing comparisons under
+matched settings.3
+Our
+controlled
+experiments
+use
+LLaVA-
+OneVision-7B (Li et al., 2024a) with 32 input
+frames on an NVIDIA H100 (80 GB) GPU. We
+evaluate accuracy and TTFT on Video-MME (Fu
+et al., 2025a), EgoSchema (Mangalam et al., 2023),
+LongVideoBench (Wu et al., 2024), and MVBench
+(Li et al., 2024b). For literature-based comparisons,
+we examine decoding on Qwen2.5-VL-3B (Bai
+et al., 2025b) and LLaVA-OneVision-7B using
+EgoSchema and VideoDC (Chai et al., 2025); PTQ
+on LLaVA-OneVision-7B and Qwen2.5-VL-7B;
+and end-to-end efficiency on Qwen3-VL-8B (Bai
+et al., 2025a).
+To summarize quality–latency trade-offs, we in-
+troduce Quality–Latency Balance (QLB):
+QLBx = 100 × A
+A0
+×
+2L0,x
+L0,x + Lx
+.
+(1)
+Here, A and A0 denote the task quality of an ac-
+celerated method and its matched baseline, while
+Lx and L0,x denote their measured latency, with
+x ∈{TTFT, TPOT}. For our controlled exper-
+iments, accuracy and TTFT are averaged equally
+across the four benchmarks. Each matched base-
+line scores 100, with higher QLB indicating a more
+favorable relative quality–latency balance.
+Research Questions.
+We investigate quality–
+latency trade-offs across two inference phases: how
+intervention position and compression strategy af-
+fect accuracy and pre-generation latency (RQ1),
+and how decoding acceleration balances genera-
+tion speed and output quality (RQ2). We further ex-
+amine how well PTQ preserves task quality under
+3Appendix A details the evaluation metrics, benchmarks,
+and comparison protocols.
+6
+
+
+Method
+Ret.
+Quality↑
+TPOT↓
+QLBTPOT ↑
+EgoSchema: Qwen2.5-VL-3B, Acc. (%)
+Full KV
+100%
+57.20
+59.37
+100.0
+VisCache
+40%
+52.00
+56.82
+92.9
+VisCache
+28%
+55.00
+49.50
+104.9
+VisCache
+19%
+54.60
+47.70
+105.9
+VideoDC: LLaVA-OneVision-7B, VDCscore
+Full tokens
+Full
+3.30
+42
+100.0
+DyCoke
+18.75%
+3.29
+35
+108.8
+DyCoke
+14.25%
+3.20
+31
+111.6
+Table 2: Quality–latency trade-offs during decoding.
+Reported hardware includes 4×A100 (80 GB) for Vis-
+Cache and A6000 (48 GB) for DyCoke. Ret. denotes
+KV-cache or visual-token retention (%); Quality reports
+EgoSchema accuracy (%) or VideoDC captioning score,
+and TPOT is in ms/token.
+reduced numerical precision (RQ3), and whether
+local efficiency gains translate into end-to-end ac-
+celeration (RQ4).
+RQ1. Table 1 highlights how intervention position
+shapes the balance between computational savings
+and evidence preservation. EarlyTom (Wang et al.,
+2026a) reduces mean TTFT by 45.7% while retain-
+ing 97.7% of baseline accuracy (QLB 126.6). In
+comparison, Curv. merge4 preserves more accu-
+racy (99.6%) but achieves a smaller TTFT reduc-
+tion (19.9%). Yet post-encoder compression can
+remain competitive, as VidCom2 (Liu et al., 2025c)
+reaches a QLB of 124.8. Conversely, FrameFusion
+(Fu et al., 2025b) increases TTFT by 12.9% de-
+spite token reduction. These results suggest that
+earlier compression offers greater opportunities to
+avoid downstream computation, while evidence
+preservation and processing overhead determine
+the realized benefit. However, differences in reten-
+tion budgets and implementations prevent isolating
+intervention position as the sole cause.
+RQ2. Table 2 examines how reducing retained vi-
+sual representations affects decoding efficiency and
+task quality. For VisCache (Wang et al., 2026c),
+reducing retention from 40% to 28% lowers TPOT
+from 56.82 to 49.50 ms/token while improving
+EgoSchema accuracy from 52.0% to 55.0%, rais-
+ing QLB from 92.9 to 104.9. This non-monotonic
+trend suggests that retention ratio alone does not de-
+termine the utility of preserved evidence. DyCoke
+(Tao et al., 2025a) further illustrates the trade-off:
+TPOT decreases from 42 to 31 ms/token, while the
+VideoDC (Chai et al., 2025) score drops from 3.30
+4A curvature-guided token-merging baseline applied after
+visual encoding and before LLM prefill.
+Method
+Bits
+Avg. (Q/FP16)
+Q-ret.↑
+LLaVA-OneVision-7B, 8 benchmarks
+MBQ
+W3A16
+64.4/71.4
+90.2%
+VLMQ
+W3A16
+65.7/71.4
+92.0%
+VLM-PTQ
+W3A16
+69.5/71.4
+97.3%
+LLaVA-OneVision-7B, 5 benchmarks
+MBQ
+W3A16
+70.44/73.37
+96.0%
+QIG
+W3A16
+72.04/73.37
+98.2%
+Qwen2.5-VL-7B, 5 benchmarks
+MBQ
+W4A8
+68.5/74.5
+91.9%
+MASQuant
+W4A8
+69.0/74.5
+92.6%
+Table 3: PTQ quality retention under the reported model,
+bit-width, and benchmark settings. Q/FP16 denotes the
+average scores of quantized and FP16 models; Q-ret.
+denotes their ratio (%).
+to 3.20 (QLB 111.6). Overall, decoding accelera-
+tion depends not only on reducing token processing
+but also on preserving information needed for sub-
+sequent generation.
+RQ3. Table 3 examines quality retention under re-
+duced numerical precision. On LLaVA-OneVision-
+7B at W3A16, VLM-PTQ (Deng and Huang, 2026)
+retains 97.3% of FP16 performance, compared
+with 92.0% for VLMQ (Xue et al., 2025) and
+90.2% for MBQ (Li et al., 2025a). In separate five-
+benchmark comparisons, QIG (Xiang et al., 2026)
+improves retention from 96.0% to 98.2%, while
+MASQuant (Hu et al., 2026b) increases it from
+91.9% to 92.6% under W4A8. These results indi-
+cate that bit-width alone does not determine quality
+preservation. However, these image-oriented eval-
+uations provide no matched latency or memory
+measurements, leaving the realized acceleration
+benefits for video inference unverified.
+RQ4. Table 4 presents a matched system-level com-
+parison reported by V-CAST (Lin et al., 2026), cov-
+ering representative compression methods (Yang
+et al., 2025b; Liu et al., 2025c; Shao et al., 2026;
+Fan et al., 2026). Although V-CAST reduces pre-
+fill and generation latency by 51.2% and 46.6%,
+respectively, end-to-end latency decreases by only
+13.6%, with a 1.0-point accuracy loss. Stage-level
+rankings can also differ from end-to-end outcomes:
+VidCom2 is faster than HoliTom in both reported
+stages but has slightly higher E2E latency. More-
+over, FlashVID reduces both stage latencies while
+increasing peak memory by 84.0%. These results
+show that local computational savings do not nec-
+essarily yield proportional system-level benefits.
+7
+
+
+Method
+Acc.↑
+Prefill↓
+Gen.↓
+E2E↓
+Peak Mem.↓
+Qwen3-VL-8B
+64.5
+243.6
+280.9
+1440.4
+22478.0
+VisionZip
+60.1
+155.6
+190.5
+1276.8
+19974.7
+VidCom2
+62.4
+119.0
+150.2
+1271.0
+19547.5
+HoliTom
+59.7
+134.3
+160.8
+1261.8
+19974.7
+FlashVID
+62.3
+146.6
+175.0
+1308.7
+41363.6
+V-CAST
+63.5
+118.8
+149.9
+1245.1
+19547.5
+Table 4: System-level quality and efficiency on Video-
+MME using Qwen3-VL-8B-Instruct with up to 32
+frames and 25% token retention for compressed meth-
+ods. Experiments use NVIDIA H100 (80 GB) GPUs.
+Prefill and Gen. denote the reported pre-generation and
+autoregressive generation times, respectively. Accuracy
+is in %, aggregate latency in seconds, and peak GPU
+memory in MB.
+5
+Challenges and Future Work
+Our taxonomy and evaluation reveal that training-
+free acceleration depends not only on reducing vi-
+sual tokens, but also on preserving useful evidence
+and translating local savings into actual inference
+gains. We identify four directions for future re-
+search.
+Evidence-Aware Compression.
+Video redun-
+dancy is unevenly distributed, and brief events may
+be lost under aggressive compression. DToMA
+and RLP explore evidence recovery and semantic
+preservation (Yuan et al., 2025a; Ma et al., 2026a),
+while DyToK and GTR adapt token budgets to
+frame importance and query relevance (Li et al.,
+2025b; Zhou et al., 2026). D-CoDe further com-
+bines compression with question decomposition
+(Huang et al., 2025c). Future methods should co-
+ordinate temporal coverage, task relevance, and
+selective evidence recovery without introducing
+excessive selection overhead.
+Early Encoder Optimization. Compared with
+post-encoder compression, training-free optimiza-
+tion within video encoders remains relatively un-
+derexplored. EarlyTom and STC demonstrate the
+potential of early merging and feature reuse (Wang
+et al., 2026a,d), while MeToM exploits video meta-
+data to reduce redundant encoding (Wu et al.,
+2026b). Encoder-aware selection in broader VLMs
+provides further insights (Wang et al., 2026e; Liu
+et al., 2026). Future work should explore motion-
+aware feature reuse and coordinated compression
+across encoding and prefill, without discarding evi-
+dence required by downstream reasoning.
+Streaming Memory and Decoding. Streaming
+VLMs must preserve historical evidence under
+bounded memory while processing frames causally.
+StreamingTOM and MuKV explore compressed vi-
+sual memory (Chen et al., 2026b; Xiao et al., 2026),
+whereas StreamMeCo and StreamKV investigate
+persistent memory compression and selective re-
+trieval (Wang et al., 2026b; Chen et al., 2026c).
+Future systems should jointly manage retention, re-
+trieval, and cache updates while maintaining timely
+responses to incoming queries (Vasu et al., 2026).
+End-to-End System Co-Design. As shown in Ta-
+ble 4, substantial stage-level savings may yield
+limited end-to-end improvements. Token selection,
+memory access, and kernel inefficiency can offset
+computational gains (Li et al., 2026c; Ma et al.,
+2026c). Future research should coordinate token
+compression, KV management, and low-precision
+execution, optimizing measured latency and mem-
+ory alongside task quality rather than compression
+ratios alone.
+Taken together, these directions call for a shift
+from isolated compression strategies to coordi-
+nated, evidence-aware inference.
+The ultimate
+goal is not merely to reduce visual tokens, but to
+preserve reliable video reasoning while delivering
+measurable end-to-end efficiency gains.
+6
+Conclusion
+This survey highlights a central insight: training-
+free VLM acceleration is not merely about re-
+ducing visual tokens, but about balancing com-
+putational savings with the preservation of task-
+relevant spatiotemporal evidence. Across the in-
+ference pipeline, intervention position determines
+both which computations can be avoided and what
+information remains available for downstream rea-
+soning. Earlier compression offers broader com-
+putational savings but risks irreversible evidence
+loss, whereas later intervention exploits richer rep-
+resentations while inheriting upstream costs. Our
+analysis further reveals that reduced token counts
+and local latency improvements do not necessarily
+translate into end-to-end efficiency. These find-
+ings point toward a shift from isolated compression
+strategies to evidence-aware, cross-stage optimiza-
+tion, where computation and memory are allocated
+according to task demands and actual system bottle-
+necks. Ultimately, progress should be measured by
+reliable video understanding and realized inference
+efficiency.
+8
+
+
+Limitations
+This survey focuses on publicly available training-
+free VLM acceleration methods and may overlook
+recent or proprietary advances. Our controlled ex-
+periments use a single backbone, a fixed frame
+budget, and one GPU platform, limiting their gen-
+eralizability. Other comparisons rely on published
+results with potentially different experimental pro-
+tocols. Moreover, PTQ evidence is largely image-
+based, and available system measurements lack
+complete latency breakdowns. Therefore, our find-
+ings should be interpreted within their respective
+evaluation settings rather than as universal perfor-
+mance rankings.
+Ethical Considerations
+This survey synthesizes existing literature and in-
+volves no human participants. Training-free ac-
+celeration may reduce computational costs and
+improve accessibility to video-LLMs. However,
+lossy compression may discard critical evidence
+and increase unreliable predictions. We encourage
+the community to adopt robust evaluation proto-
+cols that assess these risks alongside accuracy and
+latency. Our experiments use publicly available
+models and benchmarks, subject to their respective
+licenses and usage terms. We also document evalu-
+ation settings and comparison protocols to support
+reproducibility.
+References
+Saeed Ranjbar Alvar, Gursimran Singh, Mohammad
+Akbari, and Yong Zhang. 2025. Divprune: Diversity-
+based visual token pruning for large multimodal mod-
+els. In 2025 IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), pages 9392–
+9401. IEEE.
+Zhaochong An, Zirui Li, Mingqiao Ye, Feng Qiao, Ji-
+aang Li, Zongwei Wu, Vishal Thengane, Chengzu Li,
+Lei Li, Luc Van Gool, et al. 2026. Video understand-
+ing: From geometry and semantics to unified models.
+Machine Intelligence Research, pages 1–35.
+Shuai Bai, Yuxuan Cai, Ruizhe Chen, Keqin Chen,
+Xionghui Chen, Zesen Cheng, Lianghao Deng,
+Wei Ding, Chang Gao, Chunjiang Ge, et al.
+2025a. Qwen3-vl technical report. arXiv preprint
+arXiv:2511.21631.
+Shuai Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wen-
+bin Ge, Sibo Song, Kai Dang, Peng Wang, Shi-
+jie Wang, Jun Tang, Humen Zhong, Yuanzhi Zhu,
+Mingkun Yang, Zhaohai Li, Jianqiang Wan, Pengfei
+Wang, Wei Ding, Zheren Fu, Yiheng Xu, and 8 others.
+2025b. Qwen2.5-vl technical report. arXiv preprint
+arXiv:2502.13923.
+Satanjeev Banerjee and Alon Lavie. 2005. Meteor: An
+automatic metric for mt evaluation with improved cor-
+relation with human judgments. In Proceedings of
+the ACL Workshop on Intrinsic and Extrinsic Evalua-
+tion Measures for Machine Translation and/or Sum-
+marization, pages 65–72. Association for Computa-
+tional Linguistics.
+Wenhao Chai, Enxin Song, Yilun Du, Chenlin Meng,
+Vashisht Madhavan, Omer Bar-Tal, Jenq-Neng
+Hwang, Saining Xie, and Christopher D. Manning.
+2025. Auroracap: Efficient, performant video de-
+tailed captioning and a new benchmark. In Interna-
+tional Conference on Learning Representations.
+Charlie Chen, Sebastian Borgeaud, Geoffrey Irving,
+Jean-Baptiste Lespiau, Laurent Sifre, and John
+Jumper. 2023. Accelerating large language model
+decoding with speculative sampling. arXiv preprint
+arXiv:2302.01318.
+Junzhou Chen, Jindong Wang, and Gang Zhou. 2026a.
+Fast enough to act: Spatio-temporal visual token
+merging for low-latency robotic vlms and vlas. arXiv
+preprint arXiv:2606.29350.
+Liang Chen, Haozhe Zhao, Tianyu Liu, Shuai Bai, Jun-
+yang Lin, Chang Zhou, and Baobao Chang. 2024. An
+image is worth 1/2 tokens after layer 2: Plug-and-play
+inference acceleration for large vision-language mod-
+els. In European Conference on Computer Vision,
+pages 19–35. Springer.
+Xueyi Chen, Keda Tao, Kele Shao, and Huan Wang.
+2026b. Streamingtom: Streaming token compression
+for efficient video understanding. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 24675–24685.
+Yilong Chen, Xiang Bai, Zhibin Wang, Chengyu Bai,
+Yuhan Dai, and Ming Lu. 2026c. Streamkv: Stream-
+ing video question-answering with segment-based kv
+cache retrieval and compression. In Proceedings of
+the AAAI Conference on Artificial Intelligence, vol-
+ume 40, pages 3120–3128.
+Zengjie Chen, Yuxiang Cai, Jingcai Guo, Taotao Cai,
+Jianwei Yin, and Zhi Chen. 2026d. Accelerating mul-
+timodal large language models with prior-corrected
+token reduction. In European Conference on Com-
+puter Vision, pages 213–233. Springer.
+Juncan Deng and Kejie Huang. 2026. Vlm-ptq: Ef-
+ficient post-training quantization for large vision-
+language models. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recog-
+nition, pages 24696–24705.
+Mohamed Dhouib, Davide Buscaldi, Sonia Vanier, and
+Aymen Shabou. 2025. Pact: Pruning and clustering-
+based token reduction for faster visual language mod-
+els. In 2025 IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), pages 14582–
+14592. IEEE.
+9
+
+
+Shangzhe Di, Zhelun Yu, Guanghao Zhang, Haoyuan
+Li, Hao Cheng, Bolin Li, Wanggui He, Fangxun
+Shu, and Hao Jiang. 2025. Streaming video question-
+answering with in-context video kv-cache retrieval.
+In International Conference on Learning Representa-
+tions, volume 2025, pages 42115–42127.
+Junhao Du, Jialong Xue, Anqi Li, Jincheng Dai, and
+Guo Lu. 2026. Unified spatiotemporal token com-
+pression for video-llms at ultra-low retention. arXiv
+preprint arXiv:2603.21957.
+Jiahao Fan and Chien-Ming Chen. 2026. Efficient mul-
+timodal large language model via dynamic kv cache
+quantization. In Proceedings of the AAAI Conference
+on Artificial Intelligence, volume 40, pages 20994–
+21001.
+Ziyang Fan, Keyu Chen, Ruilong Xing, Yulin Li,
+Li Jiang, and Zhuotao Tian. 2026. Flashvid: Efficient
+video large language models via training-free tree-
+based spatiotemporal token merging. arXiv preprint
+arXiv:2602.08024.
+Xinyu Fang, Kangrui Mao, Haodong Duan, Xiangyu
+Zhao, Yining Li, Dahua Lin, and Kai Chen. 2024.
+Mmbench-video: A long-form multi-shot benchmark
+for holistic video understanding. Advances in Neural
+Information Processing Systems, 37:89098–89124.
+Chaoyou Fu, Yuhan Dai, Yongdong Luo, Lei Li,
+Shuhuai Ren, Renrui Zhang, Zihan Wang, Chenyu
+Zhou, Yunhang Shen, Mengdan Zhang, et al. 2025a.
+Video-mme: The first-ever comprehensive evaluation
+benchmark of multi-modal llms in video analysis. In
+2025 IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pages 24108–24118.
+IEEE.
+Tianyu Fu, Tengxuan Liu, Qinghao Han, Guohao Dai,
+Shengen Yan, Huazhong Yang, Xuefei Ning, and
+Yu Wang. 2025b. Framefusion: Combining similar-
+ity and importance for video token reduction on large
+vision language models. In 2025 IEEE/CVF Interna-
+tional Conference on Computer Vision (ICCV), pages
+22654–22663. IEEE.
+Insu Han, Zeliang Zhang, Zhiyuan Wang, Yifan Zhu,
+Susan Liang, Jiani Liu, Haiting Lin, Mingjie Zhao,
+Chenliang Xu, Kun Wan, et al. 2025. Calibquant: 1-
+bit kv cache quantization for multimodal llms. arXiv
+preprint arXiv:2502.14882.
+Kai Han, Jianyuan Guo, Yehui Tang, Wei He, Enhua
+Wu, and Yunhe Wang. 2024. Free video-llm: Prompt-
+guided visual perception for efficient training-free
+video llms. arXiv preprint arXiv:2410.10441.
+Yefei He, Feng Chen, Jing Liu, Wenqi Shao, Hong Zhou,
+Kaipeng Zhang, and Bohan Zhuang. 2024. Zipvl: Ef-
+ficient large vision-language models with dynamic to-
+ken sparsification. arXiv preprint arXiv:2410.08584.
+Wenyi Hong, Yean Cheng, Zhuoyi Yang, Weihan Wang,
+Lefan Wang, Xiaotao Gu, Shiyu Huang, Yuxiao
+Dong, and Jie Tang. 2025. Motionbench: Bench-
+marking and improving fine-grained video motion
+understanding for vision language models. In 2025
+IEEE/CVF Conference on Computer Vision and Pat-
+tern Recognition (CVPR), pages 8450–8460. IEEE.
+Kairui Hu, Penghao Wu, Fanyi Pu, Wang Xiao, Xi-
+ang Yue, Bo Li, Yuanhan Zhang, and Ziwei Liu.
+2026a.
+Video-mmmu: Evaluating knowledge ac-
+quisition from multidisciplinary professional videos.
+In Proceedings of the 64th Annual Meeting of the
+Association for Computational Linguistics (Volume
+1: Long Papers), pages 27798–27828.
+Lulu Hu, Wenhu Xiao, Xin Chen, Xinhua Xu, Bowen
+Xu, Kun Li, and Yongliang Tao. 2026b. Masquant:
+Modality-aware smoothing quantization for mul-
+timodal large language models.
+arXiv preprint
+arXiv:2603.04800.
+Kai Huang, Hao Zou, Bochen Wang, Ye Xi, Zhen
+Xie, and Hao Wang. 2025a. Aircache: Activating
+inter-modal relevancy kv cache compression for effi-
+cient large vision-language model inference. In 2025
+IEEE/CVF International Conference on Computer
+Vision (ICCV), pages 23958–23967. IEEE.
+Xiaohu Huang, Hao Zhou, and Kai Han. 2025b.
+Prunevid: Visual token pruning for efficient video
+large language models. In Findings of the Associa-
+tion for Computational Linguistics: ACL 2025, pages
+19959–19973.
+Yiyang Huang, Yizhou Wang, and Yun Fu. 2025c. D-
+code: Scaling image-pretrained vlms to video via
+dynamic compression and question decomposition.
+In Proceedings of the 2025 Conference on Empiri-
+cal Methods in Natural Language Processing, pages
+11798–11811.
+Jeongseok Hyun, Sukjun Hwang, Su Ho Han, Taeoh
+Kim, Inwoong Lee, Dongyoon Wee, Joon-Young
+Lee, Seon Joo Kim, and Minho Shim. 2025.
+Multi-granular spatio-temporal token merging for
+training-free acceleration of video llms.
+In 2025
+IEEE/CVF International Conference on Computer
+Vision (ICCV), pages 23990–24000. IEEE.
+Ahmadreza Jeddi,
+Negin Baghbanzadeh,
+Elham
+Dolatabadi, and Babak Taati. 2025. Similarity-aware
+token pruning: Your vlm but faster. arXiv preprint
+arXiv:2503.11549.
+Yicheng Ji, Jun Zhang, Jinpeng Chen, Cong Wang, Li-
+dan Shou, Gang Chen, and Huan Li. 2026. See the
+forest for the trees: Loosely speculative decoding via
+visual-semantic guidance for efficient inference of
+video llms. In Proceedings of the 64th Annual Meet-
+ing of the Association for Computational Linguistics
+(Volume 1: Long Papers), pages 23707–23726.
+Yicheng Ji, Jun Zhang, Heming Xia, Jinpeng Chen, Li-
+dan Shou, Gang Chen, and Huan Li. 2025. Specvlm:
+Enhancing speculative decoding of video llms via
+verifier-guided token pruning. In Proceedings of the
+2025 Conference on Empirical Methods in Natural
+Language Processing, pages 7216–7230.
+10
+
+
+Yutao Jiang, Qiong Wu, Wenhao Lin, Wei Yu, and Yiyi
+Zhou. 2025. What kind of visual tokens do we need?
+training-free visual token pruning for multi-modal
+large language models from the perspective of graph.
+In Proceedings of the AAAI Conference on Artificial
+Intelligence, volume 39, pages 4075–4083.
+Yizhang Jin, Jian Li, Tianjun Gu, Yexin Liu, Bo Zhao,
+Jinxiang Lai, Zhenye Gan, Yabiao Wang, Chengjie
+Wang, Xin Tan, et al. 2025. Efficient multimodal
+large language models: A survey. Visual Intelligence,
+3(1):27.
+Samir Khaki, Junxian Guo, Jiaming Tang, Shang Yang,
+Yukang Chen, Konstantinos N Plataniotis, Yao Lu,
+Song Han, and Zhijian Liu. 2025. Sparsevila: Decou-
+pling visual sparsity for efficient vlm inference. In
+2025 IEEE/CVF International Conference on Com-
+puter Vision (ICCV), pages 23784–23794. IEEE.
+Minsoo Kim, Kyuhong Shim, Jungwook Choi, and
+Simyung Chang. 2026.
+Infinipot-v:
+Memory-
+constrained kv cache compression for streaming
+video understanding. Advances in Neural Informa-
+tion Processing Systems, 38:138983–139013.
+Quan Kong, Yuhao Shen, Yicheng Ji, Huan Li,
+and Cong Wang. 2026.
+Parallelvlm:
+Lossless
+video-llm acceleration with visual alignment aware
+parallel speculative decoding.
+arXiv preprint
+arXiv:2603.19610.
+Yaniv Leviathan, Matan Kalman, and Yossi Matias.
+2023. Fast inference from transformers via spec-
+ulative decoding.
+In International conference on
+machine learning, pages 19274–19286. PMLR.
+Bo Li, Yuanhan Zhang, Dong Guo, Renrui Zhang,
+Feng Li, Hao Zhang, Kaichen Zhang, Yanwei
+Li, Ziwei Liu, and Chunyuan Li. 2024a.
+Llava-
+onevision: Easy visual task transfer. arXiv preprint
+arXiv:2408.03326.
+Haojuan Li, Ruohan Tang, Dongzhou Cheng, Zongpu
+Zhang, Jian Li, and Jiaqi Wang. 2026a.
+Segmo:
+Co-designing content-aware sparsity and locally-
+cohesive segment parallelism for efficient vlm infer-
+ence. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages
+33598–33608.
+Kunchang Li, Yali Wang, Yinan He, Yizhuo Li,
+Yi Wang, Yi Liu, Zun Wang, Jilan Xu, Guo Chen,
+Ping Luo, et al. 2024b. Mvbench: A comprehensive
+multi-modal video understanding benchmark. In Pro-
+ceedings of the IEEE/CVF conference on computer
+vision and pattern recognition, pages 22195–22206.
+Pengyi Li, Irina Abdullaeva, Alexander Gambashidze,
+Andrey Kuznetsov, and Ivan Oseledets. 2026b. Max-
+info: A training-free key-frame selection method
+using maximum volume for enhanced video under-
+standing.
+In 2026 IEEE/CVF Winter Conference
+on Applications of Computer Vision (WACV), pages
+7198–7207. IEEE.
+Shiyao Li, Yingchun Hu, Xuefei Ning, Xihui Liu,
+Ke Hong, Xiaotao Jia, Xiuhong Li, Yaqi Yan, Pei
+Ran, Guohao Dai, et al. 2025a. Mbq: Modality-
+balanced quantization for large vision-language mod-
+els. In 2025 IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), pages 4167–
+4177. IEEE.
+Yanwei Li, Chengyao Wang, and Jiaya Jia. 2024c.
+Llama-vid: An image is worth 2 tokens in large lan-
+guage models. In European conference on computer
+vision, pages 323–340. Springer.
+Yulin Li, Haokun Gui, Ziyang Fan, Junjie Wang, Bin
+Kang, Bin Chen, and Zhuotao Tian. 2025b. Less is
+more, but where? dynamic token compression via
+llm-guided keyframe prior. In Advances in Neural
+Information Processing Systems, volume 38.
+Zhenyu Li, Zuchao Li, Ping Wang, Lefei Zhang, and
+Haojun Ai. 2026c.
+Vista-llm: Decoupled query-
+guided visual token pruning for efficient long-video
+large language models. In Proceedings of the 64th
+Annual Meeting of the Association for Computational
+Linguistics, pages 13171–13187.
+Bin Lin, Yang Ye, Bin Zhu, Jiaxi Cui, Munan Ning,
+Peng Jin, and Li Yuan. 2024a. Video-llava: Learn-
+ing united visual representation by alignment before
+projection. In Proceedings of the 2024 conference on
+empirical methods in natural language processing,
+pages 5971–5984.
+Junming Lin, Zheng Fang, Chi Chen, Zihao Wan,
+Fuwen Luo, Peng Li, Yang Liu, and Maosong Sun.
+2024b.
+Streamingbench: Assessing the gap for
+mllms to achieve streaming video understanding.
+arXiv preprint arXiv:2411.03628.
+Xinying Lin, Xuyang Liu, Yiyu Wang, Teng Ma, and
+Wenqi Ren. 2026. V-cast: Video curvature-aware
+spatio-temporal pruning for efficient video large lan-
+guage models. arXiv preprint arXiv:2603.27650.
+Jingren Liu, Yun Wang, Long Zhang, Yiheng Wang,
+Shuning Xu, Ling Wang, Jiaqi Yan, Dell Zhang,
+and Xiangyu Chen. 2025a. Towards training-free
+long video understanding: methods, benchmarks, and
+open challenges. Vicinagearth, 2(1):6.
+Jizhihui Liu, Guangdao Zhu, Feiyi Du, Niu Lian, Jun
+Li, Bin Chen, Weili Guan, and Yaowei Wang. 2026.
+Hiprune: Hierarchical attention for efficient token
+pruning in vision-language models. In Findings of
+the Association for Computational Linguistics: ACL
+2026, pages 3274–3291.
+Shuming Liu, Chen Zhao, Tianqi Xu, and Bernard
+Ghanem. 2025b. Bolt: Boost large vision-language
+model without training for long-form video under-
+standing. In 2025 IEEE/CVF Conference on Com-
+puter Vision and Pattern Recognition (CVPR), pages
+3318–3327. IEEE.
+11
+
+
+Xuyang Liu, Yiyu Wang, Junpeng Ma, and Linfeng
+Zhang. 2025c. Video compression commander: Plug-
+and-play inference acceleration for video large lan-
+guage models. In Proceedings of the 2025 Confer-
+ence on Empirical Methods in Natural Language
+Processing, pages 1910–1924.
+Yuanxin Liu, Shicheng Li, Yi Liu, Yuxiang Wang,
+Shuhuai Ren, Lei Li, Sishuo Chen, Xu Sun, and
+Lu Hou. 2024. Tempcompass: Do video llms really
+understand videos? In Findings of the Association
+for Computational Linguistics: ACL 2024, pages
+8731–8772.
+Jianxin Ma, Shibo Jin, and Lujuan Dang. 2026a. Visual
+token compression via run-length pruning in multi-
+modal large language models. Pattern Recognition
+Letters, 207:214–219.
+Junpeng Ma, Qizhe Zhang, Ming Lu, Zhibin Wang,
+Qiang Zhou, Jun Song, and Shanghang Zhang. 2026b.
+Mmg-vid: Maximizing marginal gains at segment-
+level and token-level for efficient video llms.
+In
+Proceedings of the AAAI Conference on Artificial
+Intelligence, volume 40, pages 24253–24261.
+Qiankun Ma, Ziyao Zhang, Haofei Wang, Zhen Song,
+Jie Chen, and Hairong Zheng. 2026c.
+Apet:
+Approximation-error guided token compression for
+efficient vlms. In Proceedings of the IEEE/CVF Con-
+ference on Computer Vision and Pattern Recognition,
+pages 26306–26316.
+Muhammad Maaz, Hanoona Rasheed, Salman Khan,
+and Fahad Khan. 2024.
+Video-chatgpt: Towards
+detailed video understanding via large vision and
+language models. In Proceedings of the 62nd An-
+nual Meeting of the Association for Computational
+Linguistics (Volume 1: Long Papers), pages 12585–
+12602.
+Karttikeya Mangalam, Raiymbek Akshulakov, and Ji-
+tendra Malik. 2023. Egoschema: A diagnostic bench-
+mark for very long-form video language understand-
+ing.
+Advances in Neural Information Processing
+Systems, 36:46212–46244.
+Jiahao Meng, Yue Tan, Qi Xu, Kuan Gao, Weisong Liu,
+Yanwei Li, Jason Li, Lingdong Kong, Haochen Wang,
+Qianyu Zhou, et al. 2026. Watch, remember, reason:
+Human-view video understanding with mllms. arXiv
+preprint arXiv:2606.07433.
+Thong Nguyen, Yi Bin, Junbin Xiao, Leigang Qu,
+Yicong Li, Jay Zhangjie Wu, Cong-Duy Nguyen,
+See Kiong Ng, and Luu Anh Tuan. 2024. Video-
+language understanding: A survey from model ar-
+chitecture, model training, and data perspectives. In
+Findings of the Association for Computational Lin-
+guistics: ACL 2024, pages 3636–3657.
+Zhenyu Ning, Guangda Liu, Qihao Jin, Chengwei Li,
+Wenchao Ding, Minyi Guo, and Jieru Zhao. 2025.
+Livevlm: Efficient online video understanding via
+streaming-oriented kv cache and retrieval.
+arXiv
+preprint arXiv:2505.15269.
+Junbo Niu, Yifei Li, Ziyang Miao, Chunjiang Ge, Yuan-
+hang Zhou, Qihao He, Xiaoyi Dong, Haodong Duan,
+Shuangrui Ding, Rui Qian, Pan Zhang, Yuhang Zang,
+Yuhang Cao, Conghui He, and Jiaqi Wang. 2025.
+Ovo-bench: How far is your video-llms from real-
+world online video understanding? In Proceedings of
+the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 18902–18913.
+Surendra Pathak and Bo Han. 2026.
+Towards effi-
+cient large vision-language models: A comprehen-
+sive survey on inference strategies. arXiv preprint
+arXiv:2603.27960.
+Viorica Patraucean, Lucas Smaira, Ankush Gupta, Adria
+Recasens, Larisa Markeeva, Dylan Banarse, Skanda
+Koppula, Mateusz Malinowski, Yi Yang, Carl Do-
+ersch, et al. 2023.
+Perception test: A diagnostic
+benchmark for multimodal video models. Advances
+in Neural Information Processing Systems, 36:42748–
+42761.
+Jun Peng, Baiyang Song, Jie Li, Hui Li, Yiyi Zhou, Ron-
+grong Ji, and Yonghong Tian. 2026. Qca: Query-and
+content-aware keyframe selection for long video un-
+derstanding. In European Conference on Computer
+Vision, pages 18–35. Springer.
+Xinlei Pu, Weijie Shi, Wen Yang, Yi Cao, Hao Chen,
+Yuanjun Liu, Wenwei Ding, Jia Zhu, and Jiajie Xu.
+2026. Medr: Query-independent frame selection via
+multi-signal event modeling and dynamic rescoring.
+arXiv preprint arXiv:2608.15058.
+Yuzhang Shang, Mu Cai, Bingxin Xu, Yong Jae Lee,
+and Yan Yan. 2025. Llava-prumerge: Adaptive token
+reduction for efficient large multimodal models. In
+2025 IEEE/CVF International Conference on Com-
+puter Vision (ICCV), pages 22857–22867. IEEE.
+Kele Shao, Keda Tao, Can Qin, Haoxuan You, Yang
+Sui, and Huan Wang. 2026. Holitom: Holistic token
+merging for fast video large language models. Ad-
+vances in Neural Information Processing Systems,
+38:135547–135570.
+Kele Shao, Keda Tao, Kejia Zhang, Sicheng Feng,
+Mu Cai, Yuzhang Shang, Haoxuan You, Can Qin,
+Yang Sui, and Huan Wang. 2025. A survey of token
+compression for efficient multimodal large language
+models. arXiv preprint arXiv:2507.20198.
+Leqi Shen, Guoqiang Gong, Tao He, Yifeng Zhang,
+Pengzhang Liu, Sicheng Zhao, et al. 2026a. Fastvid:
+Dynamic density pruning for fast video large lan-
+guage models. Advances in Neural Information Pro-
+cessing Systems, 38:123553–123581.
+Yujiao Shen, Shulin Tian, Jingkang Yang, and Ziwei
+Liu. 2026b. A simple baseline for streaming video
+understanding. arXiv preprint arXiv:2604.02317.
+Hongchang Shi, Jinpeng Hu, Ao Wang, Wenzheng
+Zhou, Hui Ma, Feng Li, and Zenglin Shi. 2026.
+Markey: Marginal utility guided greedy keyframe se-
+lection for long video understanding. arXiv preprint
+arXiv:2609.15408.
+12
+
+
+Baiyang Song, Jun Peng, Yuxin Zhang, Guangyao
+Chen, Feidiao Yang, and Jianyuan Guo. 2026. Ktv:
+Keyframes and key tokens selection for efficient
+training-free video llms. In Proceedings of the AAAI
+Conference on Artificial Intelligence, volume 40,
+pages 9060–9068.
+Enxin Song, Wenhao Chai, Guanhong Wang, Yucheng
+Zhang, Haoyang Zhou, Feiyang Wu, Xun Guo, Tian
+Ye, Yan Lu, Jenq-Neng Hwang, and Gaoang Wang.
+2024. Moviechat: From dense token to sparse mem-
+ory for long video understanding. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 18221–18232.
+Fengyuan Sun, Leqi Shen, Hui Chen, Sicheng Zhao,
+Jungong Han, and Guiguang Ding. 2025a. Adatp:
+Attention-debiased token pruning for video large lan-
+guage models. In EMNLP (Findings), pages 3273–
+3286.
+Guangyu Sun, Archit Singhal, Burak Uzkent, Mubarak
+Shah, Chen Chen, and Garin N Kessler. 2025b. From
+frames to clips: Efficient key clip selection for long-
+form video understanding.
+Hui Sun, Shiyin Lu, Huanyu Wang, Qing-Guo Chen,
+Zhao Xu, Weihua Luo, Kaifu Zhang, and Ming Li.
+2025c. Mdp 3: a training-free approach for list-wise
+frame selection in video-llms. In 2025 IEEE/CVF In-
+ternational Conference on Computer Vision (ICCV),
+pages 24090–24101. IEEE.
+Guowei Tang, Tianwen Qian, Huanran Zheng, Yifei
+Wang, and Xiaoling Wang. 2026. Streamingeval:
+A unified evaluation framework towards realistic
+streaming video understanding. In Findings of the As-
+sociation for Computational Linguistics: ACL 2026,
+pages 5945–5960. Association for Computational
+Linguistics.
+Xi Tang, Jihao Qiu, Lingxi Xie, Yunjie Tian, Jianbin
+Jiao, and Qixiang Ye. 2025.
+Adaptive keyframe
+sampling for long video understanding.
+In 2025
+IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pages 29118–29128.
+IEEE.
+Keda Tao, Can Qin, Haoxuan You, Yang Sui, and Huan
+Wang. 2025a. Dycoke: Dynamic compression of
+tokens for fast video large language models.
+In
+2025 IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pages 18992–19001.
+IEEE.
+Keda Tao, Haoxuan You, Yang Sui, Can Qin, and Huan
+Wang. 2025b. Plug-and-play 1. x-bit kv cache quan-
+tization for video large language models.
+arXiv
+preprint arXiv:2503.16257.
+Dezhan Tu, Danylo Vashchilenko, Yuzhe Lu, and Pan-
+pan Xu. 2025.
+Vl-cache: Sparsity and modality-
+aware kv cache compression for vision-language
+model inference acceleration. In International Con-
+ference on Learning Representations, volume 2025,
+pages 219–239.
+Pavan Kumar Anasosalu Vasu, Cem Koc, Fartash Faghri,
+Chun-Liang Li, Bo Feng, Zhengfeng Lai, Meng Cao,
+Oncel Tuzel, and Hadi Pouransari. 2026. Vsas-bench:
+Real-time evaluation of visual streaming assistant
+models. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR)
+Findings, pages 9654–9663.
+Zhongwei Wan, Hui Shen, Xin Wang, Che Liu, Zheda
+Mai, and Mi Zhang. 2025. Meda: Dynamic kv cache
+allocation for efficient multimodal long-context infer-
+ence. In Proceedings of the 2025 Conference of the
+Nations of the Americas Chapter of the Association
+for Computational Linguistics: Human Language
+Technologies (Volume 1: Long Papers), pages 2485–
+2497.
+Zhongwei Wan, Ziang Wu, Che Liu, Jinfa Huang, Zhi-
+hong Zhu, Peng Jin, Longyue Wang, and Li Yuan.
+2024. Look-m: Look-once optimization in kv cache
+for efficient multimodal long-context inference. In
+Findings of the Association for Computational Lin-
+guistics: EMNLP 2024, pages 4065–4078.
+Changyuan Wang, Ziwei Wang, Xiuwei Xu, Yansong
+Tang, Jie Zhou, and Jiwen Lu. 2024a. Q-vlm: Post-
+training quantization for large vision-language mod-
+els. Advances in Neural Information Processing Sys-
+tems, 37:114553–114573.
+Hesong Wang, Xin Jin, Lu Lu, Chenhaowen Li, Jian
+Chen, Qiang Liu, and Huan Wang. 2026a. Early-
+tom: Early token compression completes fast video
+understanding. arXiv preprint arXiv:2605.30010.
+Junxi Wang, Te Sun, Jiayi Zhu, Junxian Li, Haowen
+Xu, Zichen Wen, Xuming Hu, Zhiyu Li, and Lin-
+feng Zhang. 2026b. Streammeco: Long-term agent
+memory compression for efficient streaming video
+understanding. In Findings of the Association for
+Computational Linguistics: ACL 2026, pages 13234–
+13251.
+Lyuke Wang, Zhuo Li, and Guangxu Zhu. 2026c. Vis-
+cache: Visual kv cache pruning for efficient vision
+large language model inference.
+arXiv preprint
+arXiv:2608.24063.
+Mengyue Wang, Shuo Chen, Kristian Kersting, Volker
+Tresp, and Yunpu Ma. 2025a. Metok: multi-stage
+event-based token compression for efficient long
+video understanding. In Proceedings of the 2025
+Conference on Empirical Methods in Natural Lan-
+guage Processing, pages 18881–18895.
+Peng Wang, Shuai Bai, Sinan Tan, Shijie Wang, Zhi-
+hao Fan, Jinze Bai, Keqin Chen, Xuejing Liu, Jialin
+Wang, Wenbin Ge, Yang Fan, Kai Dang, Mengfei
+Du, Xuancheng Ren, Rui Men, Dayiheng Liu,
+Chang Zhou, Jingren Zhou, and Junyang Lin. 2024b.
+Qwen2-vl: Enhancing vision-language model’s per-
+ception of the world at any resolution. arXiv preprint
+arXiv:2409.12191.
+Weihan Wang, Zehai He, Wenyi Hong, Yean Cheng, Xi-
+aohan Zhang, Ji Qi, Ming Ding, Xiaotao Gu, Shiyu
+13
+
+
+Huang, Bin Xu, et al. 2025b.
+Lvbench: An ex-
+treme long video understanding benchmark. In 2025
+IEEE/CVF International Conference on Computer
+Vision (ICCV), pages 22958–22967. IEEE.
+Xiao Wang, Qingyi Si, Jianlong Wu, Shiyu Zhu, Li Cao,
+and Liqiang Nie. 2024c. Retake: Reducing tempo-
+ral and knowledge redundancy for long video under-
+standing. arXiv preprint arXiv:2412.20504.
+Yi Wang, Xinhao Li, Ziang Yan, Yinan He, Jiashuo Yu,
+Xiangyu Zeng, Chenting Wang, Changlian Ma, Haian
+Huang, Jianfei Gao, et al. 2025c. Internvideo2. 5:
+Empowering video mllms with long and rich context
+modeling. arXiv preprint arXiv:2501.12386.
+Yiyu Wang, Xuyang Liu, Xiyan Gui, Xinying Lin,
+Boxue Yang, Chenfei Liao, Tailai Chen, and Lin-
+feng Zhang. 2026d. Accelerating streaming video
+large language models via hierarchical token com-
+pression. In Proceedings of the IEEE/CVF Confer-
+ence on Computer Vision and Pattern Recognition,
+pages 18523–18533.
+Ziyang Wang, Mengwei Li, Hao Yin, Wenhao Liu, and
+Zilei Wang. 2026e. Posprune: Visual token prun-
+ing with positional bias correction for efficient large
+vision-language models. In Proceedings of the AAAI
+Conference on Artificial Intelligence, volume 40,
+pages 10485–10493.
+Ziyang Wang, Shoubin Yu, Elias Stengel-Eskin, Jae-
+hong Yoon, Feng Cheng, Gedas Bertasius, and Mo-
+hit Bansal. 2025d. Videotree: Adaptive tree-based
+video representation for llm reasoning on long videos.
+In 2025 IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), pages 3272–3282.
+IEEE.
+Zichen Wen, Yifeng Gao, Shaobo Wang, Junyuan
+Zhang, Qintong Zhang, Weijia Li, Conghui He, and
+Linfeng Zhang. 2025. Stop looking for “important
+tokens” in multimodal language models: Duplication
+matters more. In Proceedings of the 2025 Confer-
+ence on Empirical Methods in Natural Language
+Processing, pages 9972–9991.
+Hao Wu, Junlong Tong, Xudong Wang, Yang Tan,
+Changyu Zeng, Anastasia Antsiferova, and Xiaoyu
+Shen. 2026a. From data to model: A survey of the
+compression lifecycle in mllms.
+Haoning Wu, Dongxu Li, Bei Chen, and Junnan Li.
+2024.
+Longvideobench: A benchmark for long-
+context interleaved video-language understanding.
+Advances in Neural Information Processing Systems,
+37:28828–28857.
+Zhuojie Wu, Shijie Wang, and Xin Yu. 2026b. Metom:
+Metadata-guided token merging for efficient video
+llms. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages
+10441–10450.
+Ziwei Xiang, Fanhu Zeng, Hongjian Fang, Rui-Qi
+Wang, Renxing Chen, Yanan Zhu, Yi Chen, Peipei
+Yang, and Xu-Yao Zhang. 2026.
+Fine-grained
+post-training quantization for large vision language
+models with quantization-aware integrated gradients.
+arXiv preprint arXiv:2603.17809.
+Junbin Xiao, Jiajun Chen, Tianxiang Sun, Xun Yang,
+and Angela Yao. 2026. Mukv: Multi-grained kv
+cache compression for long streaming video question-
+answering. In Proceedings of the IEEE/CVF Confer-
+ence on Computer Vision and Pattern Recognition,
+pages 11381–11391.
+Junbin Xiao, Xindi Shang, Angela Yao, and Tat-Seng
+Chua. 2021.
+Next-qa: Next phase of question-
+answering to explaining temporal actions. In 2021
+IEEE/CVF Conference on Computer Vision and Pat-
+tern Recognition (CVPR), pages 9772–9781. IEEE.
+Long Xing, Qidong Huang, Xiaoyi Dong, Jiajie Lu,
+Pan Zhang, Yuhang Zang, Yuhang Cao, Conghui He,
+Jiaqi Wang, Feng Wu, et al. 2024. Pyramiddrop:
+Accelerating your large vision-language models via
+pyramid visual redundancy reduction. arXiv preprint
+arXiv:2410.17247.
+Mingze Xu, Mingfei Gao, Zhe Gan, Hong-You Chen,
+Zhengfeng Lai, Haiming Gang, Kai Kang, and Af-
+shin Dehghan. 2024.
+Slowfast-llava:
+A strong
+training-free baseline for video large language mod-
+els. arXiv preprint arXiv:2407.15841.
+Yufei Xue, Yushi Huang, Jiawei Shao, and Jun Zhang.
+2025. Vlmq: Efficient post-training quantization for
+large vision-language models via hessian augmenta-
+tion. arXiv e-prints, pages arXiv–2508.
+Cheng Yang, Yang Sui, Jinqi Xiao, Lingyi Huang,
+Yu Gong, Chendi Li, Jinghua Yan, Yu Bai, Pon-
+nuswamy Sadayappan, Xia Hu, and Bo Yuan. 2025a.
+Topv: Compatible token pruning with inference
+time optimization for fast and low-memory multi-
+modal vision language model. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 19803–19813.
+Senqiao Yang, Yukang Chen, Zhuotao Tian, Chengyao
+Wang, Jingyao Li, Bei Yu, and Jiaya Jia. 2025b. Vi-
+sionzip: Longer is better but not necessary in vision
+language models. In 2025 IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR),
+pages 19792–19802. IEEE.
+Yanlai Yang, Zhuokai Zhao, Satya Narayan Shukla,
+Aashu Singh, Shlok Kumar Mishra, Lizhu Zhang,
+and Mengye Ren. 2025c.
+Streammem: Query-
+agnostic kv cache memory for streaming video un-
+derstanding. arXiv preprint arXiv:2508.15717.
+Zhenyu Yang, Yuhang Hu, Zemin Du, Dizhan Xue,
+Shengsheng Qian, Jiahong Wu, Fan Yang, Weim-
+ing Dong, and Changsheng Xu. 2025d. Svbench: A
+benchmark with temporal multi-turn dialogues for
+streaming video understanding. In International Con-
+ference on Learning Representations.
+14
+
+
+Linli Yao, Long Xing, Yang Shi, Sida Li, Yuanxin Liu,
+Yuhao Dong, Yi-Fan Zhang, Lei Li, Qingxiu Dong,
+Xiaoyi Dong, et al. 2026. Towards efficient multi-
+modal large language models: A survey on token
+compression.
+Jinhui Ye, Zihan Wang, Haosen Sun, Keshigeyan Chan-
+drasegaran, Zane Durante, Cristobal Eyzaguirre,
+Yonatan Bisk, Juan Carlos Niebles, Ehsan Adeli,
+Li Fei-Fei, et al. 2025a.
+Re-thinking temporal
+search for long-form video understanding. In 2025
+IEEE/CVF Conference on Computer Vision and Pat-
+tern Recognition (CVPR), pages 8579–8591. IEEE.
+Weihao Ye, Qiong Wu, Wenhao Lin, and Yiyi Zhou.
+2025b. Fit and prune: Fast and training-free visual
+token pruning for multi-modal large language models.
+In Proceedings of the AAAI Conference on Artificial
+Intelligence, volume 39, pages 22128–22136.
+Zhou Yu, Dejing Xu, Jun Yu, Ting Yu, Zhou Zhao, Yuet-
+ing Zhuang, and Dacheng Tao. 2019. Activitynet-qa:
+A dataset for understanding complex web videos via
+question answering. In Proceedings of the AAAI con-
+ference on artificial intelligence, volume 33, pages
+9127–9134.
+Bowen Yuan, Sisi You, and Bing-Kun Bao. 2025a.
+Dtoma: Training-free dynamic token manipulation
+for long video understanding. In Proceedings of the
+Thirty-Fourth International Joint Conference on Arti-
+ficial Intelligence, pages 2314–2322.
+Liping Yuan, Jiawei Wang, Haomiao Sun, Yuchen
+Zhang, and Yuan Lin. 2025b. Tarsier2: Advanc-
+ing large vision-language models from detailed video
+description to comprehensive video understanding.
+arXiv preprint arXiv:2501.07888.
+Bowen Zeng, Feiyang Ren, Jun Zhang, Xiaoling Gu,
+Ke Chen, Lidan Shou, and Huan Li. 2026.
+Hy-
+bridkv: Hybrid kv cache compression for efficient
+multimodal large language model inference. In Pro-
+ceedings of the 64th Annual Meeting of the Associa-
+tion for Computational Linguistics (Volume 1: Long
+Papers), pages 13018–13034.
+Boqiang Zhang, Kehan Li, Zesen Cheng, Zhiqiang Hu,
+Yuqian Yuan, Guanzheng Chen, Sicong Leng, Yum-
+ing Jiang, Hang Zhang, Xin Li, et al. 2025a. Vide-
+ollama 3: Frontier multimodal foundation models
+for image and video understanding. arXiv preprint
+arXiv:2501.13106.
+Ce Zhang, Jinxi He, Katia Sycara, and Yaqi Xie.
+2026a. Lens: Adaptive spatio-temporal zooming
+for keyframe sampling in long-form videos. In Eu-
+ropean Conference on Computer Vision, pages 511–
+529. Springer.
+Haowei Zhang, Shudong Yang, Jinlan Fu, See-Kiong
+Ng, and Xipeng Qiu. 2026b. HERMES: KV cache
+as hierarchical memory for efficient streaming video
+understanding. In Proceedings of the 64th Annual
+Meeting of the Association for Computational Lin-
+guistics (Volume 1: Long Papers), pages 8411–8430.
+Association for Computational Linguistics.
+Jun Zhang, Yicheng Ji, Feiyang Ren, Yihang Li, Bowen
+Zeng, Zonghao Chen, Ke Chen, Lidan Shou, Gang
+Chen, and Huan Li. 2026c. Efficient inference for
+large vision-language models: Bottlenecks, tech-
+niques, and prospects. In Findings of the Association
+for Computational Linguistics: ACL 2026, pages
+21036–21066.
+Libo Zhang, Zhaoning Zhang, Hongwanyang, Peng
+Qiao, and Dongsheng Li. 2026d. Sparrow: Text-
+anchored window attention with visual-semantic
+glimpsing for speculative decoding in video LLMs.
+In Proceedings of the 64th Annual Meeting of the
+Association for Computational Linguistics (Volume
+1: Long Papers), pages 9928–9942. Association for
+Computational Linguistics.
+Qizhe Zhang, Aosong Cheng, Ming Lu, Renrui Zhang,
+Zhiyong Zhuo, Jiajun Cao, Shaobo Guo, Qi She,
+and Shanghang Zhang. 2025b. Beyond text-visual
+attention: Exploiting visual cues for effective token
+pruning in vlms. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision, pages
+20857–20867.
+Shaojie Zhang, Jiahui Yang, Jianqin Yin, Zhenbo Luo,
+and Jian Luan. 2025c. Q-frame: Query-aware frame
+selection and multi-resolution adaptation for video-
+llms.
+In Proceedings of the IEEE/CVF Interna-
+tional Conference on Computer Vision, pages 22056–
+22065.
+Xian Zhang, Zexi Wu, Zinuo Li, Hongming Xu, Luqi
+Gong, Farid Boussaid, Naoufel Werghi, and Mo-
+hammed Bennamoun. 2025d.
+Adard-key: Adap-
+tive relevance-diversity keyframe sampling for
+long-form video understanding.
+arXiv preprint
+arXiv:2510.02778.
+Xuan Zhang, Cunxiao Du, Sicheng Yu, Jiawei Wu,
+Fengzhuo Zhang, Wei Gao, and Qian Liu. 2025e.
+Sparse-to-dense: A free lunch for lossless accelera-
+tion of video understanding in llms. In Proceedings
+of the 63rd Annual Meeting of the Association for
+Computational Linguistics (Volume 2: Short Papers),
+pages 734–742.
+Yuan Zhang, Chun-Kai Fan, Junpeng Ma, Wenzhao
+Zheng, Tao Huang, Kuan Cheng, Denis Gudovskiy,
+Tomoyuki Okuno, Yohei Nakata, Kurt Keutzer, et al.
+2024. Sparsevlm: Visual token sparsification for
+efficient vision-language model inference.
+arXiv
+preprint arXiv:2410.04417.
+Shiyu Zhao, Zhenting Wang, Felix Juefei-Xu, Xide
+Xia, Miao Liu, Xiaofang Wang, Mingfu Liang, Ning
+Zhang, Dimitris N Metaxas, and Licheng Yu. 2025.
+Accelerating multimodal large language models by
+searching optimal vision token reduction. In 2025
+IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pages 29869–29879.
+IEEE.
+Yiwu Zhong, Zhuoming Liu, Yin Li, and Liwei Wang.
+2025.
+Aim: Adaptive inference of multi-modal
+15
+
+
+llms via token merging and pruning.
+In 2025
+IEEE/CVF International Conference on Computer
+Vision (ICCV), pages 20180–20192. IEEE.
+Junjie Zhou, Yan Shu, Bo Zhao, Boya Wu, Zhengyang
+Liang, Shitao Xiao, Minghao Qin, Xi Yang, Yong-
+ping Xiong, Bo Zhang, et al. 2025. Mlvu: Bench-
+marking multi-task long video understanding. In
+2025 IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pages 13691–13701.
+IEEE.
+Sijin Zhou, Wei Feng, Zhuang Qi, Zhonghua Wang, Lie
+Ju, Xiang An, Mehrtash Harandi, and Zongyuan Ge.
+2026. Gtr: Guide-then-refine token compression for
+training-free acceleration of video-llms. In Computer
+Vision – ECCV 2026, pages 483–500. Springer.
+Zirui Zhu, Hailun Xu, Yang Luo, LIU YONG, Kanchan
+Sarkar, Zhenheng Yang, and Yang You. 2026. Focus:
+Efficient keyframe selection for long video under-
+standing. In International Conference on Learning
+Representations, volume 2026, pages 98463–98486.
+A
+Evaluation Metrics and Evidence
+Protocol
+A.1
+General Evaluation Metrics
+We evaluate training-free VLM acceleration along
+three dimensions: task quality, compression, and
+realized inference cost. Task quality is assessed
+using benchmark accuracy or task-specific scores,
+while compression is characterized by visual-token
+or KV-cache retention and numerical precision. In-
+ference efficiency is measured using Time to First
+Token (TTFT), Time per Output Token (TPOT),
+End-to-End latency (E2E), and Peak Memory. We
+further employ the baseline-normalized Quality–
+Latency Balance (QLB) to assess the trade-off be-
+tween task quality and latency under matched set-
+tings. Table 5 summarizes the metrics and their
+definitions.
+Here, tarr, tfirst, and tend denote request arrival,
+first-token generation, and response completion
+times, respectively, and No is the number of gener-
+ated tokens (No > 1 for TPOT). For QLB, A and
+A0 denote the task-specific quality scores of the
+accelerated method and its matched baseline, while
+Lx and L0,x denote their corresponding latencies.
+The matched baseline has a QLB of 100. Higher
+values indicate a more favorable relative quality–
+latency balance, but do not imply comparability
+across different evaluation settings.
+A.2
+Video Understanding Benchmarks
+Table 6 summarizes representative benchmarks for
+video understanding, covering temporal reasoning,
+egocentric understanding, long-context comprehen-
+sion, motion perception, and detailed video descrip-
+tion.
+Our controlled evaluation uses Video-MME,
+EgoSchema, LongVideoBench, and MVBench (Fu
+et al., 2025a; Mangalam et al., 2023; Wu et al.,
+2024; Li et al., 2024b). The literature-based de-
+coding comparison additionally includes Video De-
+tailed Captioning (VideoDC/VDC), which evalu-
+ates generated descriptions using VDCscore (Chai
+et al., 2025). Other benchmarks provide comple-
+mentary coverage of temporal perception, long-
+form reasoning, and domain-specific understanding
+(Yu et al., 2019; Xiao et al., 2021; Patraucean et al.,
+2023; Liu et al., 2024; Fang et al., 2024; Song et al.,
+2024; Zhou et al., 2025; Wang et al., 2025b; Hong
+et al., 2025; Hu et al., 2026a). These benchmarks
+differ in task format, video duration, and evaluation
+protocol; results should therefore be compared only
+under matched settings.
+A.3
+Host VLMs and Language Backbones
+The choice of host VLM plays an important role
+in evaluating training-free inference acceleration.
+Differences in visual tokenization, context capacity,
+and model architecture affect both baseline perfor-
+mance and computational cost. Consequently, sim-
+ilar retention budgets may correspond to different
+inference workloads across host models.
+Existing
+studies
+employ
+diverse
+VLM
+backbones,
+including Video-LLaVA, LLaVA-
+OneVision, and the Qwen-VL family (Lin et al.,
+2024a; Wang et al., 2024b; Bai et al., 2025b,a).
+Table 7 summarizes representative methods,
+their host models, compression budgets, and
+reported performance across video understanding
+benchmarks. The table preserves a broad view of
+the literature, including stage-specific components,
+multi-stage methods, and architecture-dependent
+approaches (Liu et al., 2025b; Wang et al., 2026a;
+Liu et al., 2025c; Lin et al., 2026; Wang et al.,
+2026c). Since these results originate from different
+models, budgets, and evaluation protocols, they
+serve as reported evidence rather than a direct
+cross-method ranking.
+A.4
+Comparison Protocol
+Evidence Sources. Our quantitative analysis com-
+bines controlled experiments with results reported
+in prior studies. The controlled experiments evalu-
+ate LLaVA-OneVision-7B with 32 input frames
+on an NVIDIA H100 (80 GB) GPU, covering
+16
+
+
+Metric
+Formulation
+Scope
+Definition
+Task Quality and Compression
+Accuracy
+Ncorrect
+Ntotal
+× 100%
+Quality
+Percentage of correctly answered questions under the
+corresponding benchmark protocol.
+VDCscore
+Benchmark-reported score
+Quality
+Video captioning quality measured using the VideoDC
+evaluation protocol.
+Ret.
+Nretained
+Noriginal × 100%
+Compression
+Percentage of retained visual tokens or KV states rela-
+tive to the source-defined budget.
+Q-ret.
+Qquant
+QFP16 × 100%
+PTQ
+Quantized-model quality relative to the matched FP16
+baseline.
+Bits
+WbwAba
+PTQ
+Numerical precision of weights and activations; KV-
+cache precision is specified separately when applica-
+ble.
+Inference Efficiency
+TTFT
+tfirst −tarr
+Pre-generation Elapsed time from request arrival to the first output
+token under the stated timing boundary.
+TPOT
+tend −tfirst
+No −1
+Decoding
+Average generation latency per output token after the
+first token.
+E2E
+tend −tarr
+Full Pipeline
+Total elapsed time from request arrival to response
+completion.
+Peak Mem. max
+t
+MGPU(t)
+Full Pipeline
+Maximum GPU memory usage within the specified
+measurement window.
+Quality–Latency Evaluation
+QLBx
+100 × A
+A0 ×
+2L0,x
+L0,x + Lx
+Joint
+Baseline-normalized quality–latency score, where x ∈
+{TTFT, TPOT}.
+Table 5: Core metrics for evaluating task quality, compression, and realized inference efficiency. QLB measures the
+relative quality–latency balance under matched evaluation settings.
+Video-MME, EgoSchema, LongVideoBench, and
+MVBench. Other comparisons draw on original
+publications and unified evaluations under shared
+settings (Lin et al., 2026). Derived metrics, includ-
+ing QLB and quality-retention ratios, are calculated
+from the corresponding reported or measured val-
+ues.
+Comparability. We prioritize comparisons with
+matched host models, benchmarks, input budgets,
+and measurement protocols. For our controlled
+experiments, accuracy and TTFT are averaged
+equally across the four benchmarks. QLB is calcu-
+lated relative to the matched baseline, which scores
+100. Literature-based comparisons are interpreted
+within their respective evaluation groups. In partic-
+ular, decoding results using different task-quality
+metrics and PTQ results using different benchmark
+sets are not directly ranked. The broader results in
+Table 7 serve as a reference rather than a unified
+ranking.
+Realized Efficiency. We distinguish reductions
+in frames, visual tokens, or KV-cache size from
+measured latency and memory savings. Our TTFT
+measurements cover model-side processing, includ-
+ing visual encoding and prefill, but exclude external
+video preprocessing and subsequent decoding. For
+literature-based results, we retain the original mea-
+surement boundaries and do not infer system per-
+formance from compression ratios. Stage-level and
+end-to-end measurements are interpreted separately
+unless a complete timing breakdown is available.
+B
+Scope and Boundaries of Training-Free
+Acceleration
+Training-Free Scope. We define training-free ac-
+celeration as modifying the inference procedure
+of a pretrained VLM without training additional
+acceleration-specific parameters.
+This includes
+frame and token selection, merging, computation
+reuse, attention sparsification, and KV-cache man-
+agement. Pretrained auxiliary models may be used
+without further training, although their inference
+overhead must be accounted for. Methods requiring
+a newly trained selector, predictor, or draft model
+fall outside our core scope, as illustrated by Spar-
+row (Zhang et al., 2026d).
+Preparation and Calibration. Training-free de-
+ployment does not necessarily imply the absence of
+data-dependent preparation. For example, FitPrune
+derives pruning configurations from attention statis-
+17
+
+
+Benchmark
+Venue
+Year Video Length
+Scale
+Primary Focus
+Benchmarks used in quantitative comparisons
+Video-MME
+CVPR
+2025 11 s–1 h
+900 videos, 2.7K QA
+General video understanding across du-
+rations
+EgoSchema
+NeurIPS
+2023 Avg. 180 s
+5.0K videos, 5.0K QA
+Long-horizon egocentric reasoning
+LongVideoBench
+NeurIPS
+2024 Up to 1 h
+3.8K videos, 6.7K QA
+Long-context referring and temporal rea-
+soning
+MVBench
+CVPR
+2024 Avg. 16 s
+3.6K videos, 4.0K QA
+Multi-task temporal understanding
+VideoDC (VDC)
+ICLR
+2025 –
+∼1.0K clips, captions
+Detailed video captioning and VDC-
+score
+Additional representative video benchmarks
+ActivityNet-QA
+AAAI
+2019 Avg. 180 s
+5.8K videos, 58K QA
+Long-form open-ended video QA
+NExT-QA
+CVPR
+2021 Avg. 44 s
+5.4K videos, 52K QA
+Causal and temporal reasoning
+Perception Test
+NeurIPS
+2023 Avg. 23 s
+11.6K videos, 44K QA
+Multimodal perception and reasoning
+TempCompass
+ACL Findings 2024 –
+410 videos, 7.54K tasks Fine-grained temporal perception
+MMBench-Video
+NeurIPS
+2024 30 s–6 min
+609 videos, 2.0K QA
+Holistic multi-shot video understanding
+MovieChat-1K
+CVPR
+2024 Avg. 9.4 min
+1K videos, 13K QA
+Long-video dialogue and event under-
+standing
+MLVU
+CVPR
+2025 Avg. 15.5 min
+1.7K videos, 3.1K QA
+Multi-task long-video understanding
+LVBench
+ICCV
+2025 Avg. 4101 s
+103 videos, 1.5K QA
+Extremely long-video understanding
+MotionBench
+CVPR
+2025 –
+5.4K videos, 8.1K QA
+Fine-grained motion perception
+Video-MMMU
+ACL
+2026 Avg. 506 s
+300 videos, 900 QA
+Knowledge acquisition from profes-
+sional videos
+Table 6: Representative benchmarks for video understanding. The first group includes datasets used in the main-text
+quantitative comparisons; the second provides broader task coverage. Dataset sizes are approximate and may vary
+across evaluation subsets.
+tics without parameter training (Ye et al., 2025b).
+In contrast, PTQ methods such as MBQ and QIG
+use calibration data to determine quantization pa-
+rameters or sensitivity (Li et al., 2025a; Xiang et al.,
+2026). We therefore discuss calibration-dependent
+PTQ as a separate cross-stage extension rather than
+conflating it with directly applicable training-free
+inference methods.
+Output Fidelity. Training dependency and out-
+put fidelity are independent considerations. Ex-
+act speculative decoding can preserve the target
+model’s output distribution under its specified veri-
+fication and correction rules (Leviathan et al., 2023;
+Chen et al., 2023). In contrast, relaxed verification
+methods such as LVSpec improve acceptance by
+allowing semantically plausible alternatives, with-
+out guaranteeing identical output distributions (Ji
+et al., 2026). Thus, training-free acceleration does
+not necessarily imply lossless inference.
+C
+Workload Shifts: Streaming and
+Multi-Turn Inference
+Most training-free VLM acceleration studies are
+evaluated under offline, single-turn VideoQA set-
+tings, where the complete video is available be-
+fore answering a single query. However, streaming
+and multi-turn workloads introduce additional con-
+straints on inference efficiency. Streaming requires
+causal processing of incoming frames and bounded
+historical memory, whereas multi-turn interaction
+creates opportunities for computation reuse while
+increasing the cost of maintaining dialogue context.
+These settings change how visual evidence is ac-
+cessed, retained, and reused, making conventional
+accuracy and single-query latency insufficient to
+characterize deployment efficiency. We examine
+these two workload shifts and their implications for
+training-free acceleration.
+C.1
+Offline-to-Streaming Workload Shift
+Offline VideoQA assumes access to the complete
+video before answering a query, whereas stream-
+ing VLMs must process visual evidence causally
+as frames arrive. This shift introduces constraints
+beyond task quality and query latency: historical
+memory must remain bounded, and frame process-
+ing must keep pace with the incoming stream (Tang
+et al., 2026). A necessary condition for avoiding
+sustained processing backlogs is
+fsust
+proc ≥fin,
+(2)
+where fin denotes the frame rate ingested by the
+model after sampling, and fsust
+proc is its sustainable
+processing rate. This condition alone does not guar-
+antee bounded memory or low response latency.
+18
+
+
+To illustrate this workload shift, we consider
+two streaming benchmarks. StreamingBench eval-
+uates real-time video understanding under continu-
+ously arriving inputs (Lin et al., 2024b), whereas
+OVO-Bench emphasizes timestamp-aware reason-
+ing, including backward tracing, real-time percep-
+tion, and forward active responding (Niu et al.,
+2025).
+Table 8 presents the offline and streaming re-
+sults reported by HERMES (Zhang et al., 2026b).
+Each backbone is evaluated with and without the
+training-free adaptation. Since the workloads differ
+in input access and evaluation protocol, we inter-
+pret changes within each benchmark rather than
+comparing absolute scores across benchmarks.
+The results reveal a workload-dependent trade-
+off.
+On LLaVA-OneVision-7B, HERMES im-
+proves OVO-Bench from 53.35 to 58.27, while
+offline scores change only modestly. On Qwen2.5-
+VL-7B, StreamingBench and OVO-Bench improve
+by 6.13 and 6.93 points, respectively, but Video-
+MME decreases by 3.89 points. Thus, adaptation to
+causal streaming may improve online understand-
+ing without uniformly preserving offline perfor-
+mance.
+SimpleStream further shows that a short recent-
+frame window can form a strong training-free
+streaming baseline (Shen et al., 2026b). Other
+methods target complementary costs: Streaming-
+TOM compresses streaming visual context (Chen
+et al., 2026b), whereas STC reduces redundant vi-
+sual encoding through feature reuse (Wang et al.,
+2026d). Together, these studies suggest that stream-
+ing acceleration should be assessed through causal
+task performance, memory growth, processing
+throughput, and response latency, rather than of-
+fline accuracy alone.
+C.2
+Single-Turn to Multi-Turn Interaction
+When multiple questions refer to the same video,
+inference becomes a stateful interaction rather than
+a sequence of independent requests. Previously
+computed visual features may be reused, but di-
+alogue history introduces additional context and
+memory costs. Consequently, training-free multi-
+turn acceleration must balance computation reuse
+with the preservation of relevant visual and textual
+evidence.
+For a fixed video with one-time preparation cost
+τprep and Q successive queries, the amortized pro-
+cessing time per query can be expressed as
+¯τQ =
+τprep + PQ
+q=1
+
+τ (q)
+adapt + τ (q)
+infer
+
+Q
+,
+(3)
+where τ (q)
+adapt denotes the query-specific cost of se-
+lection, retrieval, compression, or state reconstruc-
+tion, and τ (q)
+infer denotes the remaining inference
+time. This expression characterizes the potential
+benefit of reuse; it is not a measured latency result
+in this survey.
+Training-free methods exploit this opportunity
+at different stages. STTM performs query-agnostic
+spatiotemporal merging, potentially allowing com-
+pressed visual features to serve multiple queries
+(Hyun et al., 2025). ReKV instead reuses pre-
+viously computed KV states and retrieves query-
+relevant historical information (Di et al., 2025).
+However, aggressive reuse or eviction can also dis-
+card evidence needed by subsequent questions.
+SVBench evaluates video understanding under
+single-instance and temporal multi-turn dialogue
+settings (Yang et al., 2025d). Its evaluation includes
+METEOR, a reference-based text generation met-
+ric (Banerjee and Lavie, 2005), and GPT4-Score,
+which uses GPT-4 to assess the semantic accuracy
+of generated answers against reference responses
+(Yang et al., 2025d). To describe the observed dif-
+ference between the two evaluation settings, we
+calculate
+∆ctx = Smulti −Ssingle,
+(4)
+where Smulti and Ssingle are the corresponding
+benchmark scores. Table 9 presents the reported
+scores and our derived differences.
+All listed models achieve higher METEOR and
+GPT4-Score values under multi-turn evaluation.
+For GPT-4o, METEOR increases from 28.81 to
+36.84 and GPT4-Score from 45.37 to 60.70. These
+results suggest that preceding dialogue context can
+provide useful information for subsequent video
+understanding. However, SVBench evaluates task
+quality rather than the computation or memory
+costs of maintaining that context.
+The implication for training-free acceleration is
+therefore not to retain all historical states, but to
+selectively preserve useful evidence while reduc-
+ing repeated computation. For repeated queries
+over a fixed video, amortized latency and persistent
+memory are important complements to per-query
+accuracy and latency.
+19
+
+
+Overall, streaming and multi-turn interaction in-
+troduce distinct workload constraints. Streaming
+requires causal processing and sustainable state
+management, whereas multi-turn interaction cre-
+ates opportunities for reuse alongside growing di-
+alogue history. Both settings reinforce the need
+to evaluate training-free acceleration under its in-
+tended workload, with task quality and realized
+system costs considered together.
+D
+Speculative Decoding for VLM
+Acceleration
+Speculative decoding (SD) accelerates autoregres-
+sive generation by allowing a draft model to pro-
+pose multiple tokens for parallel verification by a
+target model. For VLMs, however, drafting can be
+expensive because both models must process long
+visual contexts. Effective acceleration therefore
+depends on draft cost, draft–target alignment, ver-
+ification overhead, and accepted progress (Zhang
+et al., 2025e; Ji et al., 2025).
+D.1
+Draft–Verify Efficiency
+Training-free VLM SD follows several comple-
+mentary directions. Sparse-to-Dense (StD) com-
+bines sparse Top-K drafting with dense verifica-
+tion, reporting up to 1.94× wall-clock speedup
+without changing the target distribution (Zhang
+et al., 2025e). SpecVLM instead reduces draft-
+side visual tokens through verifier-guided pruning
+while retaining full-context target verification. It
+removes up to 90% of draft visual tokens and re-
+ports up to 2.68× and 2.11× decoding speedup
+on LLaVA-OneVision-72B and Qwen2.5-VL-32B,
+respectively (Ji et al., 2025).
+ParallelVLM further overlaps drafting and veri-
+fication, using Unbiased Verifier-Guided Pruning
+to improve draft–target alignment. It reports av-
+erage speedups of 3.36× and 2.42× on the same
+target models (Kong et al., 2026). LVSpec takes
+a different approach by relaxing verification for
+less visually relevant tokens while strictly checking
+visual-semantic anchors. Its position-shift-tolerant
+mechanism increases accepted progress without
+guaranteeing exact output-distribution preservation
+(Ji et al., 2026).
+These methods expose three acceleration levers:
+reducing draft computation, overlapping execution,
+and increasing accepted progress. Their combined
+effect must be assessed through measured decoding
+efficiency rather than acceptance alone.
+D.2
+Empirical Trade-offs
+Cross-paper speedups cannot be directly com-
+pared because draft–target pairs, hardware, spec-
+ulative windows, and workloads differ. We there-
+fore organize matched comparisons reported by
+ParallelVLM and LVSpec (Kong et al., 2026; Ji
+et al., 2026).
+The former evaluates five video
+benchmarks, including Video Detail Caption (Chai
+et al., 2025), Video-MME, MVBench, MLVU,
+and LongVideoBench (Fu et al., 2025a; Li et al.,
+2024b; Zhou et al., 2025; Wu et al., 2024). The
+latter reports results on Video Detail Caption.
+Table 10 summarizes the corresponding source-
+reported measurements.
+Let M denote mean accepted length and S the
+decoding speedup relative to autoregressive gener-
+ation. We calculate the relative improvements over
+the SpecVLM baseline within each matched block
+as
+∆M = Mnew −Mbase
+Mbase
+,
+∆S = Snew −Sbase
+Sbase
+.
+(5)
+Table 10 shows that accepted progress and de-
+coding speedup are not proportional. For LLaVA-
+OneVision-72B/7B, ParallelVLM improves mean
+accepted length by 54.4% but speedup by 22.6%.
+On Qwen2.5-VL-32B/7B, accepted length in-
+creases by only 2.2%, while speedup improves
+by 14.7%. This difference reflects the additional
+contribution of overlapping execution (Kong et al.,
+2026).
+LVSpec illustrates the fidelity–efficiency trade-
+off of relaxed verification.
+On Qwen2.5-VL-
+32B/7B, it increases accepted length from 3.29
+to 7.76 and speedup from 2.00× to 2.70×, with
+99.6% task-performance retention. On LLaVA-
+OneVision-72B/7B, the corresponding speedup
+rises from 2.38× to 2.94×, with 99.8% retention
+(Ji et al., 2026). Unlike strict SD, these gains do
+not imply preservation of the original output distri-
+bution.
+D.3
+Evaluation and Net Gain
+Speculation does not necessarily yield acceleration.
+In the self-speculative settings reported by LVSpec,
+naive SD achieves only 0.88×, 0.94×, and 0.86×
+speedup on Video Detail Caption, Video Detail
+Description, and MovieChat with Qwen2.5-VL.
+A LLaVA-OneVision configuration falls to 0.65×
+on MovieChat (Ji et al., 2026; Song et al., 2024).
+These results show that drafting and verification
+20
+
+
+overhead can exceed the computation saved.
+A useful diagnostic is the wall-clock cost per
+committed output token:
+Cprog =
+E[T wall
+iter ]
+E[Ncommit],
+(6)
+where T wall
+iter includes drafting, verification, syn-
+chronization, and control overhead, accounting for
+any execution overlap. Ncommit is the number of
+output tokens committed per iteration. This formu-
+lation avoids incorrectly adding draft and verifica-
+tion times when they execute concurrently.
+The effect on request-level latency also de-
+pends on output length. Under a simplified timing
+model that excludes additional system overhead,
+the decoding-time fraction can be approximated as
+αproxy
+dec
+(No) =
+(No −1)τTPOT
+τTTFT + (No −1)τTPOT
+,
+(7)
+where No is the generated-token count. For fixed
+TTFT and TPOT, longer responses increase the
+share of time available for decoding-side optimiza-
+tion. However, this quantity is not a measured E2E
+latency fraction: video preprocessing, scheduling,
+and other system overhead may remain outside its
+scope.
+Consequently, SD evaluations should report
+draft–target configurations, visual budgets, spec-
+ulative windows, mean accepted length, decoding
+throughput or TPOT, output length, and verification
+fidelity. Where possible, drafting and verification
+costs, TTFT, and request-level E2E latency should
+also be measured (Zhang et al., 2025e; Ji et al.,
+2025; Kong et al., 2026; Ji et al., 2026). The objec-
+tive is not maximum acceptance alone, but reliable
+conversion of speculative progress into realized
+inference efficiency.
+21
+
+
+Method
+Host VLM
+Ret. / Budget
+NExT
+MVB
+V-MME
+ES
+LVB
+MLVU
+Input Stage
+AKS
+LLaVA-Video-7B
+64f
+–
+–
+65.3
+–
+62.7
+–
+BOLT
+LLaVA-OneVision-7B
+1fps →8f
+77.4
+–
+56.1
+59.23
+54.5
+63.6
+MDP3
+LLaVA-OneVision-7B
+128 →8f
+–
+–
+59.6
+–
+59.0
+69.8
+VideoTree
+GPT-4
+Adaptive
+75.6
+–
+–
+61.1
+–
+–
+Q-Frame
+Qwen2-VL-7B
+4H+8M+32L
+–
+–
+58.3
+–
+58.4
+65.4
+F2C
+Qwen2.5-VL-7B
+8f-equiv.
+–
+–
+61.4
+–
+58.9
+63.1
+FOCUS
+LLaVA-Video-7B
+64f
+–
+–
+65.4
+–
+63.5
+–
+KTV†
+LLaVA-v1.6-7B
+504 vis. tok.
+64.5
+46.2
+43.6
+49.6
+–
+44.8
+MaxInfo
+LLaVA-Video-7B
+Adaptive (≤64f)
+–
+–
+64.2
+63.7
+61.5
+–
+Encoding Stage
+EarlyTom-I
+LLaVA-OV-7B
+73.9% avg. tok.
+–
+57.9
+57.0
+60.3
+–
+–
+STC-Cacher
+StreamForest / Qwen2-7B
+75% cache reuse
+–
+–
+60.7
+59.7
+–
+68.1
+Projector Stage
+EarlyTom-II†
+LLaVA-OV-7B
+25%
+–
+57.4
+58.5
+60.5
+56.3
+–
+KTV-II†
+LLaVA-v1.6-7B
+936 tok.
+65.1
+46.4
+43.7
+50.4
+–
+36.1
+StreamingTOM-CTR†
+LLaVA-OV-7B
+50 tok./frame
+–
+–
+59.9
+63.7
+–
+67.9
+Unified-Outer
+LLaVA-OV-7B
+10%
+–
+57.4
+56.6
+60.5
+57.4
+44.7
+FlashVID-Outer
+LLaVA-OV-7B
+10%
+–
+57.4
+57.8
+60.0
+56.5
+–
+VidCom2
+LLaVA-OV-7B
+25%
+–
+57.2
+58.6
+–
+54.9
+62.5
+DivPrune
+LLaVA-NeXT-Video
+–
+24.48∗
+–
+–
+39.76
+–
+–
+V-CAST
+LLaVA-OV-7B
+25%
+–
+57.4
+58.6
+–
+56.4
+62.9
+MMG-Vid
+LLaVA-OV-7B
+25%
+–
+56.7
+58.6
+–
+56.6
+62.9
+STC-Pruner
+ReKV / LLaVA-OV-7B
+25%
+–
+–
+57.1
+60.8
+–
+67.6
+FastVID
+LLaVA-OV-7B
+10%
+–
+55.9
+57.3
+–
+56.3
+62.7
+VisionZip
+Qwen3-VL-8B
+25% tok.
+–
+–
+60.1
+–
+–
+–
+AIM-I
+LLaVA-OV-7B
+25%
+–
+–
+58.0
+–
+–
+–
+DyCoke-TTM
+LLaVA-OV-7B
+14.25%
+77.2
+–
+58.1
+–
+–
+–
+PruneVid-Stage I
+PLLaVA-7B
+36.1%
+–
+47.2
+44.7
+–
+–
+–
+HoliTom-Outer
+LLaVA-OV-7B
+15%
+–
+58.1
+58.1
+61.0
+57.0
+–
+SlowFast-LLaVA
+LLaVA-v1.6-Vicuna-7B
+3680 tok.
+64.2
+–
+–
+47.2
+–
+–
+Prefill Stage
+AIM-II†
+LLaVA-OneVision-7B
+25% pre-LLM tok.
+–
+57.1
+58.2
+59.6
+–
+63.7
+AdaTP
+LLaVA-OneVision-7B
+40→12% tok.
+–
+–
+59.04
+–
+56.02
+63.47
+PruneVid-II†
+LLaVA-OneVision-7B
+17.0% tok.
+–
+57.5
+58.6
+59.5
+–
+–
+FrameFusion
+LLaVA-Video-7B
+30% tok.
+81.8
+59.7
+61.3
+53.0
+–
+–
+STTM
+LLaVA-Video-7B
+50% tok.
+82.5
+–
+62.6
+58.6
+59.6
+69.9
+PACT
+LLaVA-OneVision-7B
+≈30.8% tok.
+–
+–
+57.7
+60.0
+–
+64.8
+Unified-Inner†
+LLaVA-OneVision-7B
+10%→5% tok.
+–
+57.7
+56.6
+60.6
+56.4
+45.5
+HoliTom-Inner†
+LLaVA-OneVision-7B
+10%→5% tok.
+–
+57.3
+56.8
+61.2
+56.3
+–
+ReTaKe-PivotKV†
+Qwen2-VL-7B
+2048f / ≤32K ctx.
+–
+–
+63.9
+–
+57.7
+69.8
+InfiniPot-V
+Qwen2-VL-7B
+768f / 6K KV
+–
+–
+62.8
+65.6
+58.4
+65.8
+StreamMem
+Qwen2-VL-7B
+4.0/0.5 fps / 6K KV
+–
+–
+62.1
+67.2
+–
+65.9
+LiveVLM-VSB†
+LLaVA-OneVision-7B
+12K cache
+–
+–
+59.6
+–
+56.1
+68.1
+Decoding Stage
+METok†
+LLaVA-OV-7B
+Multi-stage
+–
+57.3
+58.4
+59.8
+–
+64.7
+DyCoke-II†
+LLaVA-OV-7B
+25% before-LLM budget
+–
+53.1
+54.3
+59.5
+49.5
+–
+SparseVILA
+LongVILA-Qwen2-7B
+50% prefill / 25% decode KV
+–
+–
+59.8
+–
+–
+72.9
+ReKV
+LLaVA-OV-7B
+0.5 FPS →64 retrieved frames
+–
+–
+–
+60.7
+–
+68.5
+LiveVLM-PaR
+LLaVA-OV-7B
+Streaming KV / retrieval
+–
+–
+57.3
+63.0
+–
+66.3
+StreamingTOM-OQM†
+LLaVA-OV-7B
+4-bit OQM, ∼12K retrieval
+–
+–
+59.9
+63.7
+–
+67.9
+VisCacheC
+Qwen2.5-VL-3B
+28% KV
+–
+–
+–
+55.0
+–
+–
+Table 7: Reported performance of representative VLM acceleration methods, grouped by their primary intervention
+stage. NExT, MVB, V-MME, ES, LVB, and MLVU denote NExT-QA, MVBench, Video-MME, EgoSchema,
+LongVideoBench, and MLVU, respectively. Ret./Budget follows the source-defined input, token, cache, or KV
+budget and is not directly comparable across methods. “–” denotes an unreported result; † identifies a stage-specific
+component or configuration of a multi-stage method; C denotes a cross-stage method. Results from different hosts
+or protocols should not be interpreted as direct rankings.
+22
+
+
+Backbone / Setting
+Offline Video Understanding
+Streaming Video Understanding
+MVBench↑
+EgoSchema↑
+V-MME Avg.↑
+SBench↑
+OVO Avg.↑
+LLaVA-OneVision-7B
+Base
+57.02
+59.93
+57.67
+71.34
+53.35
++ HERMES (4K)
+56.92
+60.29
+58.85
+73.23
+58.27
+Qwen2.5-VL-7B
+Base
+65.00
+58.47
+64.52
+73.31
+52.28
++ HERMES (4K)
+65.53
+59.97
+60.63
+79.44
+59.21
+Table 8: Offline and streaming video understanding performance reported by HERMES (%). SBench denotes the
+real-time visual understanding evaluation of StreamingBench. OVO Avg. averages the real-time visual perception
+and backward tracing categories of OVO-Bench. HERMES (4K) specifies a 4K-token KV-cache budget. Offline and
+streaming benchmarks use different evaluation protocols; scores are compared only within the same benchmark.
+Model
+METEOR
+GPT4-Score
+Single↑
+Multi↑
+∆ctx
+Single↑
+Multi↑
+∆ctx
+InternVL2
+26.85
+32.74
++5.89
+32.26
+42.25
++9.99
+VILA
+28.44
+33.57
++5.13
+34.63
+45.41
++10.78
+InternLM-XComposer2.5
+23.32
+31.02
++7.70
+37.11
+49.69
++12.58
+MiniCPM-V 2.6
+27.36
+33.90
++6.54
+36.73
+48.57
++11.84
+GPT-4V
+28.66
+36.47
++7.81
+44.94
+60.11
++15.17
+GPT-4o
+28.81
+36.84
++8.03
+45.37
+60.70
++15.33
+Table 9: Single-instance (Single) and multi-turn (Multi) video QA performance on SVBench. METEOR measures
+reference-based text similarity, including synonym and stemming matches; GPT4-Score evaluates answer correctness
+using GPT-4 as a judge. Both metrics are shown on the reported 0–100 score scale. ∆ctx is the derived difference
+between Multi and Single, in score points. It does not measure inference acceleration or isolate the causal effect of
+dialogue history.
+Target / Draft Setting
+Method
+M ↑
+Speedup↑
+∆M ↑
+∆S ↑
+Fidelity
+Five-benchmark matched evaluation in ParallelVLM
+LLaVA-OV 72B / 7B
+SpecVLM
+4.42
+2.74×
+–
+–
+Exact
+LLaVA-OV 72B / 7B
+ParallelVLM
+6.83
+3.36×
++54.4%
++22.6%
+Exact
+Qwen2.5-VL 32B / 7B
+SpecVLM
+4.19
+2.11×
+–
+–
+Exact
+Qwen2.5-VL 32B / 7B
+ParallelVLM
+4.28
+2.42×
++2.2%
++14.7%
+Exact
+Video Detail Caption evaluation in LVSpec
+Qwen2.5-VL 32B / 7B
+SpecVLM
+3.29
+2.00×
+–
+–
+Exact
+Qwen2.5-VL 32B / 7B
+LVSpec
+7.76
+2.70×
++135.9%
++35.0%
+99.6%
+LLaVA-OV 72B / 7B
+SpecVLM
+3.37
+2.38×
+–
+–
+Exact
+LLaVA-OV 72B / 7B
+LVSpec
+7.34
+2.94×
++117.8%
++23.5%
+99.8%
+Table 10: Matched-protocol speculative decoding results. Target/Draft identifies the verifier and drafter model sizes,
+respectively. M is the mean number of tokens accepted per speculative iteration. Speedup is the source-reported
+decoding acceleration relative to autoregressive generation (1.00×). ∆M and ∆S are percentage improvements
+over SpecVLM within each matched block; the five-benchmark ∆M values are calculated from unrounded averages.
+The first block covers Video Detail Caption, Video-MME, MVBench, MLVU, and LongVideoBench; the second
+uses Video Detail Caption (VDC). “Exact” indicates strict target-distribution preservation, whereas percentages
+indicate task-performance retention under relaxed verification, not exact output agreement. Results are comparable
+only within matched blocks.
+23
