@@ -1,0 +1,714 @@
+Title: Efficient Quantization Training with Stochastic Rounding via Structured Subspace Randomness
+
+URL Source: https://arxiv.org/pdf/2610.36587v1
+
+Published Time: Wed, 28 Oct 2026 00:42:21 GMT
+
+Number of Pages: 10
+
+Markdown Content:
+# Efficient Quantization Training with Stochastic Rounding via Structured Subspace Randomness 
+
+Zeyu Wang, Yiheng Duan, Tao Chen, Donghyun Koo, Sihan Liu, Wenbo Zhang ∗, Chuan He, Liang Liu 
+
+Google, Mountain View, CA, USA 
+
+{xavierzeyuwang, yhduan, taoc, koodk, liusih, wenbozhang, hec, liangliu }@google.com 
+
+∗Corresponding author 
+
+Abstract —Low-precision training often relies on stochastic rounding (SR) to keep quantized gradients unbiased and prevent small updates from rounding to zero. Standard SR draws an independent random threshold for every gradient element. However, accelerators generate random numbers on vector units whose throughput lags far behind their matrix units. Drawing one threshold per element saturates the vector unit and can make INT8 training with SR slower than BF16 training. Sharing random thresholds across tensor elements removes this cost but forces those elements to round in the same direction and shifts their rounding errors by a common offset. We find that this offset degrades training primarily through the activation gradient, which propagates the error backward into earlier layers. Because earlier layers cannot cancel an incoming offset using their own local rounding errors, the offset must be removed at the layer where it originates. We propose Structured Subspace Stochastic Rounding (S3R), which quantizes each upstream gradient once for both the activation and weight gradient matrix multiplications and shares a single threshold per token across the hidden dimension. Its error correction, S3R-EC, subtracts the structured mean rounding error from the activation and weight gradients while leaving the optimizer unchanged. In LLM pre-training experiments, uncorrected threshold sharing degrades convergence, whereas S3R-EC eliminates this degradation and matches the validation loss of independent SR. Furthermore, S3R-EC accelerates full INT8 training steps of dense LLMs on TPU v5p by 1.24x to 1.32x over BF16 and by 1.11x over independent SR. 
+
+Index Terms —Stochastic rounding, quantization training, ran-dom number generation, variance-covariance analysis, large language models. 
+
+I. I NTRODUCTION 
+
+Training large language models (LLMs) demands massive compute and memory bandwidth [1]–[3]. To reduce both costs during pre-training and fine-tuning, full quantization training (QT) accelerates the training step itself by executing both the forward- and backward-pass matrix multiplications in 8-bit or 4-bit precision [4]–[9]. On GPUs, fine-grained FP8 recipes rely on an exponential quantization grid whose step size shrinks near zero, preserving small values under standard deterministic rounding [8]. In contrast, integer formats such as INT8 (the native 8-bit format on accelerators like Google Cloud TPU v5p [9]) use a uniform grid with a constant step size, and emerging 4-bit floating-point formats (NVFP4 and MXFP4) [10], [11] have an extremely coarse grid, making the backward pass in both settings prone to severe underflow. Specifically, because backward gradients are heavy-tailed and span a wide dynamic range, many of their entries fall below half a quantization step. Deterministic round-to-nearest-even (RTNE) maps these entries to zero every time, causing the affected parameters to stall in a failure mode known as gradient stagnation [12]. Stochastic rounding (SR) prevents this stagnation by rounding each value up or down with probabilities proportional to its distance from the two neighboring grid points. The quantized gradient remains unbiased, and small updates survive in expectation [13]–[15]. Standard SR, however, requires an independent uniform random threshold for every gradient element. On modern accelerators, general matrix multiplications (GEMMs) execute on dedicated matrix units (MXUs, such as systolic arrays or Tensor Cores), whereas counter-based pseudo-random number generators (PRNGs, such as Threefry and Philox [16]) execute on the vector processing unit (VPU). Because matrix throughput has scaled much faster than vector throughput across hardware generations, generating a 32-bit random word per gradient element saturates the VPU and stalls the MXU. Consequently, INT8 training with SR can run slower than BF16 training despite INT8 offering twice the peak MXU throughput of BF16. For example, using JAX’s default Threefry generator [17] on TPU v5p, independent SR executes a single feed-forward network (FFN) block at only 0.58x the speed of BF16 for smaller model dimensions. To eliminate this random number generation bottleneck, we propose Structured Subspace Stochastic Rounding (S3R), which shares each random threshold across multiple tensor elements. Because each threshold remains uniformly distributed, every element is still rounded without bias. Unlike standard SR with independent draws [14], sharing a threshold forces elements in the same group to round in the same direction, shifting their rounding errors by a common offset. We show that this offset degrades convergence primarily through the activation gradient, which propagates the error backward into earlier layers. Because earlier layers cannot cancel an incoming offset using only their own local rounding errors, we pair S3R with a structured error correction method (S3R-EC) that subtracts the offset directly at the layer where it is generated. Our contributions are as follows. 1) We design S3R to eliminate the random number gen-eration overhead of SR. Standard quantized training quantizes the upstream gradient twice in the backward pass, once for the activation gradient and once for the weight gradient, drawing a separate random threshold arXiv:2610.36587v1 [cs.LG] 27 Oct 2026 for every tensor element. S3R instead quantizes each upstream gradient once for both matrix multiplications and draws a single random threshold per token, sharing it across the hidden dimension. Implemented in standard JAX without custom kernels, S3R allows XLA to broadcast these thresholds directly inside vector registers without materializing the full random tensor in memory. 2) We analyze the error covariance induced by shared thresholds and derive S3R-EC (Sections III-C and III-D). Because sharing a threshold across a sequence correlates errors across tokens, S3R shares one threshold per token across the hidden dimension. We prove that per-token sharing preserves the weight gradient variance of independent SR and confines the positive error covariance to each token’s activation gradient, which propagates into earlier layers (Lemma 2 and Proposition 1). We then show that subtracting the mean rounding error removes this covariance (Theorem 1 and Corollary 1). Building on this result, S3R-EC subtracts the mean error along the token and hidden dimensions without extra random draws or optimizer changes (Proposition 2), while its dX-only variant corrects only the activation gradient to capture nearly the full accuracy gain at lower overhead. 3) We evaluate convergence in Llama-style language model pre-training and show that while uncorrected threshold sharing degrades validation loss, S3R-EC eliminates this degradation and matches the quality of independent SR (Section IV-C). In end-to-end benchmarks on TPU v5p, S3R-EC accelerates full training steps of three dense LLMs [3], [18], [19] by 1.24x to 1.32x over BF16 and by 1.11x over independent SR (Section IV-D). On two mixture-of-experts (MoE) models [18], [20], S3R and S3R-EC achieve speedups of 1.09x to 1.11x and 1.04x to 1.06x over independent SR, respectively. II. R ELATED WORK 
+
+A. Low-Precision Training and Stochastic Rounding 
+
+Full quantization training runs the forward product and both backward products in low precision [4]–[6]. FP8 recipes train LLMs at scale with fine-grained scaling and stability fixes [7], [8], [21] and also compress optimizer states and activations [22]. INT8 recipes quantize the whole data flow [9] or keep the weight-gradient product in 16 bits [23]. At 4 bits, NVFP4 and MXFP4 recipes apply SR to gradients after a random Hadamard transform [10], [11], and LUQ rounds them without bias on a logarithmic grid [24]. Other 4-bit recipes sample gradients by leverage score [25] or, like Quartet, prefer round-to-nearest [26]. By preventing gradient stagnation [12], unbiased SR enabled early 8-bit floating-point training [13]. Under independent draws, its errors are mean-independent, which gives proba-bilistic error bounds that grow with the square root of the problem size [14]. SR also implicitly regularizes tall-and-thin matrices [27], and Croci et al. survey its uses [15]. In training, SR yields unbiased gradient estimators whose variance depends on the quantizer [28], and its interaction with Adam has been analyzed for LLMs [29]. These analyses assume independent or mean-independent errors, which shared thresholds violate (Lemma 2, Proposition 1). 
+
+B. The Cost of Randomness 
+
+Counter-based generators such as Philox and Threefry compute each random word as a keyed function of a counter [16], and JAX uses Threefry by default [17]. Each word takes many rounds of integer operations on the vector unit, which has scaled far more slowly than the matrix units. In inference, a few extra vector instructions per multiply-accumulate can already make a kernel vector-bound [30]. On TPU v5p, the independent-SR quantizer issues more than a hundred vector operations per element (Section IV-D). Materializing random tensors also adds off-chip traffic, which costs far more energy than arithmetic [31], [32]. S3R broadcasts its thresholds in vector registers without materializing them, and it writes the quantized INT8 gradient to HBM once for both backward products. Hardware support lowers the cost of SR. Graphcore’s IPU supports SR in binary16 and binary32 arithmetic [15], proposed SR units accelerate SR in fixed-point arithmetic [33], and Blackwell GPUs provide conversion instructions ( cvt.rs )that round to FP16, BF16, FP8, FP6 or FP4 with random bits supplied by software [34]. Such support, however, is tied to particular chips and number formats, and it still needs a random value for every element, which software must generate for cvt.rs . S3R needs no special hardware and far fewer random values. With few random bits per element, SR becomes biased unless the implementation compensates. El Arar et al. analyze limited-precision SR [35], and Fitzgibbon and Felix show that natural few-bit implementations can be significantly biased [36]. S3R uses 7-bit thresholds shifted by half a grid step (Section III) and thus falls in this regime. Slicing one random word into several narrow values, as S3R also does, is existing practice in JAX’s legacy Threefry path [17] and in cvt.rs 
+
+[34]. Generator-free SR instead takes random bits from values already present in training [37]. Our contribution concerns the far larger saving from sharing one random value across many elements, and what this sharing does to training. 
+
+C. Shared Randomness and Error Correction 
+
+SR is equivalent to round-to-nearest with non-subtractive dither, which adds a uniform offset over one quantization step before rounding [38]. Prior work uses non-subtractive dither to sparsify backward gradients [39] and couples random draws across distributed clients so their quantization errors partially cancel upon aggregation [40]. Rather than coupling draws across clients to cancel errors, S3R shares random thresholds within a tensor to reduce generation cost. Because LLM token representations are anisotropic with persistent outlier channels across tokens [41]–[43], S3R shares each threshold across the hidden dimension within a token rather than across tokens. Input Activation Xt 
+
+> bf16 [B, S, H in ]
+> fwd
+
+Σ  
+
+> s32
+> Output Activation Yt
+> bf16 [B, S, H out ]
+> bwd rhs
+
+Σ                   
+
+> s32
+> Weight Gradient ¯gW
+> f32 to s8 to bf16 to f32 to s8 (cached ˆ︁ Xt)
+> S3R Thresholds
+> Per-Token Seed Broadcast
+> ut∈[0 ,1] B×S×1Φ
+> −→Rt
+> VPU ( O(BSH )→ O (BS ))
+> Master Weight
+> Wt
+> f32 to s8
+> S3R-EC
+> Two-way correction of ˆ︁ ∇Xand ¯gW:subtract the image of Estr
+> b
+> AdamW →Wt+1
+> Input Gradient ˆ︁ ∇X
+> bf16 [B, S, H in ]
+> bwd lhs
+
+Σ        
+
+> s32
+> to bf16 S3R Quantizer ˜︁
+> Gt=SR (Gt;Rt)
+> one s8 write to HBM, read by both GEMMs
+> Output Gradient Gt
+> bf16 [B, S, H out ]
+> Gt
+> Rt
+> broadcast in registers, never materialized
+> to s8 ( ˜︁ Gt)shared s8 ( ˜︁ Gt)reductions of Et
+
+Fig. 1. Overview of INT8 (S8) quantization training with S3R and its structured error correction S3R-EC. On the VPU, S3R broadcasts a compact seed 
+
+ut ∈ [0 , 1] B×S×1, one threshold per token, to Rt = Φ( ut) inside the vector registers, so Rt is never materialized. In the backward pass, the upstream gradient Gt is quantized once , and the int8 result is written to HBM once and read by both the activation-gradient product eGtW⊤ 
+
+> t
+
+and the weight-gradient product bX⊤ 
+
+> t
+
+eGt. S3R-EC subtracts the token-constant and channel-constant parts of the rounding error from b∇X and from the FP32 weight gradient ¯gW , and the AdamW update is unchanged. 
+
+Within each token, this shared threshold shifts element rounding errors by a common offset (Proposition 1). To reduce quantization error after rounding, classical sub-tractive dither subtracts the exact dither signal from every element [38], while post-training bias correction subtracts the expected output error of quantized weights [44]. S3R-EC instead operates on the realized backward gradient error without per-element subtraction, removing only the mean rounding error along the token and hidden dimensions to eliminate the shared offset (Section III-D). Because these mean errors have zero expectation, subtracting their linear effect acts as a control variate that keeps the gradients unbiased while complementing few-bit SR techniques. III. M ETHODOLOGY AND THEORETICAL FRAMEWORK 
+
+In this section, we first introduce SR in quantized backpropa-gation, then describe how S3R works and shares thresholds, and analyze the effect of sharing, which motivates the structured error correction S3R-EC for both the dX-only and two-way variants. 
+
+A. Quantized Backpropagation with Stochastic Rounding 
+
+Consider a linear projection Y = XW of a Transformer with activations X ∈ RB×S×Hin , weights W ∈ RHin ×Hout ,micro-batch size B, and sequence length S. Writing H = Hout 
+
+for brevity, let G = ∂ℓ/∂ Y ∈ RB×S×H be the upstream gradient of the summed per-token loss ℓ = P 
+
+> b,s
+
+ℓb,s , where the training loss is the token mean L = ℓ/ (BS ). The backward pass computes two matrix products: the activation-gradient (dX) product GW ⊤ and the weight-gradient (dW) product X⊤G,where G serves as the left-hand (LHS) and right-hand (RHS) operand, respectively. In the INT8 pipeline (Fig. 1), each operand of the forward and backward products is scaled, rounded from BF16 to S8, multiplied as an S8 general matrix multiplication (GEMM) with S32 accumulation, and rescaled. In the backward pass, SR is applied to G. For a step size ∆ > 0 and thresholds R ∈
+
+[0 , 1] B×S×H , the stochastic rounding operator eG = SR (G; R)
+
+rounds each element up when its normalized residual P =
+
+G/∆ − ⌊ G/∆⌋ reaches its threshold: SR (Gb,s,h ; Rb,s,h ) = ∆ 
+
+ Gb,s,h 
+
+∆
+
+
+
++ I (Pb,s,h ≥ Rb,s,h )
+
+
+
+,
+
+(1) where I(·) is the indicator function. With rounding error 
+
+E(G, R) = eG − G and uniform thresholds, each entry 
+
+Eb,s,h = ∆( I(Pb,s,h ≥ Rb,s,h )−Pb,s,h ) is a centered Bernoulli variable scaled by ∆. For example, with ∆ = 1 , the value 0.3
+
+is rounded to 1 with probability 0.3 and to 0 otherwise, so its mean is exactly 0.3. Our quantizer computes ∆⌊G/ ∆ + R⌋,which is (1) with the threshold 1 − R; this threshold is uniform and shared wherever R is, so all results apply. The forward product applies RTNE with per-token scales sx
+
+and per-output-channel scales sw, so that X ≈ diag( sx) bX and 
+
+W ≈ cW diag( sw) with S8 operands bX and cW. When both backward products share a quantized gradient (as in RTNE and S3R), the backward pass folds both scales into the gradient and quantizes the result once: 
+
+G′ = diag( sx) G diag( sw),
+
+b∇X = diag( sx)−1 ∆Q cW⊤,
+
+b∇W = ∆ bX⊤Q diag( sw)−1,
+
+(2) where ∆ = max |G′|/127 and Q = SR (G′; R)/∆ holds the S8 codes. With G′ in place of ∆Q, the two products equal 
+
+GW ⊤ and X⊤G for the dequantized operands. One S8 tensor feeds both GEMMs, which contract its channels (dX) and its tokens (dW), so only a per-tensor step can be applied after S32 accumulation; fine-grained recipes such as DeepSeek-V3 [8] r1=0 .85                                                                                                                                     
+
+> r2=0 .10
+> shared r.3.6.2.7
+> .6.3.7.2
+> s=G/∆
+> ⌊s+r⌋11110000
+> q(INT8) all up all down
+> .7.4.8.3
+> −.6−.3−.7−.2
+> .55 .55 .55 .55
+> −.45 −.45 −.45 −.45
+> .15 −.15 .25 −.25
+> −.15 .15 −.25 .25
+> =+
+> error EEstr : offset ε= [ .55 ,−.45] residual NE=q−sINT8 GEMMs
+> Wi= [ .5.3.4.2] ,Wi1= 1 .4;x= [1 .1, . 9] S3R correction result S3R-EC, dX-only
+> S3R-EC, two-way
+> dX dW
+> 1.40 0.00 0.63 0.63 +.85 −.71 +.08 −.08
+> −εWi1
+> 1.4×[.55 ,−.45] = [ .77 ,−.63] 1.10 1 .10 1 .10 1 .10 1.10 1 .10 1 .10 1 .10
+> .23 .17 .25 .15 .23 .17 .25 .15
+> unchanged
+> dX dW
+> 1.40 0.00 0.63 0.63 +.85 −.71 +.08 −.08
+> −εWi1
+> 1.4×[.55 ,−.45] = [ .77 ,−.63] 1.10 1 .10 1 .10 1 .10 .90 .90 .90 .90
+> .23 .17 .25 .15 .03 −.03 .05 −.05
+> −x⊤Estr
+> 1.1( .55) + .9( −.45) = .20
+> true dX
+> 0.55 0.71
+> true dW
+> .87 .93 .85 .95 Fig. 2. Worked example of S3R-EC (two tokens, four channels, units of ∆). Left: one shared threshold per token ( r1= 0 .85 ,r2= 0 .10 ) rounds all channels of token 1 up and all of token 2 down; the known error E=q−ssplits into Estr and a residual Nwith zero row and column sums. Here Estr reduces to one offset εper token (in general it also has a per-channel term). Right: both variants subtract εWi1from the activation gradient (row Wiof W); two-way also subtracts x⊤Estr from the weight gradient (input feature x), which dX-only leaves unchanged.
+
+instead requantize an operand for its transposed use. Below, G,
+
+W and X denote G′, cW and bX, and the fixed rescalings by 
+
+1/sx and 1/sw, which preserve unbiasedness, are left implicit. Conventional QT implementations draw independent full-size thresholds RLHS , RRHS ∼ U ([0 , 1] B×S×H ) for the two prod-ucts: b∇X = SR (G; RLHS )W⊤ estimates GW ⊤, and b∇W =
+
+X⊤SR (G; RRHS ) estimates X⊤G, so ¯gW = b∇W/(BS )
+
+estimates ∇WL. This costs 2BSH 32-bit Threefry words per projection, one per element and product. Each word is hashed on the VPU, so the quantizer issues more than ten times as many vector operations as an RTNE quantizer, while the S8 GEMMs on the MXU take the same time. 
+
+B. Structured Subspace Randomness 
+
+S3R reduces this cost in two steps (Fig. 1): it uses one threshold tensor for both backward products, and it broadcasts a small seed to the full tensor. Only the second step changes the error distribution of each product. Each threshold is a 7-bit bf16 value; as in existing implementations [17], [34], S3R cuts four thresholds from each 32-bit Threefry word [16], and a half-step shift of the threshold grid bounds the resulting rounding bias by ∆/256 . Lemma 1 thus holds up to this discretization. S3R builds on partitionable Threefry, which gives bitwise-identical thresholds under pure-FSDP, mixed and pure-TP factorizations without added collectives. 
+
+1) Inter-Operand Sharing: With separate PRNG keys, the gradient is quantized twice. S3R uses one threshold tensor for both products, RLHS = RRHS = R, so the quantizations coincide, as under RTNE, and Q in (2) is computed once. XLA compiles the quantizer into a fusion that writes Q to HBM once, at one byte per element, for both GEMMs to read. This halves the backward quantization work and the S8 writes (αshare = 1 /2), and both products remain unbiased (Lemma 1, Part 2). Their errors become correlated, but the correlation enters none of the second moments analyzed below. 
+
+2) Threshold Broadcasting: The second step draws a com-pact seed u ∼ U ([0 , 1] d0 ) with d0 ≪ BSH and expands it to R = Φ( u) ∈ [0 , 1] B×S×H with a broadcast Φ. XLA fuses the broadcast into the quantizer, so thresholds are broadcast in vector registers and R is never materialized. Every Φ keeps thresholds marginally uniform; sharing more saves draws but correlates more errors, because elements that share a threshold tend to round in the same direction. Independent SR shares nothing; we study two choices:  
+
+> •
+
+Per token, Φ2D (default). Here u ∈ [0 , 1] B×S×1 and 
+
+Rb,s,h = ub,s . This cuts PRNG work by a factor of 
+
+H and keeps rounding errors independent across tokens. Errors within a token remain positively correlated across channels (Corollary 1); S3R-EC removes this covariance (Proposition 2).  
+
+> •
+
+Per example, Φbcast (ablation). Here u ∈ [0 , 1] B×1×1
+
+and Rb,s,h = ub. This needs only B draws per layer, but it correlates the errors of all tokens of an example, and their common part reaches the activation gradient of every token (Proposition 1), so we use it only as an ablation. 
+
+C. Why Sharing Hurts and How S3R-EC Repairs It 
+
+Sharing a threshold biases no gradient, but it ties together the rounding errors of the elements that share it. We show in turn that these errors are positively correlated, where the correlation adds error, and that subtracting their known mean, which is what S3R-EC does, removes the correlation. Throughout, G is fixed and only the thresholds are random; we assume nothing about the residuals and require only that every threshold be uniform on [0 , 1) .
+
+1) First-Order Unbiasedness: SR is unbiased whenever each threshold is marginally uniform. Expectation is linear, so correlations among the thresholds do not matter. 
+
+Lemma 1 (First-Order Marginal Unbiasedness) . Fix G ∈
+
+RB×S×H (fixed residuals), and let R = Φ( u) be any random threshold field whose entries are marginally uniform, Rb,s,h ∼U(0 , 1) . Then: 
+
+1) Linear maps: Eu[T (SR (G; Φ( u)))] = T (G) for every linear operator T .
+
+2) Shared quantized gradient: When both backward prod-ucts use the same eG, Eu[ eGW ⊤] = GW ⊤ and 
+
+Eu[X⊤ eG] = X⊤G. Hence Eu[¯ gW] = ∇WL.The lemma composes across layers: backpropagation is linear in the upstream gradient, and each layer draws its thresholds independently of the noise from above, so by the tower property every layer’s gradient is unbiased with respect to the backward pass of the executed forward graph (with 
+
+bX, cW if it is quantized). The topology Φ can therefore be chosen for its cost and its second moments alone. 
+
+2) Broadcasting Makes the Errors Move Together: With independent thresholds, every element chooses its rounding direction on its own, and the errors of different elements are independent. With a broadcast threshold, one draw chooses for the whole group: a large draw rounds most of its elements up, and a small draw rounds most of them down. 
+
+Lemma 2 (Covariance of Shared-Threshold Errors) . Round with ∆⌊G/ ∆ + R⌋ and marginally uniform thresholds, and let 
+
+Pi be the residual of element i. If elements i and k share one threshold, their rounding errors satisfy Cov (Ei, E k) = ∆ 2  min( Pi, P k) − PiPk
+
+ ∈ [0 , ∆2/4] . (3) 
+
+If their thresholds are independent, Cov (Ei, E k) = 0 .
+
+Every pair of errors in a group that shares a threshold is thus nonnegatively correlated. The covariance is largest when both residuals are near 12 and vanishes when either element is almost exactly representable. If the residuals of a group are spread evenly over [0 , 1) , each error has variance about 
+
+∆2/6 and each pair has covariance about ∆2/12 , so half of the variance of every element is shared with the rest of its group. Under Φ2D , a group is the D = Hout channels of one token, and different tokens have independent thresholds. 
+
+3) Where the Correlation Adds Error: A backward product adds up errors with weights, and the variance of such a sum is the sum of the variances plus the sum of all pairwise covariances. Independent SR pays only the first part. Correlated errors also pay the second, because they no longer cancel. 
+
+Proposition 1 (Where Sharing Adds Error) . Use per-token thresholds, Φ2D , and let Eb,s ∈ RD be the rounding error of token (b, s ).
+
+1) Every entry of the weight-gradient error has the same variance as under independent SR. 
+
+2) Entry i of the activation-gradient error of token (b, s ),P 
+
+> j
+
+Wij Eb,s,j , has the variance it would have under independent SR plus P  
+
+> j̸=k
+
+Wij Wik Cov (Eb,s,j , E b,s,k ).If every pair of channels of the token has covariance c,this extra term is c (Wi1D )2 − ∥ Wi∥22
+
+.
+
+3) This error is part of the upstream gradient of the layer below. A correction of this layer’s weight gradient leaves it unchanged, and the layer below, whose thresholds are independent of it, cannot cancel it with a correction built from its own rounding error. 
+
+Per-token sharing thus keeps the weight gradient exactly as accurate as independent SR and puts the whole cost into the activation gradient, which sums over exactly the channels that share a threshold. The extra term is large when the rows of 
+
+W have a common component, because (Wi1D )2 then grows with the square of the width while ∥Wi∥22 grows linearly. The shared part of a token’s error is its mean εb,s = 1 
+
+> D
+
+1⊤ 
+
+> D
+
+Eb,s ,which enters the activation gradient as εb,s W1 D, along the same direction for every token. By the last statement, this error has to be removed in the activation gradient, where it arises. In a Transformer it does not arrive unchanged: the RMSNorm backward rescales each token and removes its component along the normalized input, and the attention backward mixes tokens. The proposition is therefore a mechanism, not an exact model. If all tokens of an example shared one threshold, the weight gradient would pay the same price over the tokens. 
+
+4) Subtracting the Mean Removes the Correlation: The quantizer knows every rounding error exactly, so it can compute the mean error of a group and subtract it. The theorem below shows what this does to correlated errors; it holds for any covariances. 
+
+Theorem 1 (Centering Reduces Covariance) . Let X1, . . . , X n,
+
+n ≥ 2, be zero-mean errors with average variance ¯σ2 and average pairwise covariance ¯c, let ¯X be their mean, and let 
+
+Yi = Xi − ¯X. Then Var ( ¯X) = 1 
+
+> n
+
+¯σ2 + n−1 
+
+> n
+
+¯c, and: 
+
+1) Covariance: The average pairwise covariance of the Yi
+
+is ¯c − Var ( ¯X) = − 1 
+
+> n
+
+(¯ σ2 − ¯c) ≤ 0.
+
+2) Variance: The average variance of the Yi is ¯σ2 −
+
+Var ( ¯X) = n−1 
+
+> n
+
+(¯ σ2 − ¯c).
+
+3) Equal covariances: If every Xi has variance σ2 and every pair has covariance c, each pair’s covariance falls from c to − 1 
+
+> n
+
+(σ2 − c), and for any weights wi with mean 
+
+¯w, Var (P 
+
+> i
+
+wiYi) = ( σ2 − c) P
+
+> i
+
+(wi − ¯w)2.
+
+The average covariance and the average variance fall by the same amount, the variance of the mean. For errors that share a threshold, ¯c ≥ 0 by Lemma 2, and for large n this amount is about ¯c. Subtracting the mean therefore removes the positive correlation that broadcasting created, and the centered errors are even slightly negatively correlated, like draws without replacement. The case of equal covariances shows the mechanism. Each error is then a shared part with variance c plus a private part with variance σ2 − c. Subtracting the mean deletes the shared part and keeps the private parts, which are uncorrelated, so any weighted sum of centered errors has at most the variance of the same sum of independent errors with variance σ2 − c. For evenly spread residuals, this is about 
+
+∆2/12 , half of the ∆2/6 of independent SR. The first two statements are averages and hold for any covariances. The third needs equal covariances, which fixed residuals do not give: by Lemma 2, an element that is almost exactly representable is nearly uncorrelated with the rest of its group, and subtracting the group mean adds the noise of the group to it. In general, element i becomes less noisy exactly when 2 Cov (Xi, ¯X) > Var ( ¯X). For X1 = −Z and 
+
+X2 = X3 = Z, the variance of the first element grows to  
+
+> 16 9
+
+Var (Z), while the average variance falls to 89 Var (Z). Single outputs of a GEMM can behave in the same way. In an exact computation on a synthetic layer with unequal residuals, 17– 27% of the activation-gradient outputs become noisier after centering, while their summed variance falls by 40–63% and stays below that of independent SR. 
+
+5) Which Axis to Center: Centering removes covariance only along an axis whose errors are correlated. 
+
+Corollary 1 (Centering under Per-Token Thresholds) . Use Φ2D 
+
+and consider one example. 
+
+1) Subtracting the mean error of a token over its D channels lowers their average pairwise covariance from ¯cb,s ≥ 0
+
+to − 1 
+
+> D
+
+(¯ σ2 
+
+> b,s
+
+− ¯cb,s ), where ¯σ2 
+
+> b,s
+
+is their average variance. 
+
+2) Subtracting the mean error of channel j over the S tokens finds no covariance to remove, because the tokens have independent thresholds, and lowers the average variance 
+
+¯σ2 
+
+> b,j
+
+of its entries by only 1 
+
+> S
+
+¯σ2 
+
+> b,j
+
+.
+
+Under per-token thresholds, the activation-gradient term of S3R-EC, which centers each token, therefore does nearly all of the work, and the weight-gradient term adds little. If the tokens of an example also shared a threshold, centering over tokens would remove their covariance as well, and both terms would matter. Section IV-C confirms both predictions. 
+
+D. Structured Error Correction (S3R-EC) 
+
+By Proposition 1, the cost of sharing is the covariance of the errors within each token, which enters the activation gradient and travels to every lower layer. S3R-EC removes this covariance by subtracting the known mean error, the operation analyzed in Theorem 1, along both axes of the error of each example. 
+
+1) Two-Way Correction: The idea is simple (Fig. 2). The quantizer knows G and eG, and hence the rounding error 
+
+E = eG − G, exactly. S3R-EC takes two averages of E: the mean error of each token over its channels, which carries the covariance created by the shared threshold, and the mean error of each channel over the tokens of an example. After the unchanged INT8 GEMMs, it subtracts their effect: from the activation gradient, the averages times W, which for the token mean is the mean times the precomputed row sums W1 D;from the weight gradient, the inputs times the same averages. What remains sums to zero along every row and every column. No extra random numbers are needed. Formally, with G, X and W as in (2), the averages of example b form the orthogonal projection of Eb ∈ RS×D
+
+(D = Hout ) onto the subspace S = {1S a⊤ + c1 ⊤ 
+
+> D
+
+} of sums of row-constant and column-constant matrices: 
+
+¯eb = 1 
+
+> S
+
+E⊤ 
+
+> b
+
+1S , εb = 1 
+
+> D
+
+Eb1D , mb = 1 
+
+> SD
+
+1⊤ 
+
+> S
+
+Eb1D ,
+
+Estr  
+
+> b
+
+= 1S ¯e⊤ 
+
+> b
+
++ ( εb − mb1S )1⊤ 
+
+> D
+
+. (4) Passing Estr  
+
+> b
+
+through both backward products and subtracting the result gives 
+
+b∇corr  
+
+> Xb
+
+= b∇Xb − 1S (W¯eb)⊤ − (εb − mb1S )( W1 D )⊤, (5) 
+
+¯gcorr  
+
+> W
+
+= ¯ gW − 1
+
+BS 
+
+> B
+
+X
+
+> b=1
+
+h
+
+¯xbe⊤ 
+
+> b
+
++ X⊤ 
+
+> b
+
+(εb − mb1S )1⊤
+
+> D
+
+i
+
+, (6) where ¯xb = 1 
+
+> S
+
+X⊤ 
+
+> b
+
+1S and eb = S¯eb. In (6), the first term removes the mean error of each channel over the tokens of an example, and the second removes the mean error that each token shares across its channels. The corrected gradients go to the unchanged optimizer, AdamW [45] in our experiments. The correction keeps both gradients unbiased and leaves the remaining errors of every token and every channel with a nonpositive average covariance: 
+
+Proposition 2 (Properties of the Two-Way Correction) . Con-sider any threshold topology with marginally uniform thresh-olds, and fix the residuals. Let Nb = Eb − Estr  
+
+> b
+
+be the error that remains. Then: 
+
+1) Unbiasedness: Eu[ b∇corr  
+
+> X
+
+] = GW ⊤ and Eu[¯ gcorr  
+
+> W
+
+] = 
+
+∇WL.
+
+2) Orthogonal Decomposition: Estr  
+
+> b
+
+is the orthogonal pro-jection of Eb onto S. Hence N⊤ 
+
+> b
+
+1S = 0, Nb1D = 0,and ∥Nb∥F ≤ ∥ Eb∥F on every realization. 
+
+3) Covariance Removal: Within every token and within every channel of example b, the remaining errors sum to zero, so their average pairwise covariance is − 1
+
+> n−1
+
+times their average variance, with n = D for a token and n = S for a channel. In particular, the shared term 
+
+εb,s W1 D of every token’s activation-gradient error is removed. 
+
+4) Variance Reduction: P 
+
+> s,j
+
+Var (Nb,s,j ) =
+
+P 
+
+> s,j
+
+Var (Eb,s,j ) − E∥Estr  
+
+> b
+
+∥2 
+
+> F
+
+.
+
+The covariance statement is the first statement of Theorem 1 applied to every row and every column of the error, and under per-token thresholds the rows carry nearly all of the removed covariance, by Corollary 1. 
+
+Relation to dithering. The correction is a control variate, akin to bias correction in post-training quantization [44]. SR rounds to nearest after adding the dither ∆( r − 12 ); because the dither is shared, the error it causes is known and can be subtracted, as in subtractive dither [38]. Correlated quantization [40] likewise gains from shared randomness. The diagnostics agree in direction: with the two-way correction, Φ2D has a bottom-layer activation-gradient error of 0.476 vs. 0.572 for independent SR (Table II). 
+
+2) Cost and the dX-Only Variant: The correction reuses E
+
+and adds only per-example reductions and small products. With the batch sharded, its weight-gradient term all-gathers small per-example factors such as ¯xb and ¯eb instead of reducing a weight-sized f32 partial, which lowers the f32 all-reduce volume of a compiled two-layer model from 422.6 MiB to 3.1 MiB per step, at the cost of about 8 MiB of small factor all-gathers. Under 
+
+Φ2D , the errors of different tokens are uncorrelated, so centering over tokens finds almost no covariance to remove (Corollary 1), and the activation-gradient term (5) alone keeps nearly all of the benefit, including the removal of the shared term of every token’s activation-gradient error. Intuitively, the token offsets are independent under Φ2D , so they largely average out in the weight gradient, a sum over tokens, but not in each token’s activation gradient (Fig. 2). This dX-only correction matches the two-way correction within seed noise (Section IV-C) and adds 1.1–1.8% to the S3R step time of the three dense models. Φbcast ,whose tokens share thresholds, needs both terms; Section IV-D reports the remaining costs. IV. E XPERIMENTS 
+
+We report model quality first (Section IV-C) and speed second (Section IV-D), because a faster configuration is useful only if it trains as well as its baseline. 
+
+A. Setup 
+
+All experiments run on Google Cloud TPU v5p with JAX/XLA [17]. We use three workloads. 1) Convergence runs. A 12-layer Llama-style decoder is trained on English C4 [46] for 2000 steps ( S = 2048 ,
+
+B = 8 , 32.8M tokens). We report the mean and sample standard deviation of the final validation loss over three seeds, with each configuration at its best learning rate on seed 0. 2) Single-block FFN benchmarks. Forward and backward passes of one SwiGLU FFN block at nine shapes (W1–W9) taken from models of 1B to 70B parameters (Table III). 3) Full training steps. MaxText training steps of five mod-els from four families [3], [18]–[20]: the dense Llama 3.1-8B, Qwen3-8B, and Gemma 3-12B, and the mixture-of-experts (MoE) models Qwen3-30B-A3B and DeepSeek-V2-Lite (16B). The devices form a two-dimensional mesh with Fully Sharded Data Parallelism (FSDP) [47] and Tensor Parallelism (TP) [48], orchestrated via Pathways [49]. Each chip processes 4 synthetic sequences of 4096 tokens per step, with full rematerialization and flash attention [50]. Step times are medians over 20 steps after 12 warm-up steps and differ by at most 0.6% between repeated runs. 
+
+B. Compared Configurations 
+
+All INT8 configurations quantize as in Section III: RTNE in the forward pass, one per-tensor step ∆ for the backward gradient, and int32 accumulation. In the full training steps, each GEMM rounds its output to bf16 per shard, so the TP partial sums are reduced in bf16 , as in the BF16 baseline. The flash-attention products, the embedding, and the logits projection stay in bf16 . They differ only in how the upstream gradient is rounded:  
+
+> •
+
+BF16 and INT8 RTNE : the 16-bit baseline and determin-istic rounding.  
+
+> •
+
+Independent SR (Threefry) : one 32-bit random threshold per element from JAX’s default Threefry generator, which S3R also uses. In full training steps, it quantizes the upstream gradient once per backward product, as in AQT.  
+
+> •
+
+S3R ( Φ2D ), the default with one threshold per token, and 
+
+S3R ( Φbcast ), the ablation with one threshold per example.  
+
+> •
+
+S3R-EC, two-way and S3R-EC, dX-only : S3R with the correction of Section III-D, applied to both backward products or to the activation gradient only. 0 250 500 750 1000 1250 1500 1750 2000 
+
+Training step      
+
+> 5.0 5.5 6.0 6.5 7.0 7.5
+> Validation loss
+> BF16 INT8 RTNE S3R (Φ 2D )S3R-EC, dX-only (Φ 2D )S3R-EC, two-way (Φ 2D )Independent SR S3R (Φ bcast )S3R-EC, dX-only (Φ bcast )S3R-EC, two-way (Φ bcast )
+> 1500 1600 1700 1800 1900 2000
+
+Training step (last 25%) 
+
+> 4.9 5.0 5.1 5.2
+> Validation loss
+> S3R (Φ bcast ): off scale (final loss 6.24)
+
+Fig. 3. Validation loss versus training step for all configurations of Table I, each at its best learning rate. Lines show the mean over 3 seeds, and shaded bands span the seed minimum to maximum. The bottom panel enlarges the last 25% of steps. S3R ( Φbcast ) lies off this scale (final loss 6.24). TABLE I FINAL VALIDATION LOSS OF THE 12-L AYER MODEL AFTER 2000 S TEPS 
+
+(32.8M C4 T OKENS ) WITH 8-B IT PER -T ENSOR BACKWARD GRADIENTS .MEAN ± SAMPLE STD OVER 3 S EEDS AT EACH CONFIGURATION ’S BEST 
+
+LEARNING RATE , C HOSEN ON SEED 0. A LL CONFIGURATIONS USE 
+
+ADAM W. † LOWEST LEARNING RATE TRIED                                                                    
+
+> Configuration Best LR Val. loss Gap to BF16 BF16 6×10 −44.892 ±0.015 —INT8 RTNE 6×10 −45.106 ±0.013 +0 .214
+> Independent SR 6×10 −44.929 ±0.019 +0 .037
+> S3R ( Φ2D )3×10 −45.055 ±0.017 +0 .163
+> S3R-EC, dX-only ( Φ2D )6×10 −44.924 ±0.021 +0 .032
+> S3R-EC, two-way ( Φ2D )6×10 −44.919 ±0.022 +0 .027
+> S3R ( Φbcast )3.75 ×10 −5†6.239 ±0.026 +1 .347
+> S3R-EC, dX-only ( Φbcast )6×10 −45.094 ±0.018 +0 .202
+> S3R-EC, two-way ( Φbcast )6×10 −45.002 ±0.024 +0 .109
+
+C. Model Quality 
+
+Table I lists the final validation loss of every configuration, and Fig. 3 shows the loss curves of all of them. 
+
+SR is still needed at 8 bits. With deterministic round-ing, INT8 RTNE ends 0.176 above independent SR (Welch 
+
+t ≈ 13 .2) and 0.214 above BF16 (Table I). 
+
+Sharing hurts, mainly through the activation gradient. TABLE II RELATIVE STOCHASTIC GRADIENT ERROR (F ROBENIUS NORM RELATIVE TO THE BF16 G RADIENT ) ON A BF16 C HECKPOINT AT STEP 1000 (LR                          
+
+> 6×10 −4, S EED 0), P OOLED OVER 4–9 F IXED TRAINING BATCHES . L AYER
+> 0 I S THE BOTTOM OF THE 12-L AYER MODEL . T HE D W-O NLY CORRECTION
+> (C ORR .) K EEPS ONLY THE TOKEN -M EAN TERM OF THE
+> WEIGHT -G RADIENT CORRECTION . T HE LAST TWO ROWS CHOOSE THE
+> THRESHOLDS OF THE TWO BACKWARD PRODUCTS SEPARATELY AND USE THE D W-O NLY CORRECTION
+
+dX error dW error Emb. Configuration layer 0 layer 11 layer 0 error Independent SR 0.572 0.111 0.456 0.457 S3R ( Φ2D ) 0.877 0.228 0.691 0.703 S3R ( Φ2D ), dW-only corr. 0.882 0.228 0.694 0.706 S3R-EC, two-way ( Φ2D ) 0.476 0.103 0.377 0.378 S3R ( Φbcast ) 3.157 0.313 5.141 5.285 S3R ( Φbcast ), dW-only corr. 3.150 0.313 4.529 5.262 S3R-EC, two-way ( Φbcast ) 0.521 0.105 0.551 0.558 dX Φ2D , dW Φbcast 0.893 0.227 0.746 0.714 dX Φbcast , dW Φ2D 3.494 0.261 5.979 6.849 
+
+Without a correction, S3R ( Φ2D ) ends 0.126 above independent SR. S3R ( Φbcast ) does not train usefully, and its loss keeps improving as the learning rate decreases, down to the lowest rate we tried (Table I). A causal ablation in the last two rows of Table II locates the damage. These rows quantize G separately for the two backward products. Per-example thresholds on the activation-gradient product alone reproduce the gradient error of S3R ( Φbcast ), and per-token thresholds there remove almost all of it, whichever thresholds the weight-gradient product uses. 
+
+With per-token thresholds, S3R-EC restores qual-ity within seed noise. S3R-EC, two-way ( Φ2D ) reaches 
+
+4.919 ± 0.022 , against 4.929 ± 0.019 for independent SR. Its seed band overlaps that of independent SR over the last 25% of training, and its best learning rate returns to that of BF16. With per-example thresholds, the correction closes most of the gap but not all of it. It stays 0.073 above independent SR (Welch t ≈ 4.1) and 0.109 above BF16 (Table I, Fig. 3). 
+
+The dX-only correction suffices for Φ2D but not for Φbcast .
+
+With per-token thresholds, the dX-only and two-way variants end within seed noise of each other. Because it skips the weight-gradient term, the dX-only variant is also cheaper in full training steps (Section IV-D). With per-example thresholds, correcting the activation gradient alone recovers most of the loss, but the dX-only variant stays 0.092 above the two-way correction (Welch t = 5.4; Table I). This pattern agrees with the analysis. Per-token thresholds leave the errors of different tokens uncorrelated, so the weight-gradient half of the correction, which centers over tokens, has almost no covariance to remove; per-example thresholds correlate the tokens, and this half then removes their covariance too (Corollary 1). 
+
+The correction lowers the gradient error itself, whereas the rounding variance barely affects the optimizer. Table II measures every configuration on the same BF16 checkpoint. Under Φ2D , the two-way correction brings every listed error below that of independent SR, for example to 0.48 against                                                                                                     
+
+> TABLE III SPEEDUP OVER BF16 OF ONE SWI GLU FFN B LOCK (F ORWARD +BACKWARD ,PER DEVICE )ON TPU V5P,AND EXTRA DEVICE TIME OF
+> S3R-EC OVER S3R ( Φ2D ). B= 8 (4FOR W9), S= 2048 ; M EDIAN OVER
+> REPEATED STEPS . S3R-EC: M EAN OF TWO FURTHER RUNS , E ACH AGAINST S3R IN THE SAME RUN .Speedup over BF16 ( ×)S3R-EC, extra time over S3R (%) Shape (H, D ffn )
+> INT8 RTNE Indep. SR (Threefry) S3R (Φ2D )Two-way dX-only
+> W1(512 ,2048) 1.12 0.58 1.08 +13 .0+14 .8
+> W2(1024 ,4096) 1.45 0.91 1.44 +7 .3+9 .6
+> W3(2048 ,8192) 1.73 1.29 1.73 −0.6+1 .7
+> W4(3072 ,12288) 1.92 1.54 1.92 +4 .8+4 .1
+> W5(3840 ,15360) 1.84 1.53 1.83 +2 .8+3 .3
+> W6(4096 ,12288) 1.89 1.60 1.90 +2 .7+3 .1
+> W7(4096 ,14336) 1.87 1.56 1.87 +3 .4+3 .1
+> W8(5120 ,17920) 1.82 1.58 1.81 +0 .7+2 .7
+> W9(8192 ,28672) 1.81 1.66 1.81 +3 .8+2 .2
+
+0.57 in the bottom-layer activation gradient. Under Φbcast , it lowers the bottom-layer activation-gradient error from 3.16 to 0.52, below that of independent SR, although the weight-gradient error stays higher. The rounding variance makes up at most 0.094 of the AdamW second-moment estimate vt late in training, so it barely changes the per-coordinate step size of AdamW. 
+
+Limits. Three seeds per configuration resolve differences of about 0.05 or more. Smaller differences remain undetermined, including the one between independent SR and the two-way S3R-EC with Φ2D . The learning rate of each configuration was selected on seed 0, which is also part of the mean. 
+
+D. Throughput and Memory 
+
+INT8 nearly halves the GEMM time, and vector work decides how much of this saving remains. The S8 GEMMs run on the MXU and take the same time in every uncorrected INT8 configuration, 47 .55 –47 .63 ms for one FFN block at 
+
+W9 against 90 .29 ms for BF16. Scaling, rounding, threshold generation and the correction run on the VPU and do not get cheaper with a narrower format. We convert extra device time to int32 VPU operations per upstream-gradient element at the measured 14 .3 × 10 12 operations/s. 
+
+Per-element Threefry is the expensive step, and S3R removes it. Independent SR hashes one 32-bit word per gradient element, which costs 120–133 operations per element over INT8 RTNE at every shape and takes 56.5% of the busy time at W1 and 9.9% at W9. It is therefore slower than BF16 at W1 and W2 (Table III). S3R ( Φ2D ) hashes one word per four tokens and broadcasts the thresholds in vector registers inside the quantizer fusion, so they are never written to memory. It costs −2 to +6 operations per element, runs within 1% of INT8 RTNE at W2–W9 and 4.3% slower at W1, and is 1.08 –1.92 ×
+
+faster than BF16. 
+
+S3R-EC adds small reductions and products. It reuses the rounding error inside the quantizer fusion, and its per-token and per-channel reductions, matrix-vector products and rank-1 updates leave the GEMM time nearly unchanged. On a single TABLE IV FULL TRAINING STEP (F ORWARD , B ACKWARD , AND ADAM W U PDATE ) ON TPU V5P WITH B F 16 -O UTPUT INT8 GEMM S. M EDIAN STEP TIME (MS ) 
+
+> OVER
+
+20 S TEPS AFTER 12 W ARM -U P STEPS ; P ER -D EVICE BATCH 4, S = 4096 . I N PARENTHESES : S PEEDUP OVER BF16 ON THE DENSE MODELS .S3R-EC, T WO -W AY , U SES THE FACTOR ALL -G ATHER ; ON THE DENSE GEMM S, I T ALSO COMPUTES A PER -C HANNEL ROUNDING -V ARIANCE STATISTIC 
+
+THAT THE UPDATE DOES NOT USE , S O ITS TIMES ARE SLIGHTLY PESSIMISTIC . O N THE MOE M ODELS , THE EXPERT GEMM S RECEIVE ONLY THE 
+
+CHANNEL -M EAN PART OF THE CORRECTION .
+
+Dense models MoE models Configuration Llama 3.1-8B Qwen3-8B Gemma 3-12B Qwen3-30B-A3B DeepSeek-V2-Lite (16B) BF16 3862 4018 6550 6454 3659 INT8 RTNE 2926 ( 1.320 ×) 3110 ( 1.292 ×) 4822 ( 1.358 ×) 7305 3842 Independent SR (Threefry) 3350 ( 1.153 ×) 3607 ( 1.114 ×) 5526 ( 1.185 ×) 7914 4269 S3R ( Φ2D ) 2903 ( 1.331 ×) 3104 ( 1.294 ×) 4853 ( 1.350 ×) 7286 3840 S3R-EC, two-way 3008 ( 1.284 ×) 3243 ( 1.239 ×) 4961 ( 1.320 ×) 7621 4029 S3R-EC, dX-only 2935 ( 1.316 ×) 3160 ( 1.272 ×) 4911 ( 1.334 ×) 7548 3984 
+
+Speedup over independent SR (Threefry) 
+
+S3R 1.154 × 1.162 × 1.139 × 1.086 × 1.112 ×
+
+S3R-EC, two-way 1.114 × 1.112 × 1.114 × 1.038 × 1.060 ×
+
+S3R-EC, dX-only 1.141 × 1.141 × 1.125 × 1.049 × 1.072 ×
+
+block, both variants add 15–23 operations per element at most shapes and 8–14% temporary memory. This is 13–15% of the device time of S3R at W1, 7–10% at W2 and at most 5% from 
+
+W3 on, so only W1 becomes slower than BF16 ( 0.94 –0.96 ×;Table III). The two-way variant does more arithmetic but is not always slower, because both variants change how XLA fuses the GEMMs. 
+
+On the dense models, the GEMM saving reaches the full step. In a Llama 3.1-8B step, INT8 RTNE spends 1182 ms in the GEMMs against 2236 ms for BF16, and 249 against 174 ms in vector fusions. S3R matches INT8 RTNE to within 1% on all five models and is 1.29 –1.35 × faster than BF16 on the dense models (Table IV), but without a correction it trails independent SR in quality (Section IV-C). Independent SR also quantizes the upstream gradient twice in full steps, doubling the quantization work and the S8 writes, and is only 1.11 –
+
+1.19 × faster than BF16. S3R-EC, two-way, is 1.24 –1.32 ×
+
+faster than BF16 and 1.11 × faster than independent SR. Its weight-gradient term needs extra reductions and small factor all-gathers (Section III-D) and adds 2.2–4.5% to the S3R step; the dX-only correction skips it and adds 1.1–1.8%. By XLA’s compile-time estimate, S3R needs the same full-step device memory as RTNE on the dense models, and S3R-EC, two-way, at most 0.4 GB more. 
+
+On the MoE models, S3R and S3R-EC are also faster than independent SR. S3R is 1.09 –1.11 × faster, runs as fast as INT8 RTNE, and needs 0.4 and 0.7 GB more device memory than RTNE. With the expert-path correction fused into Pallas kernels over the expert-sorted rows, the two-way correction adds 4.6% and 4.9% to the S3R step, so S3R-EC is 1.04 × and 
+
+1.06 × faster than independent SR; with the dX-only correction, it is 1.05 × and 1.07 × faster. V. C ONCLUSIONS 
+
+Stochastic rounding keeps low-precision gradients unbiased, but standard SR draws one random threshold per element on the vector units, which can make INT8 training slower than BF16 training. Sharing thresholds removes this cost but shifts the rounding errors of all elements that share a threshold by a common offset. We showed that this offset harms training mainly through the activation gradient, which carries it to every lower layer, so it must be removed where it is produced. S3R quantizes each upstream gradient once for both backward products and uses one threshold per token. S3R-EC subtracts the structured part of the known rounding error from the activation and weight gradients, keeps them unbiased, and leaves the optimizer unchanged. In pre-training, uncorrected sharing degrades quality, whereas S3R-EC removes this loss and reaches the quality of independent SR. At this quality, S3R-EC makes full training steps of three dense LLMs 1.24 –1.32 ×
+
+faster than BF16 and about 1.11 × faster than independent SR. REFERENCES [1] T. Brown et al. , “Language models are few-shot learners,” Advances in neural information processing systems , vol. 33, pp. 1877–1901, 2020. [2] H. Touvron et al. , “Llama 2: Open foundation and fine-tuned chat models,” 
+
+arXiv preprint arXiv:2307.09288 , 2023. [3] A. Grattafiori et al. , “The Llama 3 herd of models,” arXiv preprint arXiv:2407.21783 , 2024. [4] I. Hubara, M. Courbariaux, D. Soudry, R. El-Yaniv, and Y. Bengio, “Quantized neural networks: Training neural networks with low precision weights and activations,” journal of machine learning research , vol. 18, no. 187, pp. 1–30, 2018. [5] X. Sun et al. , “Ultra-low precision 4-bit training of deep neural networks,” 
+
+Advances in Neural Information Processing Systems , vol. 33, pp. 1796– 1807, 2020. [6] P. Micikevicius et al. , “Fp8 formats for deep learning,” arXiv preprint arXiv:2209.05433 , 2022. [7] H. Peng et al. , “FP8-LM: Training FP8 large language models,” arXiv preprint arXiv:2310.18313 , 2023. [8] DeepSeek-AI et al. , “DeepSeek-V3 technical report,” arXiv preprint arXiv:2412.19437 , 2024. [9] H. Xi, Y. Chen, K. Zhao, K. J. Teh, J. Chen, and J. Zhu, “Jetfire: Efficient and accurate transformer pretraining with int8 data flow and per-block quantization,” arXiv preprint arXiv:2403.12422 , 2024. [10] F. Abecassis et al. , “Pretraining large language models with nvfp4,” arXiv preprint arXiv:2509.25149 , 2025. [11] A. Tseng, T. Yu, and Y. Park, “Training LLMs with MXFP4,” in Inter-national Conference on Artificial Intelligence and Statistics (AISTATS) ,vol. 258. PMLR, 2025. [12] S. Gupta, A. Agrawal, K. Gopalakrishnan, and P. Narayanan, “Deep learning with limited numerical precision,” in International conference on machine learning . PMLR, 2015, pp. 1737–1746. [13] N. Wang, J. Choi, D. Brand, C.-Y. Chen, and K. Gopalakrishnan, “Training deep neural networks with 8-bit floating point numbers,” 
+
+Advances in neural information processing systems , vol. 31, 2018. [14] M. P. Connolly, N. J. Higham, and T. Mary, “Stochastic rounding and its probabilistic backward error analysis,” SIAM Journal on Scientific Computing , vol. 43, no. 1, pp. A566–A585, 2021. [15] M. Croci, M. Fasi, N. J. Higham, T. Mary, and M. Mikaitis, “Stochastic rounding: implementation, error analysis and applications,” Royal Society Open Science , vol. 9, no. 3, p. 211631, 2022. [16] J. K. Salmon, M. A. Moraes, R. O. Dror, and D. E. Shaw, “Parallel random numbers: As easy as 1, 2, 3,” in Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis (SC) , 2011, pp. 1–12. [17] J. Bradbury, “Jax: composable transformations of python+ numpy programs,” 2018. [18] A. Yang et al. , “Qwen3 technical report,” arXiv preprint arXiv:2505.09388 , 2025. [19] G. Team et al. , “Gemma 3 technical report,” arXiv preprint arXiv:2503.19786 , 2025. [20] A. Liu et al. , “Deepseek-v3 technical report,” arXiv preprint arXiv:2412.19437 , 2024. [21] M. Fishman, B. Chmiel, R. Banner, and D. Soudry, “Scaling FP8 training to trillion-token LLMs,” in International Conference on Learning Representations (ICLR) , 2025. [22] H. Xi et al. , “Coat: Compressing optimizer states and activations for memory-efficient fp8 training,” in International Conference on Learning Representations , vol. 2025, 2025, pp. 42 989–43 011. [23] M. Wortsman, T. Dettmers, L. Zettlemoyer, A. Morcos, A. Farhadi, and L. Schmidt, “Stable and low-precision training for large-scale vision-language models,” in Advances in Neural Information Processing Systems (NeurIPS) , vol. 36, 2023. [24] B. Chmiel, R. Banner, E. Hoffer, H. B. Yaacov, and D. Soudry, “Accurate neural training with 4-bit matrix multiplications at standard formats,” 
+
+arXiv preprint arXiv:2112.10769 , 2021. [25] H. Xi, C. Li, J. Chen, and J. Zhu, “Training transformers with 4-bit integers,” Advances in Neural Information Processing Systems , vol. 36, pp. 49 146–49 168, 2023. [26] R. Castro et al. , “Quartet: Native fp4 training can be optimal for large language models,” Advances in Neural Information Processing Systems ,vol. 38, pp. 43 552–43 572, 2026. [27] G. Dexter, C. Boutsikas, L. Ma, I. C. Ipsen, and P. Drineas, “Stochastic rounding implicitly regularizes tall-and-thin matrices,” SIAM Journal on Matrix Analysis and Applications , vol. 46, no. 1, pp. 341–369, 2025. [28] J. Chen, Y. Gai, Z. Yao, M. W. Mahoney, and J. E. Gonzalez, “A statistical framework for low-bitwidth training of deep neural networks,” in Advances in Neural Information Processing Systems (NeurIPS) , vol. 33, 2020. [29] K. Ozkara, T. Yu, and Y. Park, “Stochastic rounding for LLM training: Theory and practice,” in International Conference on Artificial Intelli-gence and Statistics (AISTATS) , vol. 258. PMLR, 2025. [30] Y. Lin et al. , “Qserve: W4a8kv4 quantization and system co-design for efficient llm serving,” Proceedings of Machine Learning and Systems ,vol. 7, 2025. [31] S. Han, J. Pool, J. Tran, and W. Dally, “Learning both weights and connections for efficient neural network,” Advances in neural information processing systems , vol. 28, 2015. [32] S. Han et al. , “EIE: Efficient inference engine on compressed deep neural network,” in ACM/IEEE 43rd Annual International Symposium on Computer Architecture (ISCA) . IEEE, 2016, pp. 243–254. [33] M. Mikaitis, “Stochastic rounding: Algorithms and hardware accelerator,” in 2021 International Joint Conference on Neural Networks (IJCNN) .IEEE, 2021, pp. 1–6. [34] NVIDIA Corporation, “Parallel thread execution ISA, release 9.0,” https: //docs.nvidia.com/cuda/parallel-thread-execution/, 2025, instruction cvt ,stochastic rounding mode .rs .[35] E.-M. El Arar, M. Fasi, S.-I. Filip, and M. Mikaitis, “Probabilistic error analysis of limited-precision stochastic rounding,” SIAM Journal on Scientific Computing , vol. 47, no. 5, pp. B1227–B1249, 2025. [36] A. Fitzgibbon and S. Felix, “On stochastic rounding with few random bits,” in IEEE 32nd Symposium on Computer Arithmetic (ARITH) , 2025, pp. 133–140. [37] G. Yuan et al. , “You already have it: A generator-free low-precision dnn training framework using stochastic rounding,” in European Conference on Computer Vision . Springer, 2022, pp. 34–51. [38] R. M. Gray and T. G. Stockham, “Dithered quantizers,” IEEE Transac-tions on Information Theory , vol. 39, no. 3, pp. 805–812, 1993. [39] S. Wiedemann, T. Mehari, K. Kepp, and W. Samek, “Dithered backprop: A sparse and quantized backpropagation algorithm for more efficient deep neural network training,” in 2020 IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops (CVPRW) . IEEE, 2020, pp. 3096–3104. [40] A. T. Suresh, Z. Sun, J. Ro, and F. Yu, “Correlated quantization for distributed mean estimation and optimization,” in International Conference on Machine Learning . PMLR, 2022, pp. 20 856–20 876. [41] K. Ethayarajh, “How contextual are contextualized word representations? Comparing the geometry of BERT, ELMo, and GPT-2 embeddings,” in Proceedings of the Conference on Empirical Methods in Natural Language Processing and the International Joint Conference on Natural Language Processing (EMNLP-IJCNLP) , 2019, pp. 55–65. [42] G. Xiao, J. Lin, M. Seznec, H. Wu, J. Demouth, and S. Han, “Smoothquant: Accurate and efficient post-training quantization for large language models,” in International conference on machine learning .PMLR, 2023, pp. 38 087–38 099. [43] J. Lin et al. , “AWQ: Activation-aware weight quantization for on-device LLM compression and acceleration,” in Proceedings of Machine Learning and Systems (MLSys) , vol. 6, 2024, pp. 87–100. [44] M. Nagel, M. v. Baalen, T. Blankevoort, and M. Welling, “Data-free quantization through weight equalization and bias correction,” in 
+
+Proceedings of the IEEE/CVF international conference on computer vision , 2019, pp. 1325–1334. [45] I. Loshchilov and F. Hutter, “Decoupled weight decay regularization,” 
+
+arXiv preprint arXiv:1711.05101 , 2017. [46] C. Raffel et al. , “Exploring the limits of transfer learning with a unified text-to-text transformer,” Journal of machine learning research , vol. 21, no. 140, pp. 1–67, 2020. [47] S. Rajbhandari, J. Rasley, O. Ruwase, and Y. He, “ZeRO: Memory optimizations toward training trillion parameter models,” in SC20: International Conference for High Performance Computing, Networking, Storage and Analysis , 2020, pp. 1–16. [48] M. Shoeybi, M. Patwary, R. Puri, P. LeGresley, J. Casper, and B. Catan-zaro, “Megatron-lm: Training multi-billion parameter language models using model parallelism,” arXiv preprint arXiv:1909.08053 , 2019. [49] P. Barham et al. , “Pathways: Asynchronous distributed dataflow for ml,” 
+
+Proceedings of Machine Learning and Systems , vol. 4, pp. 430–449, 2022. [50] T. Dao, D. Y. Fu, S. Ermon, A. Rudra, and C. R´ e, “FlashAttention: Fast and memory-efficient exact attention with IO-awareness,” in Advances in Neural Information Processing Systems (NeurIPS) , vol. 35, 2022.

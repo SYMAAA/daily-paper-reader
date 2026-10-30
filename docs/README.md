@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-29</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-30</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 1 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 10 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>1</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>0</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>3</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>7</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-29 23:45:45 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-30 23:28:40 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读1篇8.0分论文，聚焦视频大语言模型免训练推理加速。最值得看的是其系统梳理的加速方法、权衡取舍与评估框架。普通读者可先关注这些方法在延迟与精度间的取舍，再结合实际场景选择加速策略。</p>
+<p>今日筛选10篇论文，精读3篇、速读7篇，重点集中在量化与推理加速。最值得关注的是Hessian引导的统一训练后量化框架（9.0分）和视频大模型免训练推理加速综述（8.0分）。普通读者可先看这两篇精读，再按需了解VLA混合精度量化与低精度线性递归的速读内容。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">1 篇</strong>
+    <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Training-Free Inference Acceleration for Video Large Language Models: Methods, Trade-offs, and Evaluation">Training-Free Inference Acceleration for Video Large Language Models: Methods, Trade-offs, and Evaluation</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="A Unified Hessian-Guided Framework for Post-Training Quantization">A Unified Hessian-Guided Framework for Post-Training Quantization</span></li><li><span class="dpr-home-dashboard-paper-title" title="Training-Free Inference Acceleration for Video Large Language Models: Methods, Trade-offs, and Evaluation">Training-Free Inference Acceleration for Video Large Language Models: Methods, Trade-offs, and Evaluation</span></li><li><span class="dpr-home-dashboard-paper-title" title="Don&#x27;t Ask the LLM: Visual Token Pruning with Spectral Structure and Semantic Relevance">Don&#x27;t Ask the LLM: Visual Token Pruning with Spectral Structure and Semantic Relevance</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>3</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">0 篇</strong>
+    <strong class="dpr-home-dashboard-count">7 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p class="dpr-home-dashboard-empty">今日暂无推荐。</p>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Quantize by Doing: Task-Guided Mixed-Precision Quantization of Vision-Language-Action Models">Quantize by Doing: Task-Guided Mixed-Precision Quantization of Vision-Language-Action Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="LinQuant: Functional Invariances for Low-Precision Linear Recurrences">LinQuant: Functional Invariances for Low-Precision Linear Recurrences</span></li><li><span class="dpr-home-dashboard-paper-title" title="Extreme Compression of Per-Layer Embeddings via Cross-Layer Latent Vector Quantization">Extreme Compression of Per-Layer Embeddings via Cross-Layer Latent Vector Quantization</span></li></ul>
   </div>
-
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">el <strong>7</strong></span></div>
 </section>
 </div>
 
