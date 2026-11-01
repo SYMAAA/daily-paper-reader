@@ -1,0 +1,481 @@
+Title: DCKV: Learned Transform Coding of the Prompt KV Cache in Hybrid Language Models
+
+URL Source: https://arxiv.org/pdf/2610.36950v1
+
+Published Time: Wed, 28 Oct 2026 01:07:54 GMT
+
+Number of Pages: 21
+
+Markdown Content:
+# DCKV: Learned Transform Coding of the Prompt KV Cache in Hybrid Language Models 
+
+Egor Maximov 1 Aleksei Merkelov 1 Vasiliy Alekseev 1 Ivan Krivorotov 1
+
+Valentin Beliaev 1 Nikita Arsenin 2 Dmitry Bocharov 2 Aleksei Goncharov 11MIL Team 2DAIMLD 
+
+Abstract 
+
+Hybrid language models keep a key–value (KV) cache only in their few full-attention lay-ers, but this cache is still the part of a prompt’s state that grows with the prompt and that must be stored or moved to reuse it. We present DCKV, a differentiable codec for the KV cache and the first KV-cache codec that is trained end to end. Its transform, its quantizer and its entropy models, which are conditioned on the prompt tokens and on already decoded neighbouring positions, are optimized together against the frozen language model, both for the code length that the entropy models assign and for the change of the model’s output. On Qwen3.5-2B, DCKV stores a compressed to-ken in more than 55 times fewer bytes than bf16 at a loss of at most 1.8 points on three long-context benchmarks, and in more than 100 times fewer bytes at a loss of at most 3.6 points. 
+
+1 Introduction 
+
+Reusing the key–value (KV) cache of a long prompt saves its prefill, which dominates the time to the first token on long inputs. To reuse prompt caches, serving systems keep them outside GPU memory and move them between devices and ma-chines [30, 31]. Because such a cache is written once and read one or more times, a codec for it can afford entropy coding. What matters is the number of stored bytes at a given answer quality [43]. Recent hybrid models interleave a few full-attention layers with linear-attention or state-space layers [28, 39]. In Qwen3.5-2B, 6 of the 24 lay-ers use full attention, and the other 18 are Gated DeltaNet layers [46] with a recurrent state of fixed size, 9.84 MiB per request. Although the KV cache is small, 12,288 bytes per token in bf16, it is still the only part of the state that grows with the prompt, to 48 MiB at 4K tokens and 1.5 GiB at 128K. We judge a codec by the memory of a stored request, recurrent state included. KV cache transform coding (KVTC) [43] decor-relates keys and values with PCA, allocates bits by dynamic programming and applies a general-purpose lossless coder. Its transform and its bit allocation minimize the reconstruction error of the cache and do not see the output of the model. Learned image and video codecs train the transform and the quantizer on a rate–distortion objective [4] and condition the entropy model on what the de-coder already has [5, 18]. For a language model, the natural distortion is the change of its output distribution, which some methods that compress the cache for decoding already use to learn cache projections [29]. We present DCKV, a Differentiable Codec for the KV cache. It is a learned codec for the stored prompt cache of a hybrid model and the first KV-cache codec whose transform, quantizer and en-tropy models are trained end to end. Our contribu-tions are: • A codec with one joint transform for the keys and values of all attention layers, linear with a small nonlinear correction, with a learned quantization step for each component and GPU rANS coding, trained against the frozen model on the code length plus the KL diver-gence of the output (§3). • Conditional entropy models that predict each code from the embedding of its token and from already decoded neighbouring tokens, trained together with the transform. With the correction they remove 12–16% of the bytes at the same quality; fitted in closed form to a codec that is already trained, they give a simi-lar saving on RULER 4K without retraining (§3.4, §5.2). • An evaluation on Qwen3.5-2B with paired per-task comparisons and a memory account-ing that separates the state of a request from 1arXiv:2610.36950v1 [cs.LG] 27 Oct 2026 the codec weights (§4, §5). Over three rates, DCKV needs 72% fewer bytes than KVTC at equal score on RULER 4K and 62% fewer on LongBench. At prompts of 4K to 11K tokens the recurrent state takes about three quarters of the memory of a stored request. A smaller payload then reduces the request memory by a much smaller fraction than the stored cache. At 32K tokens, where the payload of DCKV is more than a third of the request mem-ory, DCKV scores 6.5 points higher than KVTC at about the same request memory (§5.3). 
+
+2 Related Work 
+
+Hybrid models. Hybrid models replace most at-tention layers with layers whose state does not grow with the context, such as Mamba layers in Jamba [28] or Gated DeltaNet layers [46] in Qwen3.5 [39]. Reusing a prompt in such a model needs both the attention cache and a snapshot of the recurrent state [37]. The recurrent state has a fixed size and can be compressed by its own means, for example by quantization to a few bits [12], while the attention cache grows with the prompt and holds what the model must retrieve exactly [1]. DCKV compresses the attention cache and keeps the recurrent state exact, so methods for the recur-rent state can be used together with it. 
+
+KV cache compression for decoding. Most methods shrink the cache while the model de-codes, by evicting tokens [27, 48], by quantizing keys and values [20, 32], by projecting them to a lower rank [10, 29], or by sharing them across layers [9, 11]. Some of them learn their projec-tion or their selection through the output of the model [29, 41]. All of them keep a cache of fixed width that attention can read directly, and this re-quirement rules out codes of variable length [15]. Their cache size is set by a design choice, such as a rank, a bit width or a number of tokens, and the statistical redundancy inside that width stays in the cache. Because a stored cache is read only when its prompt is reused, an entropy coder can remove this redundancy, also after eviction or rank reduction. 
+
+Learned compression. Learned image codecs train a transform, a quantizer and an entropy model together on the rate plus λ times the dis-tortion [3, 4]. Their entropy model is conditioned on information that the decoder already has, a side latent [5] or already decoded latents, which the checkerboard order decodes in parallel [18]. Video codecs add conditioning on the previous frame and serve several rates with one model [25, 26]. The same recipe has been used for intermediate features in split inference, where a bottleneck with a learned prior is trained into a vision model [34]. For lan-guage models, an analysis of split transformer in-ference trains small models such as GPT-2 Small together with a codec for one hidden state [13]. In these works the network is trained together with its codec. A codec for the KV cache of a deployed model must work with a model that is already trained, on an input that grows with the prompt. DCKV is trained against the frozen model and works with a released model as it is. The same objective could also be added to pre-training. 
+
+Entropy-coded storage of KV caches. Codecs for a stored or transferred cache do use an entropy coder, and they differ in what comes before it. Some quantize the cache directly or after a fixed rotation and code it with arithmetic, Huffman or rANS codes, under distributions that are profiled offline or fixed [23, 31, 44]; KVCodec uses a hard-ware video codec [35]. Others first remove the correlation in the cache, by PCA with bit alloca-tion in KVTC [43], by prediction from other layers or heads [42, 47], or by bit allocation from rate– distortion theory [50]. Codec-Gauge comes closest to a learned codec, as it trains channel transforms around an existing codec with a smooth proxy of the rate [24]. In all of them the probability model is fixed or profiled, and none trains its transform, quantizer and entropy model through the length of the code and the output of the model. To our knowl-edge, DCKV is the first KV-cache codec that does, and its entropy models also use what the decoder of a stored prompt has, the prompt tokens and the already decoded neighbours. 
+
+3 Method 
+
+3.1 What is compressed 
+
+DCKV compresses the attention cache of a pre-filled prompt once and restores it completely be-fore decoding (Figure 1); the recurrent state is kept exact. As in KVTC, the first 4 and the last 128 cache positions stay in bf16, and the other posi-tions form the compressed region T . For a to-ken t ∈ T we stack the keys and values of all 
+
+L = 6 attention layers into one row xt ∈ Rd, with 
+
+d = 2 LHd h = 6144 for H = 2 key–value heads 2xt Encoder                        
+
+> (xt−m)We+ge(xt−m)
+> Quantizer
+> round( yt,k /∆k)rANS encode / decode Decoder
+> m+ ˜ ytWd+gd(˜ yt)ˆxt
+> ytcodes qtqt
+> Embedding
+> e(wt)of the prompt token Token model, even positions
+> μt=e(wt)AB +c
+> Context model, odd positions
+> μtfrom ˜yt−1,˜yt+1 and e(wt)
+> Laplace mean
+> μt,k and scale bkof every code
+> probability of every code decoded codes of the two neighbouring tokens trained end to end entropy coding frozen language model
+
+Figure 1: DCKV. Top: the cache row xt of a token is transformed, quantized and entropy-coded once after prefill, and restored once before decoding from its dequantized coefficients ˜yt = qt ⊙ ∆. Bottom: the conditional models tell the entropy coder the mean and the scale of every code from what the decoder already has: the prompt token and, at odd positions, the decoded codes of the two neighbouring tokens. 
+
+of dimension dh = 256 . To make the row inde-pendent of the absolute position, we take the keys before the rotary position embedding (RoPE) and apply it again after decompression. 
+
+3.2 Transform and quantization 
+
+An encoder maps a row to n = 2048 coefficients, and a decoder maps the quantized coefficients back: 
+
+yt = ( xt − m) We + ge(xt − m),qt,k = round( yt,k /∆k) , ˜yt = qt ⊙ ∆,
+
+ˆxt = m + ˜ yt Wd + gd(˜ yt), (1) where m is the mean row of the calibration data, 
+
+We ∈ Rd×n and Wd ∈ Rn×d are matrices, and 
+
+∆ ∈ Rn>0 holds one quantization step per compo-nent. The matrices start from the leading n prin-cipal directions V of calibration rows, We = V
+
+and Wd = V ⊤, with equal steps. Before training, the codec is PCA with a uniform quantizer, which we call the untrained joint basis. Unlike KVTC, which keeps one basis for the keys and one for the values, DCKV uses a single basis for both and for all layers. The nonlinear correction ge is a network with one hidden layer of 256 units and a GELU, and gd mirrors it on the decoder side; the last layer of each starts at zero, so training starts from the linear transform. We call a codec without the cor-rection and with the static entropy model of §3.3 a linear codec. The linear codec from an earlier training run is the main ablation. A component whose scale in units of its step, βk in Eq. (2), is below 0.05 is switched off and is neither stored nor reconstructed. 
+
+3.3 Entropy coding 
+
+Each code qt,k is written with rANS [14, 17]. The static entropy model is a zero-mean Laplace distri-bution per component, integrated over the quanti-zation cell: 
+
+P (qt,k ) = Fβk
+
+ qt,k + 12
+
+ − Fβk
+
+ qt,k − 12
+
+ , (2) where Fβ is the Laplace distribution function with scale βk = bk/∆k, and bk starts at the mean abso-lute coefficient on calibration rows. Codes beyond 
+
+±127 are escaped and stored separately, at 64 bits each. We use the GPU rANS of the torch-ans 
+
+library 1 with 15-bit frequency tables and inter-leaved streams of 16,384 symbols. On held-out text the stored payload is 5% (linear codec) and 17% (DCKV) above the code length that the trained entropy models expect (Appendix C). 
+
+3.4 Conditional entropy models 
+
+The static model ignores what the decoder already knows. DCKV replaces it with two conditional models, which shift the Laplace distribution of each code by a predicted mean. 
+
+Token-conditioned model. The decoder knows the prompt tokens, because a request that reuses a stored prompt cache contains the prompt text. We do not count the token ids in the payload (as 4-byte integers they would add 1–5% at our rates). The model predicts the coefficients of to-ken t from the input embedding e(wt) of its to-ken, μt = e(wt) AB + c, with A ∈ R2048 ×r and 
+
+> 1https://github.com/worldlife123/torch_ans
+
+3B ∈ Rr×n. DCKV uses the full r = 2048 , al-though a smaller r would save weights. The resid-ual has a Laplace distribution with one trained scale per component. The code is written as the symbol 
+
+qt,k − round( μt,k /∆k) under one of 576 precom-puted tables (0.84 MiB), one for each pair of 64 levels of the residual scale and 9 offsets of the frac-tional part of the predicted mean. Encoder and de-coder select the same table as long as they compute the same predictions; all our evaluations encode and decode in the same process (see Limitations). 
+
+Checkerboard context model. The codes of neighbouring tokens are correlated, but a model that predicts every token from the one before it has to decode the tokens one by one. We instead split the positions of the compressed region into even and odd ones, the one-dimensional form of the checkerboard order of image codecs [18]. Even po-sitions are coded first, with the token-conditioned model alone. Odd positions are coded second, when both of their neighbours are already decoded. A linear map of rank 1024 predicts the mean of the codes of an odd position from the dequantized coefficients of its two neighbours and from the em-bedding of its own token. Each pass is parallel over tokens, so a cache is decoded in two parallel steps for any length. 
+
+3.5 Rate–distortion training 
+
+We train We, Wd, ge, gd, ∆ and the entropy models against the frozen language model; m stays fixed. A training sequence has a prompt of P = 4096 to-kens, prefilled once without gradients, and a contin-uation of C = 256 tokens. The compressed region of the prompt passes through the codec, and the model reads the continuation twice, once over the exact cache, which gives the reference next-token distributions pi, and once over the reconstructed cache, which gives ˆpi. The loss is 
+
+L = R
+
+|T | + λ 1
+
+C
+
+> C
+
+X
+
+> i=1
+
+KL( pi ∥ ˆpi) , (3) where R is the number of bits of the region under the conditional models (under Eq. (2) for the linear codec) and the KL divergence is in nats. Because the rate is measured under the conditional models, the transform learns to leave to the codes what these models cannot predict. The conditional models start from a closed-form fit to the untrained codec, and several codecs train in one loop on shared pre-fills. Rounding has a zero gradient almost everywhere. The usual proxy adds uniform noise u ∼ U (− 12 , 12 )
+
+to yt,k /∆k in both terms of the loss [4]. For a component with βk ≤ 0.2, rounding sets more than 90% of the coefficients to zero. Because the noisy coefficients still carry their signal to the de-coder during training, we expect the KL term to underestimate the distortion of the real codec. The noise-based rate, in turn, overestimates the entropy of the rounded code by a factor of 1.47 at βk = 0 .2
+
+and 5.66 at βk = 0 .1 (Appendix A). We therefore use mixed quantization [36], which computes the rate on the noisy coefficient and reconstructs from the rounded coefficient with a straight-through gra-dient [7, 45]. This estimator can degrade nonlinear transforms at low rates [3]; our correction is trained with it and gains most at low rates (Appendix B). A codec trained with one λ serves one rate. Two cheaper ways to change the rate, a factor on all steps of a trained codec and one codec trained for a range of λ, cost bytes or quality (Appendix B). 
+
+3.6 Memory accounting 
+
+The request memory is what a stored request needs besides the model: the payload, the 132 uncom-pressed positions (1.55 MiB) and the recurrent state (9.84 MiB); for the uncompressed model, the full attention cache and the same recurrent state. Since codec weights are loaded once with the model and shared by all requests, we count them as model weights for all codecs. We report them separately: 176 MiB of fp32 parameters for DCKV, about 5% of the weights of the 2B model, 96 MiB for the linear codec and 10–20 MiB for KVTC. Peak GPU memory grows by 182 MiB with DCKV and by 102 MiB with the linear codec (Appendix F). 
+
+4 Experimental Setup 
+
+Model and benchmarks. We use Qwen3.5-2B [39] in bf16 with greedy decoding, one request at a time, with Hugging Face Transformers on one A100 40GB GPU; generative benchmarks use the chat template in non-thinking mode. RULER [21] at 4K tokens has 13 tasks, 1,287 samples and a mean prompt of 3,742 tokens, and we score it by to-ken recall, the fraction of the words of the reference answer found in the generated answer. RULER at 32K tokens has the same 13 tasks, 1,297 samples and its own uncompressed reference. From Long-Bench [2] we use 18 of the 21 tasks, with a mean prompt of 10.8K tokens and a re-implementation 4of the official metrics. We leave out LCC and RepoBench-P, on which no run of our codecs, of KVTC or of the uncompressed model scores more than 4.4 points, and SAMSum, on which, as on RepoBench-P, every run of our codecs and of KVTC scores above the uncompressed reference (31 and 30 runs; Appendix H). If we include all 21 tasks (20 for DCKV at λ = 5 ·10 4), every loss is 0.3–1.0 points smaller and the order of the methods does not change. MMLU [19] has 57 subjects, 5-shot, scored by the likelihood of the answer options, with a mean prompt of 620 tokens. Appendix E gives two benchmarks with shorter prompts, GPQA Diamond and IFEval. 
+
+Baselines. We found no official implementation of KVTC [43]. We start from a public proof of concept 2, which allocates bits greedily, and replace this allocation with the dynamic programming of the paper. At 16 × the greedy allocation loses 13.0 points on RULER 4K, and the dynamic program-ming loses 0.53. Our KVTC uses two PCA bases of rank 1024, for the keys before RoPE and for the values of all attention layers, bit allocation for a nominal compression ratio, and DEFLATE. Its ratios of 16 ×, 24 × and 32 × give 627, 410 and 304 bytes per token on RULER 4K. We allow all widths from 0 to 8 bits. Restricting the code widths to 0, 2, 4 and 8 bits, the widths closest to the data types of the KVTC paper, saves 6–10% of the bytes at 8× and 16 × with a slightly smaller loss, but at 
+
+32 × it loses 7.2 points on RULER 4K instead of 3.9. xKV [11], a cache compression method for decoding, projects the keys and values of each pair of adjacent attention layers onto a shared low-rank basis from a singular value decomposition; we use rank 192 for keys and 288 for values. xKV com-putes the basis for each prompt, so we count the basis (2.8 MiB) in the request memory and in the payload, together with the 16-bit coefficients of all prompt tokens. The ablations use the trained linear codec (§3.2) and two untrained codecs with the quantizer and coder of DCKV. One keeps KVTC’s separate key and value bases with one uniform step (separate bases ), and the other is the untrained joint basis .
+
+Training. The codecs of Table 1 start from a joint PCA basis with all steps at 1.0. The basis comes from up to 200K token positions of 48 cal-ibration documents of 1K to 16K tokens each, 32 
+
+> 2https://github.com/bet0x/kvtc-poc
+
+of web text (FineWeb) and 16 of mathematical reasoning (OpenR1-Math). The same documents calibrate KVTC. They train on FineWeb-Edu [38] with AdamW [33] on two A100 GPUs for 1B to-kens. DCKV at λ = 3 ·10 5 trains in one loop with its three ablations (§5.2), which took 33.9 hours. DCKV at λ = 10 5 and 5·10 4 and the codec without additions (no correction and no conditional models) at 10 5 train in a second loop with the same recipe, which took 25.9 hours. The linear codecs of Table 1 come from an earlier run of three codecs, which took about 17 hours (Appendix C). A run with the noise proxy used λ ∈ { 3·10 4, 10 5, 3·10 5}, and we report its checkpoints at 0.7B tokens. 
+
+Comparisons. A score change is the paired dif-ference of benchmark means over the tasks that both runs share, reported with the number of tasks 
+
+n. For two codecs we also count the tasks on which the first is better, equal and worse (W/T/L) and ap-ply a two-sided sign test over the tasks that differ; Table 8 in Appendix D lists these statistics. The evaluation is deterministic, and repeated launches of a configuration, also on two versions of the eval-uation code and on two GPUs in parallel, give iden-tical scores on every task. The only uncertainty in a difference between two runs comes from the finite numbers of samples and tasks; two uncom-pressed runs with about 50 and 100 samples per task differ by 0.09 points on the RULER 4K mean and by up to 4 points on single tasks. For two rate– quality curves we also give the Bjøntegaard delta rate (BD-rate) [8], the mean difference of the log payload at equal score over the range of scores that both curves cover, in percent. With three to five points per curve, we interpolate linearly and read the value as an estimate [6]. Bytes per token count the compressed region only. 
+
+5 Results 
+
+5.1 Quality and memory 
+
+Table 1 gives the payload and the score change of every run, and Figure 2 plots one against the other. Table 8 in Appendix D gives the paired statistics of the comparisons in this section. At λ = 3 ·10 5, DCKV stores 205 to 221 bytes per token, 56 to 60 times fewer bytes than bf16, and loses 0.56, 1.75 and 0.45 points on RULER 4K, LongBench and RULER 32K. KVTC at 16 ×
+
+loses at most 0.53 points but stores 2.5 to 3.1 times as many bytes, and on LongBench it is 1.44 points better than DCKV ( p=0 .03 ). 5Payload, bytes per token Score change vs. uncompressed, points Method RULER 4K LongBench RULER 32K RULER 4K LongBench MMLU RULER 32K                                                                                          
+
+> n=13 n=18 n=57 n=13
+> Uncompressed 12,288 12,288 12,288 94.54 42.66 59.34 94.25 KVTC, 16 ×627 633 548 -0.53 -0.31 -0.62 -0.02
+> KVTC, 24 ×410 415 356 -1.87 -1.97 -0.99 -2.45 KVTC, 32 ×304 307 263 -3.88 -4.17 -0.93 -6.94 xKV, ranks 192/288 3,667 3,151 –-2.65 -3.73 -0.42 –DCKV, λ=3 ·10 5214 205 221 -0.56 -1.75 -1.10 -0.45
+> DCKV, λ=10 5113 114 122 -1.69 -3.55 -0.87 -2.15
+> DCKV, λ=5 ·10 474 80 83 -4.60 -5.51 -0.65 -6.45
+> Linear codec, λ=3 ·10 5282 273 288 -0.60 -1.25 -0.79 -0.08
+> Linear codec, λ=10 5159 154 163 -2.28 -2.85 -0.83 -2.29 Linear codec, λ=5 ·10 4108 105 111 -5.74 -4.67 -0.78 -6.14
+
+Table 1: Payload (bytes per compressed token) and score change against the uncompressed model. The first row gives absolute scores; n is the number of tasks. Every DCKV and linear-codec row is a codec trained for its λ.Linear codec: no nonlinear correction, static entropy model. Bold: on each long-context benchmark, the runs that no other compressed run beats in both payload and score. Table 12 in Appendix F gives their request memory, and Appendix E the benchmarks with shorter prompts. –: not run. 
+
+The advantage of DCKV grows at stronger com-pression. At λ = 10 5 it stores 113 to 122 bytes per token and scores higher than KVTC at 32 × on all three benchmarks, although KVTC stores 2.2 to 2.7 times as many bytes; the difference is significant on LongBench and RULER 32K. At λ = 5 ·10 4,DCKV does not differ significantly from KVTC at 32 × on any of the three benchmarks and needs about a quarter to a third of its bytes. Over the three rates, DCKV needs 72% fewer bytes than KVTC at equal score on RULER 4K and 62% fewer on LongBench (BD-rate). The trained linear codec, without the correction and the conditional models, already needs less than half the bytes of KVTC at equal score (BD-rate −56% and −55% ). xKV [11] stores 3,667 and 3,151 bytes per token, its basis for the prompt included, and loses 2.65 and 3.73 points on RULER 4K and LongBench. DCKV at λ = 10 5 does not differ significantly from it and needs 96–97% fewer bytes. MMLU has a mean prompt of 620 tokens, and on it every run of DCKV, the linear codec and KVTC loses 0.5 to 1.5 points, whatever its payload, so this benchmark hardly separates the codecs. 
+
+5.2 Where the gains come from 
+
+Table 2 adds the parts of DCKV one at a time. 
+
+Entropy coding instead of bit allocation. We keep KVTC’s separate key and value bases and replace its dynamic-programming allocation and DEFLATE with one quantization step, a Laplace                                                                   
+
+> RULER 4K LongBench Configuration B/tok. Change B/tok. Change KVTC 24 ×410 -1.87 415 -1.97 Separate bases, step 2.0 392 -0.71 389 -1.04 Joint basis, step 2.0 364 -1.30 353 -1.00
+> Joint basis, step 2.7 265 -2.13 ––Trained, noise, λ=3 ·10 5283 -0.71 274 -1.52 Trained, mixed, λ=3 ·10 5282 -0.60 273 -1.25 No additions 245 -0.96 237 -1.73
+> + nonlinear correction 232 -0.71 ––+ trained cond. models 224 -0.59 ––+ both: DCKV 214 -0.56 205 -1.75 Separate bases, step 4.0 182 -9.61 180 -5.35 Joint basis, step 4.0 164 -5.31 ––Trained, noise, λ=10 5160 -2.99 154 -4.51 Trained, mixed, λ=10 5159 -2.28 154 -2.85
+
+Table 2: From KVTC to DCKV: bytes per token and score change. First block: 260–420 bytes per token; second: one run that trains four codecs at λ=3 ·10 5;third: 150–185 bytes. Bold: the fewest bytes and the best score change of each benchmark within a block. 
+
+model and rANS. This gains about one point on RULER 4K and LongBench at a slightly smaller payload. 
+
+Joint basis. One basis for keys and values needs 7–10% fewer bytes than separate bases at the same step. At step 2.0 the scores differ by less than 0.6 points, and at the coarse step 4.0 the joint basis scores 4.3 points higher on RULER 4K, although this difference is not significant. 6128 256 512 1024 2048 
+
+Bytes per compressed token (log scale) 
+
+> −10 −8 −6 −4 −2 0
+> Score change, points
+
+(a) RULER 4K, 13 tasks     
+
+> 128 256 512 1024 2048
+
+Bytes per compressed token (log scale) 
+
+> −10 −8 −6 −4 −2 0
+
+(b) LongBench, 18 tasks 
+
+> KVTC Separate bases Untrained joint basis Linear codec, noise proxy, 0.7B tokens Linear codec, mixed quantization DCKV
+
+Figure 2: Score change against the payload (bytes per compressed token; bf16 takes 12,288). Lines connect the runs of one family. Not shown: xKV (3,151 and 3,667 bytes per token) and, in (a), the linear codec with the noise proxy at λ=3 ·10 4 (79 bytes, −25 .3 points). 
+
+Rate–distortion training. At a similar payload, the trained linear codec at λ = 10 5 scores 3.0 points higher on RULER 4K than the untrained joint basis (159 against 164 bytes per token). Mixed quantization matters at stronger compres-sion. At λ = 10 5 it scores 0.7 and 1.7 points higher than the noise proxy on RULER 4K and LongBench, and it is better on 20 of the 31 tasks and worse on 6. At λ = 3 ·10 5 the two estimators do not differ significantly. 
+
+Correction and trained conditional models. 
+
+One training run of 1B tokens at λ = 3 ·10 5 trains four codecs in one loop from the untrained joint basis. They are a codec without additions, one with the correction, one with conditional models, and DCKV with both. The codec without additions has the form of the linear codec of Table 1 but comes from this run (245 against 282 bytes per token on RULER 4K). DCKV stores 12–14% fewer bytes than the codec without additions on the three bench-marks, and the scores do not differ significantly. On RULER 4K, the correction alone saves 5.5% of the bytes and the conditional models alone 8.7%. In a second run at λ = 10 5, the additions save 16% and 13% of the bytes on RULER 4K and LongBench, and the scores are 1.1 and 0.8 points higher (not significant). Because rounding does not depend on the en-tropy model, conditional models can also be fitted in closed form to a codec that is already trained, and no answer changes. Fitted to the codec without additions at λ = 3 ·10 5, they save 12.5% of the bytes on RULER 4K, as much as the trained addi-512 2K 8K 32K 128K     
+
+> Prompt length, tokens (log scale)
+> 10 30 100 300 1000
+> Request memory, MiB
+> recurrent state alone, 9.84 MiB Uncompressed (bf16) KVTC, 16 ×
+> KVTC, 32 ×
+> DCKV, λ= 3 ⋅ 10 5
+> DCKV, λ= 10 5
+
+Figure 3: Request memory against prompt length, com-puted from the payload per token on RULER 4K. Mark-ers show measured values on RULER 4K, LongBench and RULER 32K (mean prompts of 3.7K, 10.8K and 32.2K tokens). 
+
+tions. Training the additions together with the trans-form gains more at stronger compression. Among codecs trained for a range of λ, DCKV needs 22% fewer bytes at equal score than the codec without additions with fitted models (Appendix B). 
+
+5.3 Similar request memory 
+
+The recurrent state takes 81% of the request mem-ory of DCKV on RULER 4K, 73% on LongBench and 54% on RULER 32K (Figure 3; Tables 11 and 12 in Appendix F). On RULER 4K, KVTC needs at most 12% more request memory than DCKV, and no difference between them is signif-icant. On LongBench and RULER 32K, DCKV scores 2.4 and 6.5 points higher than KVTC at 732 ×, which needs 8% and 7% more request mem-ory. Only KVTC at 16 × is not significantly worse than DCKV there (on LongBench it is 1.44 points better), and it needs 32% and 55% more request memory. At λ = 10 5, DCKV needs 5–22% less request memory than KVTC at 32 × and still scores higher on all three benchmarks. 
+
+5.4 Behaviour by task 
+
+Figure 7 in Appendix H shows the change of ev-ery task. On RULER 4K one question-answering task loses 3.3 points with DCKV and no other task more than 1.3. On RULER 32K, variable tracking loses 4.2 points and the same question-answering task 3.7. On LongBench, passage retrieval loses most, 10.0 points in English and 6.0 in Chinese, against 4.0 and 1.0 with KVTC at 16 × and 11.5 and 12.5 at 32 ×. At λ = 10 5, variable tracking loses most on RULER, 5.8 points at 4K and 11.0 at 32K. Common-word extraction loses 3.4 points at 4K, and a needle with a UUID value loses 3.0 at 4K and 6.0 at 32K. On LongBench, passage retrieval loses 27.0 points in English and 12.5 in Chinese. 
+
+6 Conclusion 
+
+DCKV trains the transform, the quantizer and the conditional entropy models of a codec for the stored prompt cache of a hybrid language model end to end, against the frozen model. On Qwen3.5-2B it stores the cache in about 210 bytes per token, 2.9 times fewer than KVTC at the same loss on RULER 4K, and its advantage grows at stronger compression. Over three rates it needs about a third of the bytes of KVTC at equal score on RULER 4K and LongBench (§5.1). The ablations show that each part adds to this gain, from entropy coding and the joint basis to the training against the output of the model and the conditional entropy models (§5.2). A smaller payload matters most for long prompts, because at moderate lengths the recurrent state takes most of the memory of a stored request; at 32K tokens DCKV scores higher than KVTC at about the same request memory (§5.3). Since the codec is trained against a frozen model, it can serve a released model without changes to its weights. Open questions are whether the results carry over to other hybrid models, how to train one codec for a range of rates without a loss at the upper end, and how to make decoding give identical results on different devices. A model that is pre-trained together with the codec, with the code length of its cache in the loss, may give a cache that compresses even better. 
+
+Limitations 
+
+One model, few tasks. We developed the codec on Qwen3.5-0.8B, but all results are for Qwen3.5-2B, and we did not test other hybrid families. The evaluation is deterministic, but with 13 and 18 tasks many differences between strong codecs are not sig-nificant under the sign test, and we did not compute intervals over samples or correct the p-values for multiple comparisons. We cannot yet say why a few tasks, such as variable tracking and passage re-trieval, lose much more than the others, because we have not analysed the answers sample by sample. 
+
+Rate control. Each rate needs its own codec and its own training run. We also implemented and tested one codec for a range of λ with the mech-anism of variable-rate video codecs [26]. It falls behind the codecs for one λ at the upper end of the range, and we did not find the cause (Appendix B). A factor on the steps of a trained codec changes the rate without training but costs bytes. 
+
+Frozen model. We train the codec for a frozen language model, which lets it work with a released model as it is. Continued pre-training can make a KV cache easier to compress for post-hoc meth-ods [16]. A model that is pre-trained together with the codec, with the code length of its cache in the loss, may also give a cache that compresses better, but we did not have the compute to test it. 
+
+Context length. The codecs were trained on 4K-token prompts and evaluated on prompts of up to 32K tokens. Beyond 32K tokens the curves of Figure 3 are computed, not measured. At 32K tokens the measured payload per token is 3% above that on RULER 4K for DCKV and 12–14% below it for KVTC, so the computed curves overstate the advantage of DCKV. 
+
+Codec weights and peak memory. Because DCKV restores the full bf16 cache before decod-ing, it does not reduce peak GPU memory or the time per output token. Its weights add about 5% to the size of the 2B model, and peak GPU memory grows by about the size of these weights (§3.6). 
+
+Latency. We timed the uncompressed model, KVTC at 16 × and DCKV once, one after an-other on one A100 of a shared node (Table 10, 8Appendix F). With a stored cache, the time to the first token, which includes decompression, is 115 ms for DCKV at 4K tokens and 287 ms at 32K, against 862 and 4,601 ms with the prefill of the uncompressed model. We did not time the com-pression alone, and the time per output token does not change. The time of KVTC on our shared node is not stable, with 6.8 s at 32K in this run and 0.6 s in an earlier one. 
+
+Baselines and evaluation. Our KVTC has one quantization range per component for the whole prompt and no block sizes or data types; the paper chooses them per block of components, and we did not evaluate that variant or compare with the num-bers of the paper. On MMLU every run of DCKV, the linear codec and KVTC loses 0.5–1.5 points whatever its payload. This loss may come from the part of our evaluation harness that runs a com-pressed cache rather than from the compression. On IFEval and on two LongBench tasks that we leave out of the means, every run of our codecs and of KVTC scores above the uncompressed reference (Appendices E and H). We did not find the cause of these offsets. 
+
+Decoding on another device. All our evaluations encode and decode in the same process. Since the conditional models compute their predictions in floating point, decoding on another device needs predictions that are identical bit for bit, for example from integer inference as in DCVC-RT [22]; we have not verified this. 
+
+Acknowledgments 
+
+We used an AI assistant for editing the text and for checking the reported numbers against the experi-ment logs. 
+
+References 
+
+[1] Kirill Afendulev, Alexey Dontsov, Elena Tu-tubalina, and Anton Korznikov. 2026. What Attention Recalls and Recurrence Controls in Hybrid Language Models. arXiv preprint arXiv:2609.04434. [2] Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. 2024. Long-Bench: A Bilingual, Multitask Benchmark for Long Context Understanding. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (ACL) .[3] Johannes Ballé, Philip A. Chou, David Min-nen, Saurabh Singh, Nick Johnston, Eirikur Agustsson, Sung Jin Hwang, and George Toderici. 2021. Nonlinear Transform Coding. 
+
+IEEE Journal of Selected Topics in Signal Processing .[4] Johannes Ballé, Valero Laparra, and Eero P. Simoncelli. 2017. End-to-end Optimized Im-age Compression. In 5th International Con-ference on Learning Representations (ICLR) .[5] Johannes Ballé, David Minnen, Saurabh Singh, Sung Jin Hwang, and Nick Johnston. 2018. Variational image compression with a scale hyperprior. In 6th International Confer-ence on Learning Representations (ICLR) .[6] Nabajeet Barman, Maria G. Martini, and Yuriy Reznik. 2024. Bjøntegaard Delta (BD): A Tutorial Overview of the Metric, Evolution, Challenges, and Recommendations. arXiv preprint arXiv:2401.04039. [7] Yoshua Bengio, Nicholas Léonard, and Aaron Courville. 2013. Estimating or Propagat-ing Gradients Through Stochastic Neurons for Conditional Computation. arXiv preprint arXiv:1308.3432. [8] Gisle Bjøntegaard. 2001. Calculation of Av-erage PSNR Differences between RD-curves. Technical Report VCEG-M33, ITU-T SG16 Q.6 Video Coding Experts Group (VCEG), Austin, Texas, USA. [9] William Brandon, Mayank Mishra, Anirud-dha Nrusimha, Rameswar Panda, and Jonathan Ragan-Kelley. 2024. Reducing Transformer Key-Value Cache Size with Cross-Layer Attention. In Advances in Neural Information Processing Systems 37 (NeurIPS) , pages 86927–86957. [10] Chi-Chih Chang, Wei-Cheng Lin, Chien-Yu Lin, Chong-Yan Chen, Yu-Fang Hu, Pei-Shuo Wang, Ning-Chi Huang, Luis Ceze, Mo-hamed S. Abdelfattah, and Kai-Chiang Wu. 2025. Palu: KV-Cache Compression with Low-Rank Projection. In International Con-ference on Learning Representations (ICLR) .9[11] Chi-Chih Chang, Wei-Cheng Lin, Chien-Yu Lin, Hung-Yueh Chiang, Yash Akhauri, Xilai Dai, Huiqiang Jiang, Yucheng Li, Luis Ceze, Kai-Chiang Wu, and Mohamed S. Abdelfat-tah. 2026. xKV: Cross-Layer KV-Cache Com-pression via Aligned Singular Vector Extrac-tion. In Proceedings of the 43rd International Conference on Machine Learning (ICML) .[12] Hongren Chen and Jiayang He. 2026. Low-Bit Recurrent States in Hybrid Language Models. arXiv preprint arXiv:2609.30950. [13] Anderson de Andrade, Alon Harell, and Ivan V. Baji´ c. 2026. Understanding Rate-Distortion Performance in Distributed Transformer Inference. arXiv preprint arXiv:2601.22002. [14] Jarek Duda. 2013. Asymmetric numeral systems: entropy coding combining speed of Huffman coding with compression rate of arithmetic coding. arXiv preprint arXiv:1311.2540. [15] Samuel Fernández-Menduiña, Amir Ziasha-habi, Eduardo Pavez, Antonio Ortega, and Salman Avestimehr. 2026. Spend Bits Where Queries Look: KV Cache Vector Quantiza-tion with Attention-Preserving Transforms. arXiv preprint arXiv:2608.04074. [16] Yoav Gelberg, Yam Eitan, Michael Bronstein, Yarin Gal, and Haggai Maron. 2026. Training Transformers for KV Cache Compressibility. arXiv preprint arXiv:2605.05971. [17] Fabian Giesen. 2014. Interleaved entropy coders. arXiv preprint arXiv:1402.3392. [18] Dailan He, Yaoyan Zheng, Baocheng Sun, Yan Wang, and Hongwei Qin. 2021. Checker-board Context Model for Efficient Learned Image Compression. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) .[19] Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. 2021. Measuring Massive Multitask Language Understanding. In 9th International Conference on Learning Repre-sentations (ICLR) .[20] Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W. Mahoney, Yakun Sophia Shao, Kurt Keutzer, and Amir Gholami. 2024. KVQuant: Towards 10 Mil-lion Context Length LLM Inference with KV Cache Quantization. In Advances in Neural Information Processing Systems 37 (NeurIPS) .[21] Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shantanu Acharya, Dima Rekesh, Fei Jia, Yang Zhang, and Boris Ginsburg. 2024. RULER: What’s the Real Context Size of Your Long-Context Language Mod-els? In First Conference on Language Model-ing (COLM) .[22] Zhaoyang Jia, Bin Li, Jiahao Li, Wenxuan Xie, Linfeng Qi, Houqiang Li, and Yan Lu. 2025. Towards Practical Real-Time Neural Video Compression. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) .[23] Bo Jiang, Taolue Yang, Youyuan Liu, Cheng-ming Zhang, Xubin He, and Sian Jin. 2025. KVComp: A High-Performance, LLM-Aware, Lossy Compression Framework for KV Cache. arXiv preprint arXiv:2509.00579. [24] Yitao Jiang, Yaoqing Yang, Luyang Zhao, Muhao Chen, and Devin Balkcom. 2026. Codec-Gauge: Learning Compression-Friendly Gauges for Transformer KV Caches. arXiv preprint arXiv:2607.20538. [25] Jiahao Li, Bin Li, and Yan Lu. 2021. Deep Contextual Video Compression. In Advances in Neural Information Processing Systems 34 (NeurIPS) .[26] Jiahao Li, Bin Li, and Yan Lu. 2024. Neural Video Compression with Feature Modulation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) .[27] Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. 2024. SnapKV: LLM Knows What You are Looking for Before Generation. In 
+
+Advances in Neural Information Processing Systems (NeurIPS) .10 [28] Opher Lieber, Barak Lenz, Hofit Bata, Gal Cohen, Jhonathan Osin, Itay Dalmedigos, Erez Safahi, Shaked Meirom, Yonatan Belinkov, Shai Shalev-Shwartz, Omri Abend, Raz Alon, Tomer Asida, Amir Bergman, Roman Glozman, Michael Gokhman, Avashalom Manevich, Nir Ratner, Noam Rozen, and 3 others. 2024. Jamba: A Hybrid Transformer-Mamba Language Model. arXiv preprint arXiv:2403.19887. [29] Bokai Lin, Zihao Zeng, Zipeng Xiao, Siqi Kou, Tianqi Hou, Xiaofeng Gao, Hao Zhang, and Zhijie Deng. 2025. MatryoshkaKV: Adaptive KV Compression via Trainable Or-thogonal Projection. In The Thirteenth Inter-national Conference on Learning Representa-tions (ICLR) .[30] Yuhan Liu, Yihua Cheng, Jiayi Yao, Yuwei An, Xiaokun Chen, Shaoting Feng, Yuyang Huang, Samuel Shen, Rui Zhang, Kun-tai Du, and Junchen Jiang. 2025. LM-Cache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference. arXiv preprint arXiv:2510.09665. [31] Yuhan Liu, Hanchen Li, Yihua Cheng, Sid-dhant Ray, Yuyang Huang, Qizheng Zhang, Kuntai Du, Jiayi Yao, Shan Lu, Ganesh Anan-thanarayanan, Michael Maire, Henry Hoff-mann, Ari Holtzman, and Junchen Jiang. 2024. CacheGen: KV Cache Compres-sion and Streaming for Fast Large Language Model Serving. In Proceedings of the ACM SIGCOMM 2024 Conference .[32] Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu. 2024. KIVI: A Tuning-Free Asymmetric 2bit Quantization for KV Cache. In Proceedings of the 41st In-ternational Conference on Machine Learning (ICML) .[33] Ilya Loshchilov and Frank Hutter. 2019. De-coupled Weight Decay Regularization. In 7th International Conference on Learning Repre-sentations (ICLR) .[34] Yoshitomo Matsubara, Ruihan Yang, Marco Levorato, and Stephan Mandt. 2022. Super-vised Compression for Resource-Constrained Edge Computing Systems. In IEEE/CVF Win-ter Conference on Applications of Computer Vision (WACV) .[35] Liang Mi, Weijun Wang, Jinghan Chen, Ting Cao, Haipeng Dai, and Yunxin Liu. 2026. Ef-ficient Remote KV Cache Reuse with GPU-native Video Codec. In Proceedings of the ACM SIGCOMM 2026 Conference .[36] David Minnen and Saurabh Singh. 2020. Channel-wise Autoregressive Entropy Mod-els for Learned Image Compression. In IEEE International Conference on Image Process-ing (ICIP) .[37] Rui Pan, Zhuang Wang, Zhen Jia, Can Karakus, Luca Zancato, Tri Dao, Yida Wang, and Ravi Netravali. 2025. Marconi: Prefix Caching for the Era of Hybrid LLMs. In Pro-ceedings of Machine Learning and Systems (MLSys) .[38] Guilherme Penedo, Hynek Kydlíˇ cek, Loubna Ben Allal, Anton Lozhkov, Margaret Mitchell, Colin Raffel, Leandro Von Werra, and Thomas Wolf. 2024. The FineWeb Datasets: Decanting the Web for the Finest Text Data at Scale. In Advances in Neural Information Processing Systems (NeurIPS), Datasets and Benchmarks Track .[39] Qwen Team. 2026. Qwen3.5: Towards Na-tive Multimodal Agents. https://qwen.ai/ blog?id=qwen3.5 . Model card: https:// huggingface.co/Qwen/Qwen3.5-2B .[40] David Rein, Betty Li Hou, Asa Cooper Stick-land, Jackson Petty, Richard Yuanzhe Pang, Julien Dirani, Julian Michael, and Samuel R. Bowman. 2024. GPQA: A Graduate-Level Google-Proof Q&A Benchmark. In Confer-ence on Language Modeling (COLM) .[41] Sourjya Roy, Shrihari Sridharan, Surya Sel-vam, and Anand Raghunathan. 2025. KV-CAR: KV Cache Compression using Autoen-coders and KV Reuse in Large Language Models. arXiv preprint arXiv:2512.06727. [42] Alina Shutova, Vladimir Malinovskii, Vage Egiazarian, Denis Kuznedelev, Denis Mazur, Nikita Surkov, Ivan Ermakov, and Dan Alis-tarh. 2025. Cache Me If You Must: Adaptive Key-Value Quantization for Large Language 11 Models. In Proceedings of the 42nd Inter-national Conference on Machine Learning (ICML) .[43] Konrad Staniszewski and Adrian Ła´ ncucki. 2026. KV Cache Transform Coding for Com-pact Storage in LLM Inference. In The Four-teenth International Conference on Learning Representations (ICLR) .[44] Yi Su, Hong Liu, Guanghua Yu, and Jianchen Zhu. 2026. D-Quant: Driftable Entropy Coding for KV Cache Quantization. arXiv preprint arXiv:2609.19880. [45] Lucas Theis, Wenzhe Shi, Andrew Cunning-ham, and Ferenc Huszár. 2017. Lossy Im-age Compression with Compressive Autoen-coders. In 5th International Conference on Learning Representations (ICLR) .[46] Songlin Yang, Jan Kautz, and Ali Hatamizadeh. 2025. Gated Delta Net-works: Improving Mamba2 with Delta Rule. In The Thirteenth International Conference on Learning Representations (ICLR) .[47] Xu Yang, Jiapeng Zhang, Zhiwei Zuo, Yuxin Chen, Feiqiang Sun, Chengguang Xu, Feng Jin, and Zhuo Tang. 2026. AlignPred: Error-Controlled KV Cache Compression via Align-ment and Predictive Coding. arXiv preprint arXiv:2610.17970. [48] Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Ré, Clark Barrett, Zhangyang Wang, and Beidi Chen. 2023. H 2O: Heavy-Hitter Oracle for Efficient Generative Inference of Large Lan-guage Models. In Advances in Neural Infor-mation Processing Systems (NeurIPS) .[49] Jeffrey Zhou, Tianjian Lu, Swaroop Mishra, Siddhartha Brahma, Sujoy Basu, Yi Luan, Denny Zhou, and Le Hou. 2023. Instruction-Following Evaluation for Large Language Models. arXiv preprint arXiv:2311.07911. [50] Fei Zuo, Zikang Zhou, Hao Cong, Xiaoyan Xi, and Ho Fai Leung. 2026. RateQuant: Opti-mal Mixed-Precision KV Cache Quantization via Rate-Distortion Theory. arXiv preprint arXiv:2605.06675. 12 A Bias of the Uniform-Noise Rate Estimate 
+
+Let a coefficient divided by its step follow Y ∼ Laplace(0 , β ), and let U ∼ U (− 12 , 12 ) be independent of it. The density of Z = Y + U is g(z) = Fβ (z + 12 ) − Fβ (z − 12 ), the probability that Eq. (2) assigns to the cell around z. The rate estimated during training is therefore E[− log 2 g(Z)] = h(Z), the differential entropy of Z. The rate of the rounded code Q = round( Y ) is its entropy H(Q) = − P 
+
+> j
+
+Pj log 2 Pj with 
+
+Pj = Fβ (j + 12 ) − Fβ (j − 12 ). A code differs from zero with probability P (|Y | > 12 ) = e−1/(2 β), so for small β the entropy H(Q) vanishes exponentially, while h(Z) decreases only about linearly in β. Table 3 gives both quantities, computed by numerical integration.                           
+
+> βP(Q̸= 0) H(Q)h(Z)h(Z)/H (Q)
+> 1.0 0.607 2.484 2.492 1.00 0.5 0.368 1.560 1.606 1.03 0.2 0.082 0.496 0.730 1.47 0.1 0.007 0.065 0.368 5.66
+> Table 3: Entropy of the rounded code, H(Q), and its uniform-noise estimate, h(Z), in bits, for a Laplace coefficient with scale βin units of the step.
+
+In the training run of the linear codecs, the rate estimated during training exceeds the rate measured on held-out data with real rounding by 45%, 37% and 13% at λ = 5 ·10 4, 10 5 and 3·10 5 (an excess of about 350, 420 and 260 bits per token), and the excess does not shrink with longer training. Many trained scales are in the range where the estimate is biased. In these three codecs, 76%, 65% and 36% of the components have βk < 0.2 (medians 0.11, 0.15 and 0.23), and 43% to 60% of the components of DCKV, depending on the entropy model. Training on the entropy of the rounded code under Eq. (2) would remove this bias; we have not tried it yet. 
+
+B Additional Ablations 
+
+Step multiplier instead of retraining. Scaling all steps of a trained codec by one factor moves it along the rate axis without training. For the linear codec at λ = 3 ·10 5, halving the steps adds 0.51 points on RULER 4K (9/3/1; p=0 .02 ) at 521 against 282 bytes per token, and quartering them scores 0.40 points lower on RULER 4K than halving them (0/9/4) at 762 bytes. The linear codec trained at λ = 10 5 with halved steps scores like the one trained at 3·10 5 (+0 .13 points; 8/1/4) but needs 24% more bytes (350 against 282). Offline, one global factor explains 90–96% of the log-step difference between the three linear codecs (1.45, 1.66 and 2.41, close to step ∝ λ−1/2); the rest is a per-component pattern of ±11–22% that gives the components of small scale relatively coarser steps at stronger compression. One global multiplier cannot reproduce this pattern, which is why retraining at the target λ needs fewer bytes; the encoders and decoders of the three codecs differ by only 1.4–2.4%. For DCKV at λ = 3 ·10 5, halved steps give 433 and 421 bytes per token on RULER 4K and LongBench, 31% and 34% fewer than KVTC at 
+
+16 ×. The loss is 0.28 points on RULER 4K, and on LongBench the score does not differ significantly from the uncompressed model ( +0 .26 ; 10/0/8). Against KVTC at 16 × the difference is +0 .25 (4/7/2) and +0 .57 points (10/1/7). On RULER 32K it also does not differ significantly from the uncompressed model ( +0 .24 ; 5/6/2) at 441 bytes per token, 19% fewer than KVTC at 16 × (+0 .25 ; 4/7/2). It then has the request memory of KVTC at 24 × on RULER 4K and LongBench ( +0 .6% and +0 .4% ) and scores 1.59 points higher on RULER 4K (9/3/1; p=0 .02 ) and 2.24 higher on LongBench (17/0/1; p< 0.001 ). Table 4 and Figure 4 give these runs and those of the codecs for a range of λ below. 
+
+The four codecs of the training run of DCKV. In the run of §5.2 ( λ = 3 ·10 5, 1B tokens, four codecs in one loop), the codec without additions stores 245 bytes per token on RULER 4K, the one with the correction 232 ( −5.5% ), the one with trained conditional models 224 ( −8.7% ) and DCKV 214 ( −12 .8% ); each has fewer bytes than the first on all 13 tasks, and the scores are 0.96, 0.71, 0.59 and 0.56 points below the uncompressed model. Conditional models fitted in closed form to the codec without additions give 214 bytes ( −12 .5% ) with its scores, about as many as DCKV, which stores 0.3% fewer bytes (fewer 13 Payload, bytes per token Score change vs. uncompressed, points Method RULER 4K LongBench RULER 32K RULER 4K LongBench MMLU RULER 32K                                                                          
+
+> n=13 n=18 n=57 n=13
+> Uncompressed 12,288 12,288 12,288 94.54 42.66 59.34 94.25 DCKV, λ=3 ·10 5214 205 221 -0.56 -1.75 -1.10 -0.45 steps ×0.5433 421 441 -0.28 +0.26 -1.34 +0.24 DCKV, range, λ=3 ·10 5211 218 –-1.33 -3.17 ––DCKV, range, λ=10 5118 118 130 -1.94 -3.34 –-2.08 DCKV, range, λ=5 ·10 483 81 88 -4.05 -4.61 –-5.42 Linear codec, λ=3 ·10 5282 273 288 -0.60 -1.25 -0.79 -0.08 steps ×0.5521 511 528 -0.09 -0.04 –+0.16 + fitted models 249 241 253 -0.60 -1.25 –-0.08
+
+Table 4: Ways to change the rate without a codec per rate, in the form of Table 1: all steps of a trained codec halved, conditional models fitted after training, and DCKV trained as one codec for λ ∈ [5 ·10 4, 3·10 5]. Indented rows change the first row of their block without retraining. –: not run. 128 256 512 1024 2048 
+
+> Bytes per compressed token (log scale)
+> −10 −8 −6 −4 −2 0
+> Score change, points
+
+(a) RULER 4K, 13 tasks     
+
+> 128 256 512 1024 2048
+> Bytes per compressed token (log scale)
+> −10 −8 −6 −4 −2 0
+
+(b) LongBench, 18 tasks       
+
+> KVTC Linear codec, mixed quantization DCKV DCKV, λ= 3 ⋅ 10 5, steps ×1 and ×0.5 DCKV, one codec for a range of λ
+> Linear codec, one codec for a range of λ
+
+Figure 4: As Figure 2, for two ways to change the rate without a codec per rate: DCKV with halved steps, and one codec trained for a range of λ, with the additions (DCKV) and without them (linear codec). 
+
+on 11 of 13 tasks) and scores 0.40 points higher (5/6/2; p=0 .45 ). Refitting the trained models to their own transform in closed form gives 3.5% more bytes than the trained models. With halved steps DCKV stores 9.9% fewer bytes than the codec without additions (433 against 481) at the same score ( −0.02 
+
+points). The closed-form fit to the codec with a correction trained from scratch gives more bytes than no conditional models; we treat this as an unresolved problem of the fit and do not report those two runs. On the held-out documents the training loss of Eq. (3) is 3.1% lower with the correction, 10.0% with the trained models and 12.7% with both, in all 51 checks of the second half of the run. 
+
+One codec for a range of λ. Inspired by variable-rate video codecs [26], we also trained one codec for a range of rates. Every training sequence draws its own λ ∈ [5 ·10 4, 3·10 5], uniformly in ln λ. The transform and the entropy models are shared by all λ, and only the quantization steps depend on it, through three learned step vectors that are interpolated over ln λ. We call such a codec a range codec. Table 5 gives four of them, trained in one run of 1B tokens. Without additions, the range codec matches the three separate linear codecs of Table 1 (BD-rate +0 .8% on RULER 4K). DCKV for the range has a BD-rate of −31 .0% 
+
+against the range codec without additions, −22 .4% against the same codec with conditional models fitted after training, and −69 .9% against KVTC. At λ = 10 5 it is within 0.25 points of DCKV trained for this λ
+
+alone, which needs 3.5–6.3% fewer bytes. At the upper end of the range the additions do not help. At 
+
+λ = 3 ·10 5 on LongBench, DCKV for the range is 1.01 points below the range codec without additions (p=0 .03 ) and 1.42 points below DCKV trained for this λ alone ( p=0 .03 ). Because we did not find the 14 cause, we train one codec for each rate.                                              
+
+> λ=5 ·10 4λ=10 5λ=3 ·10 5
+> Codec B/tok. Change B/tok. Change B/tok. Change No additions 105.7 -6.06 139.9 -3.23 209.5 -1.34 + models fitted after training 87.2 -6.06 117.7 -3.23 207.2 -1.34 Nonlinear correction 90.4 -4.70 124.6 -2.35 215.2 -1.30 Trained conditional models 97.3 -4.22 126.9 -2.50 190.9 -1.02 Both: DCKV 83.4 -4.05 117.6 -1.94 210.7 -1.33 Linear codecs, one per λ107.6 -5.74 158.5 -2.28 282.3 -0.60
+
+Table 5: RULER 4K results ( n=13 ) of four codecs trained in one run of 1B tokens, each for λ ∈ [5 ·10 4, 3·10 5]; λ is chosen at evaluation. B/tok.: bytes per compressed token; Change: points against the uncompressed model. Models fitted after training do not change the scores. Last row: the three linear codecs of Table 1. 
+
+Conditional models on a development codec. Table 6 keeps a codec fixed and changes only its entropy model. The codec was trained with the noise proxy for 0.1B tokens at λ = 10 5; its per-task scores are identical in all six runs ( −3.59 points, n=13 ). Conditioning on the token embedding saves 6.2–6.5% of the payload, and adding the two decoded neighbours of the checkerboard order saves 9.9–14.3%, at 5–65 MiB of extra weights depending on the rank. Longer rANS streams save another 7%; we could not measure their cost in decoding time reliably on our shared node. Fitted to the linear codec of Table 1 (second block), the token model saves 4.3–4.6%, the token and neighbour models 6.8–11.7%, and long streams bring the saving to 15.6%, again with identical scores.                                                      
+
+> Entropy model Rank B/tok. B/tok. change MiB
+> Development codec
+> Static Laplace –178.1 –99.1 Token 2048 166.5 -6.5% 131.9 Token 256 167.1 -6.2% 103.9 Neighbours + token 1024 152.6 -14.3% 163.9 Neighbours + token 256 160.5 -9.9% 139.9 + long streams 1024 141.8 -20.4% 163.9
+> Linear codec, λ=3 ·10 5
+> Static Laplace –282.3 –99.1 Token 2048 269.2 -4.6% –Token 256 270.2 -4.3% –Neighbours + token 1024 249.2 -11.7% –Neighbours + token 256 263.1 -6.8% –+ long streams 1024 238.3 -15.6% –
+
+Table 6: Conditional models fitted in closed form, on RULER 4K: a development codec and the linear codec of Table 1; all rows of a block give identical scores. Long streams: rANS streams of 131,072 symbols. MiB: weights (–: not measured). 
+
+Other variants. Several variants gave little or nothing, and DCKV does not use them. A nonlinear correction or corrections for 16 groups of tokens, added to a trained linear codec for 0.3B more tokens, saved 1.3–2.7% of the bits at about the same training loss. Separate bases of rank 3072 instead of 1024 added 22% to the payload for +0 .21 points on RULER 4K. The following measurements were made offline, on caches of Qwen3.5-2B with the KL divergence of next-token distributions as the quality measure. Coding each attention layer with its own basis, conditioned on the reconstructed previous layers, cost 13–27% more bits than the joint basis at equal KL divergence, because the conditioning layers are themselves reconstructed with error. A mixture of 16 PCA bases, one per group of tokens, used 18–25% fewer bits than one basis but needs about 1.2 GB of weights. On Qwen3.5-0.8B, a learned hyperprior [5] saved at most 1.2% of the payload on top of the token-conditioned model. 15 KVTC closer to the original. In an offline measurement, a KVTC built as in the original paper, with exact dynamic programming, blocks of 1 to 1024 consecutive components, a data type and a 16-bit offset and scale per block, and DEFLATE, needed 30–53% fewer bits at equal KL divergence than KVTC with greedy bit allocation. It was not compared with the KVTC with dynamic-programming allocation that the benchmarks use. 
+
+C Training and Evaluation Details 
+
+Language model Qwen3.5-2B, bf16, frozen Codec size d = 6144 , n = 2048 
+
+Initialization joint PCA of up to 200K token positions from 48 calibration documents (32 from FineWeb, 16 from OpenR1-Math; 1,008 to 16,218 tokens, 200,192 in total; also used for KVTC); all steps 1.0 Training data FineWeb-Edu, a 1M-document subset of its 10B-token sample; 4,096 prompt + 256 continuation tokens per sequence; 100 held-out documents Multipliers λ 3·10 5 (DCKV and its three ablations); 10 5 and 5·10 4 (DCKV), 10 5 (codec without additions); [5 ·10 4, 3·10 5] (range codecs); 5·10 4, 10 5, 3·10 5 (linear codecs); 3·10 4,
+
+10 5, 3·10 5 (noise proxy) Additions correction: one hidden layer of 256 units, GELU, on encoder and decoder, last layer starts at zero (16 MiB); conditional models of rank 2048 (token) and 1024 (context), 32 MiB each, start from their closed-form fit Range codecs three step vectors, interpolated over ln λ; λ of a training sequence uniform in ln λ
+
+Optimizer AdamW without weight decay; peak learning rate 10 −6 for We, W d, 10 −3 for log ∆ 
+
+and the log scales, 10 −4 for the correction and the conditional models; linear warm-up over 10M tokens; cosine decay to zero at 1B tokens; gradient clipping 1.0 per codec Batch 2 A100 40GB GPUs; runs of DCKV: 1 sequence per GPU, 8,704 tokens and four codecs per step (three in the second loop), 114,890 steps; linear codecs: 2 sequences per GPU Length 1B tokens for every run except the noise-proxy run: 33.9 hours (DCKV at 3·10 5 and its three ablations), 25.9 hours (DCKV at 10 5 and 5·10 4, codec without additions at 
+
+10 5), 16.7 hours (three linear codecs), 26.2 hours (four range codecs, Appendix B); the checkpoint of the last step is evaluated; 1.06B tokens (noise; checkpoints at 0.7B evaluated) Entropy coder symbols within ±127 , 15-bit frequency tables, streams of 16,384 symbols; component active if bk ≥ 0.05 ∆ k
+
+Active components DCKV: all 2,048; linear codec: 1,754 of 2,048 at λ = 5 ·10 4 at the end of training (training logs) Decoding greedy; non-thinking chat template for generative benchmarks; MMLU scored by option likelihood LongBench 18 of 21 tasks (without SAMSum, LCC, RepoBench-P); official metrics re-implemented, Chinese text split into characters Answer lengths RULER: 128 tokens (needle tasks), 120 (CWE), 50 (FWE), 32 (QA), 30 (VT); Long-Bench: 32–512 per task; GPQA: 1,000; IFEval: 1,280 
+
+Table 7: Training and evaluation settings. 
+
+Payload and expected code length. The code length that a trained entropy model expects, the entropy of the rounded Laplace distribution with the trained steps and scales, is 1,944 bits per token for the linear codec at λ = 3 ·10 5 and 1,262 bits for DCKV. The stored payload on the held-out FineWeb-Edu documents is 2,048 and 1,475 bits, 5% and 17% more, and on RULER 4K it is 16% and 35% more (282 and 214 bytes per token). The difference combines two effects that we did not measure separately. The codes of a given text differ from what the model expects, more so on RULER than on the training domain, and the coder adds its own cost (the grid of 576 tables for the mean and the scale, escaped codes at 64 bits each, and the end of every rANS stream). 
+
+D Paired Comparisons 
+
+Table 8 gives the paired statistics of the comparisons in §5. ∆ is the paired difference of A minus B in points over the n tasks that both runs share; W/T/L counts the tasks on which A is better, equal and worse; p is the two-sided sign test over the tasks that differ. With 13 to 18 tasks, a difference of 1–2 16 points between strong codecs is often not significant, and we did not correct the p-values for multiple comparisons. 
+
+Comparison (A vs B) Benchmark ∆ n W/T/L p B/tok. A B/tok. B DCKV λ=3 ·10 5 vs uncompressed RULER 4K -0.56 13 3/4/6 0.508 214 –LongBench -1.75 18 0/1/17 <0.001 205 –RULER 32K -0.45 13 3/5/5 0.727 221 –MMLU -1.10 57 15/3/39 0.001 196 –KVTC 16 × vs DCKV λ=3 ·10 5 RULER 4K +0.03 13 5/5/3 0.727 627 214 LongBench +1.44 18 14/0/4 0.031 633 205 RULER 32K +0.43 13 6/5/2 0.289 548 221 DCKV λ=3 ·10 5 vs KVTC 24 × RULER 4K +1.31 13 8/1/4 0.388 214 410 LongBench +0.22 18 13/1/4 0.049 205 415 RULER 32K +2.00 13 9/3/1 0.021 221 356 DCKV λ=3 ·10 5 vs KVTC 32 × RULER 4K +3.33 13 10/0/3 0.092 214 304 LongBench +2.42 18 16/0/2 0.001 205 307 RULER 32K +6.49 13 12/1/0 <0.001 221 263 DCKV λ=10 5 vs uncompressed RULER 4K -1.69 13 1/2/10 0.012 113 –LongBench -3.55 18 4/0/14 0.031 114 –RULER 32K -2.15 13 2/1/10 0.039 122 –MMLU -0.87 57 15/10/32 0.019 101 –DCKV λ=10 5 vs KVTC 32 × RULER 4K +2.19 13 8/2/3 0.227 113 304 LongBench +0.61 18 14/1/3 0.013 114 307 RULER 32K +4.79 13 11/1/1 0.006 122 263 DCKV λ=10 5 vs xKV RULER 4K +0.96 13 4/3/6 0.754 113 3,667 LongBench +0.18 18 11/0/7 0.481 114 3,151 DCKV λ=5 ·10 4 vs uncompressed RULER 4K -4.60 13 1/1/11 0.006 74 –LongBench -5.51 18 0/0/18 <0.001 80 –RULER 32K -6.45 13 0/0/13 <0.001 83 –MMLU -0.65 57 18/7/32 0.065 66 –DCKV λ=5 ·10 4 vs KVTC 32 × RULER 4K -0.72 13 5/1/7 0.774 74 304 LongBench -1.34 18 9/1/8 1.000 80 307 RULER 32K +0.49 13 5/0/8 0.581 83 263 Separate bases, step 2.0 vs KVTC 24 × RULER 4K +1.15 13 9/3/1 0.021 392 410 LongBench +0.93 18 15/0/3 0.008 389 415 Joint vs separate bases, step 4.0 RULER 4K +4.30 13 9/1/3 0.146 164 182 Linear codec λ=10 5 vs untrained joint basis RULER 4K +3.03 13 10/1/2 0.039 159 164 Mixed quantization vs noise proxy, λ=10 5 RULER 4K +0.71 13 7/4/2 0.180 159 160 LongBench +1.66 18 13/1/4 0.049 154 154 Mixed quantization vs noise proxy, λ=3 ·10 5 RULER 4K +0.11 13 5/5/3 0.727 282 283 LongBench +0.27 18 11/0/7 0.481 273 274 DCKV vs no additions, same run, λ=3 ·10 5 RULER 4K +0.40 13 5/6/2 0.453 214 245 LongBench -0.02 18 8/0/10 0.815 205 237 RULER 32K -0.08 13 2/7/4 0.688 221 251 DCKV vs no additions, same run, λ=10 5 RULER 4K +1.13 13 7/5/1 0.070 113 134 LongBench +0.77 18 12/0/6 0.238 114 130 DCKV vs fitted models, same run, λ=3 ·10 5 RULER 4K +0.40 13 5/6/2 0.453 214 214 
+
+Table 8: Paired comparisons. B/tok.: bytes per compressed token of A and B on the benchmark (–: uncompressed). Fitted models: conditional models fitted in closed form after training to the codec without additions of the same run. 
+
+E Benchmarks with Short Prompts 
+
+Table 9 gives MMLU and two benchmarks with shorter prompts, and Figure 5 plots all three against the payload of the same codec on RULER 4K. GPQA Diamond [40] has 198 questions, zero-shot, with a mean prompt of 255 tokens, so one question is 0.5 points. IFEval [49] has 541 prompts with a mean of 68 tokens, scored by prompt-level strict accuracy. On GPQA the runs of Table 9 differ from the uncompressed model by −6.1 to +1 .5 points, with no relation to the payload. IFEval does not test the codec, since 99.3% of its prompts fit into the 132 uncompressed positions. Still, all 29 runs of our codecs and of KVTC score 0.9–1.5 points above the uncompressed reference. The references are not the cause. We ran them again on the final evaluation code, and on RULER 4K, LongBench, MMLU, GPQA and IFEval they are identical to the old ones on every task. The offset comes 17 from the part of our evaluation harness that runs a compressed cache, and we did not find its cause. On RULER, two near-lossless runs (separate bases of rank 3072 at 1,604 and 3,084 bytes per token) differ from the reference by only +0 .03 and −0.01 points. 
+
+Method MMLU GPQA IFEval Uncompressed 59.34 38.38 64.70 KVTC, 16 × -0.62 -3.03 +1.10 KVTC, 24 × -0.99 -1.51 +1.10 KVTC, 32 × -0.93 -1.51 +1.10 xKV, ranks 192/288 -0.42 -2.02 +1.66 DCKV, λ=3 ·10 5 -1.10 +1.52 +1.10 DCKV, λ=10 5 -0.87 -4.54 +1.10 DCKV, λ=5 ·10 4 -0.65 -3.03 +1.29 DCKV, λ=3 ·10 5, steps ×0.5 -1.34 +0.00 +1.47 Linear codec, λ=3 ·10 5 -0.79 -0.50 +1.29 Linear codec, λ=10 5 -0.83 -6.06 +1.10 Linear codec, λ=5 ·10 4 -0.78 -3.03 +1.10 
+
+Table 9: Score change on the benchmarks with short prompts. The first row gives absolute scores. MMLU: 57 subjects; GPQA: 198 questions; IFEval: 541 prompts. 128 256 512 1024 2048 
+
+> Bytes per token on RULER 4K
+> −1.0 −0.8 −0.6 −0.4 −0.2 0.0
+> Change vs. uncompressed, points
+
+(a) MMLU, 57 subjects     
+
+> 128 256 512 1024 2048
+> Bytes per token on RULER 4K
+> −6 −4 −2 0
+
+(b) GPQA Diamond, 198 questions     
+
+> 128 256 512 1024 2048
+> Bytes per token on RULER 4K
+> 0.00 0.25 0.50 0.75 1.00 1.25
+
+(c) IFEval, 541 prompts  
+
+> KVTC Separate bases Linear codec, mixed quantization DCKV
+
+Figure 5: Score change on MMLU, GPQA Diamond and IFEval against the payload of the same codec on RULER 4K. Same families and markers as Figure 2. On IFEval every run scores above the uncompressed reference. 
+
+F Memory and Efficiency 
+
+Table 11 lists the paired comparisons of DCKV and KVTC at similar request memory that §5.3 discusses. Table 12 lists the memory of all runs of Table 1, and Table 10 the time of three of them. Peak GPU memory does not fall with compression, because decoding runs on the restored bf16 cache; for DCKV it grows by 182 MiB and for the linear codec by 102 MiB, about the size of the codec weights. The times come from one timing run of each method, made one after another on one GPU of a shared node. We count codec weights with the model weights, for DCKV and KVTC alike. If they were charged to a single request instead, DCKV, with 176 MiB of weights, would store less than the uncompressed model only from about 15.4K prompt tokens on; its 156 MiB of extra weights over KVTC at 16 × pay off after about 110 stored requests on RULER 4K (1.42 MiB saved per request) and 36 on LongBench (4.37 MiB). 18 RULER 4K (3.7K tokens) RULER 32K (32.2K tokens) Method Store TTFT TPOT Store TTFT TPOT Uncompressed – 862 45.2 – 4,601 42.8 KVTC, 16 × 865 121 45.7 6,333 6,849 44.4 DCKV, λ=3 ·10 5 858 115 44.7 4,445 287 42.1 
+
+Table 10: Time (ms) of one run of each method, made one after another on one A100 of a shared node; means over about 1,300 prompts. Store: prefill and compression when the prompt is stored. TTFT: from the start of generation to the first token; for a compressed run it includes the decompression of the stored cache, for the uncompressed run the prefill. TPOT: time per output token.                                        
+
+> RULER 4K ( n=13 )LongBench ( n=18 )RULER 32K ( n=13 )Method Request, MiB DCKV −KVTC Request, MiB DCKV −KVTC Request, MiB DCKV −KVTC DCKV, λ=3 ·10 512.1 13.5 18.2 KVTC 16 ×13.5 (+11.7%) ∗-0.03 (3/5/5) 17.8 (+32.4%) ∗-1.44 (4/0/14) 28.1 (+55.0%) ∗-0.43 (2/5/6) KVTC 24 ×12.8 (+5.6%) +1.31 (8/1/4) 15.6 (+15.9%) ∗+0.22 (13/1/4) 22.3 (+22.8%) ∗+2.00 (9/3/1) KVTC 32 ×12.4 (+2.5%) +3.33 (10/0/3) 14.5 (+7.8%) +2.42 (16/0/2) 19.4 (+7.0%) +6.49 (12/1/0)
+
+Table 11: DCKV ( λ=3 ·10 5) against KVTC at similar request memory. Request: request memory and its difference from DCKV ( ∗ outside ±10% , the margin within which we treat request memory as comparable; taken relative to KVTC, the differences mark the same pairs). DCKV − KVTC: paired difference in points, with the tasks where DCKV is higher/equal/lower. Codec weights are not included (Table 12).                                                                                                
+
+> Request memory, MiB Weights Peak GPU memory, MiB Method RULER 4K LongBench RULER 32K MiB RULER 4K LongBench RULER 32K Uncompressed (bf16) 54.0 137.7 387.2 0.0 4,035 4,823 7,213 KVTC, 16 ×13.5 17.8 28.1 20.1 4,057 4,846 7,234 KVTC, 24 ×12.8 15.6 22.3 13.6 4,051 4,839 7,228 KVTC, 32 ×12.4 14.5 19.4 10.4 4,047 4,836 7,224 xKV, ranks 192/288 22.9 42.4 –0.0 4,035 4,822 –DCKV, λ=3 ·10 512.1 13.5 18.2 176.1 4,217 5,006 7,394 DCKV, λ=10 511.8 12.5 15.1 176.1 4,217 5,006 7,394 DCKV, λ=5 ·10 411.6 12.2 13.9 176.1 4,190 4,978 7,366 Linear codec, λ=3 ·10 512.4 14.2 20.2 99.1 4,137 4,926 7,314 Linear codec, λ=10 511.9 13.0 16.4 99.1 4,137 4,926 7,314 Linear codec, λ=5 ·10 411.8 12.5 14.8 84.8 4,124 4,912 7,300
+
+Table 12: Memory of the runs of Table 1 on one A100 with one request at a time. Request memory (§3.6) includes the recurrent state (9.84 MiB); for the uncompressed model it also holds the generated tokens (under 1%), and for xKV the bases that it computes for each prompt. Weights: codec weights loaded with the model; Peak: peak GPU memory. LongBench: 18 tasks. Weights of DCKV: fp32 parameters of the final checkpoint; the other weights are as loaded, with coding tables (99.1 MiB for the linear codec, of which 96.0 are parameters, and less at λ=5 ·10 4,which keeps 1,754 of 2,048 components). 
+
+G Additional Figures 
+
+Figure 6 shows the validation rate and KL divergence of the two training runs of the linear codec, measured every 10M tokens on the 100 held-out documents with rounded codes. Most of the drop in rate happens within the first 0.1B tokens; after that it falls by a further 6–10% with mixed quantization and 9–22% with the noise proxy. At 1B tokens and the same λ, the noise-proxy run has a 3–5% lower rate but a higher KL divergence, 0.0172 against 0.0103 at λ = 10 5 and 0.0066 against 0.0056 at λ = 3 ·10 5; at λ = 3 ·10 5 the mixed run keeps about the KL divergence of the untrained codec (0.0056 against 0.0054) at 44% of its rate. 19 0.0 0.2 0.4 0.6 0.8 1.0 
+
+Training tokens, billions 
+
+1000 2000 3000 4000 
+
+> Bits per token (rounded codes)
+
+(a) Validation rate during training 
+
+500 1000 2000 4000 
+
+Bits per token (rounded codes, log scale) 
+
+0.005 0.01 0.02 0.04 
+
+> KL divergence, nats (log scale)
+> untrained
+
+(b) Validation KL against rate 
+
+noise, λ = 3 ⋅ 10 4
+
+noise, λ = 10 5
+
+noise, λ = 3 ⋅ 10 5
+
+mixed, λ = 5 ⋅ 10 4
+
+mixed, λ = 10 5
+
+mixed, λ = 3 ⋅ 10 5Figure 6: Validation during training of the linear codecs, with mixed quantization and with the noise proxy. (a) Rate of rounded codes against training tokens. (b) KL divergence against rate; each curve starts at the untrained codec (diamond), and circles mark the end of training (hollow: noise proxy). 
+
+H Per-Task Results −12.5 −10.0 −7.5 −5.0 −2.5 0.0 2.5 
+
+Change vs. uncompressed, points 
+
+> cwe niah_multikey_3 (UUID) qa_1 vt fwe niah_single_3 (UUID) niah_single_2 niah_single_1 niah_multiquery niah_multivalue niah_multikey_1 niah_multikey_2 qa_2
+
+(a) RULER 4K, 13 tasks 
+
+−10 −5 0 5
+
+Change vs. uncompressed, points 
+
+> passage_retrieval_en passage_retrieval_zh trec hotpotqa multifieldqa_en triviaqa musique multifieldqa_zh 2wikimqa qasper dureader gov_report passage_count narrativeqa multi_news vcsum qmsum lsht
+
+(b) LongBench, 18 tasks 
+
+DCKV, λ = 3 ⋅ 10 5 (214 B/token) DCKV, steps ×0.5 (433 B/token) KVTC, 16 × (627 B/token) KVTC, 32 × (304 B/token) 
+
+Figure 7: Score change per task for DCKV ( λ=3 ·10 5) with its trained steps and with halved steps and for KVTC at 
+
+16 × and 32 × (payloads on RULER 4K). Tasks are sorted by the mean change of the four, the hardest at the bottom. UUID: needles with UUID values. 
+
+Tables 13 and 14 list the change of every task against the uncompressed model. 20 Task Uncompr. DCKV DCKV ×0.5 Linear 3·10 5 Linear 10 5 Linear 5·10 4 KVTC 16 × KVTC 24 × KVTC 32 ×
+
+cwe 96.7 -1.3 -1.1 -1.5 -7.5 -10.7 -2.2 -6.7 -10.8 fwe 89.7 +0.7 -0.3 -1.3 -5.0 -6.7 -4.0 -4.7 -3.0 niah_multikey_1 100.0 +0.0 +0.0 -1.0 -3.0 -1.0 +0.0 +0.0 -1.0 niah_multikey_2 100.0 -1.0 +0.0 -1.0 +0.0 -1.0 +0.0 +0.0 +0.0 niah_multikey_3 100.0 -1.0 +0.0 -1.0 -7.0 -19.0 +0.0 -4.0 -12.0 niah_multiquery 100.0 +0.0 +0.0 +0.0 -0.7 -1.5 +0.0 -0.7 -2.2 niah_multivalue 99.0 +0.3 +1.0 +0.0 -1.0 -2.7 +0.3 -1.2 -3.0 niah_single_1 100.0 +0.0 +0.0 -1.0 -1.0 -1.0 +0.0 -2.0 -4.0 niah_single_2 100.0 +0.0 +0.0 -1.0 +0.0 -3.0 +0.0 -2.0 -5.0 niah_single_3 100.0 -1.0 +0.0 +0.0 -3.0 -13.0 +0.0 +0.0 -5.0 qa_1 82.6 -3.3 -1.3 -0.2 +1.2 -3.6 -2.2 -2.3 -3.0 qa_2 62.3 +0.2 -0.7 +1.4 +1.5 -1.0 +2.3 +3.0 +3.2 vt 98.8 -0.8 -1.2 -1.2 -4.2 -10.4 -1.0 -3.6 -4.6 Mean change, n=13 94.54 -0.56 -0.28 -0.60 -2.28 -5.74 -0.53 -1.87 -3.88 
+
+Table 13: RULER 4K per task: score of the uncompressed model and change of each configuration, in points. DCKV: λ=3 ·10 5; ×0.5: halved steps. cwe: common-word extraction; fwe: frequent-word extraction; niah: needle in a haystack; qa: question answering; vt: variable tracking. The last row is the paired mean change over the 13 tasks. 
+
+Task Uncompr. DCKV DCKV ×0.5 Linear 3·10 5 Linear 10 5 Linear 5·10 4 KVTC 16 × KVTC 24 × KVTC 32 ×
+
+2wikimqa 34.1 -1.7 +1.0 +2.1 -1.3 -4.2 -1.2 -1.0 -2.6 dureader 24.4 -1.1 +0.1 -0.4 -1.5 -1.6 +0.0 -1.4 -2.6 gov_report 30.0 -0.7 +0.3 -0.8 -0.9 -1.1 -0.4 -0.9 -1.7 hotpotqa 46.8 -0.3 +0.4 -0.3 -2.1 -6.2 -2.8 -5.9 -5.5 lcc † 2.0 +1.8 +1.5 +1.5 +1.4 +1.2 +1.0 +1.9 +2.3 lsht 31.0 -4.0 +7.5 -0.5 -1.0 -2.0 +6.5 +5.0 -8.9 multi_news 24.5 -0.2 +0.0 -0.3 -0.5 -0.4 +0.1 -0.3 -0.4 multifieldqa_en 53.5 -1.3 -1.5 -1.7 -2.7 -2.6 -1.1 -2.8 -4.0 multifieldqa_zh 65.3 -1.1 +0.2 +0.5 -2.0 -1.3 -1.6 -1.5 -2.5 musique 30.5 -0.9 -0.1 +0.5 -4.8 -8.5 +0.4 -1.7 -5.8 narrativeqa 22.4 -0.1 +0.5 -0.3 +0.8 -0.1 -1.3 -0.6 +0.0 passage_count 5.5 +0.0 -1.0 -1.0 -0.5 +1.5 +0.5 -1.5 -1.5 passage_retrieval_en 87.0 -10.0 -4.0 -6.5 -21.5 -26.0 -4.0 -4.5 -11.5 passage_retrieval_zh 82.0 -6.0 +4.0 -8.0 -4.5 -19.5 -1.0 -10.5 -12.5 qasper 42.4 -0.1 -1.1 -1.4 -0.5 -2.3 -0.7 -2.6 -1.8 qmsum 21.5 -0.3 -0.1 -0.2 -1.0 -0.1 +0.6 +0.6 -0.1 repobench-p † 0.1 +1.0 +0.5 +0.6 +0.6 +0.5 +1.0 +2.0 +3.0 samsum † 33.2 +3.4 +2.4 +2.2 +3.3 +3.0 +3.2 +2.6 +2.3 trec 70.0 -1.5 -2.0 -2.0 -6.0 -5.5 +1.5 -3.3 -9.0 triviaqa 83.2 -2.3 +0.5 -2.5 -1.4 -3.8 -1.1 -2.3 -4.1 vcsum 13.6 +0.0 +0.0 +0.0 +0.0 -0.4 +0.0 -0.4 -0.4 Mean change, n=18 42.66 -1.75 +0.26 -1.25 -2.85 -4.67 -0.31 -1.97 -4.17 
+
+Table 14: LongBench per task: score of the uncompressed model and change of each configuration, in points. †Left out of all means: LCC and RepoBench-P score near zero for every configuration in our harness, and on SAMSum and RepoBench-P every run of our codecs and of KVTC scores above the uncompressed reference (§4). The last row is the paired mean change over the other 18 tasks. 
+
+21
